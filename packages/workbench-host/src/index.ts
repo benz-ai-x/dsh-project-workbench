@@ -1,0 +1,158 @@
+/** Project Workbench Host authority, Typert Remote, and deterministic scenario seam. */
+
+import { Context, Service } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
+import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import type {
+  SetStatusRequest,
+  SetStatusResult,
+  WorkbenchStatusSnapshot,
+} from './client.ts'
+import type { WorkbenchRepository } from './repository.ts'
+import {
+  noWorkbenchExternalAdapters,
+  randomWorkbenchIds,
+  systemWorkbenchClock,
+  WorkbenchScenario,
+  type WorkbenchClock,
+  type WorkbenchExternalAdapters,
+  type WorkbenchIdGenerator,
+} from './scenario.ts'
+import {
+  SqliteWorkbenchRepository,
+  type WorkbenchJournalMode,
+} from './sqlite-repository.ts'
+
+export type * from './client.ts'
+export type * from './repository.ts'
+export {
+  noWorkbenchExternalAdapters,
+  randomWorkbenchIds,
+  systemWorkbenchClock,
+  WorkbenchScenario,
+} from './scenario.ts'
+export type {
+  WorkbenchClock,
+  WorkbenchExternalAdapter,
+  WorkbenchExternalAdapters,
+  WorkbenchIdGenerator,
+  WorkbenchScenarioOptions,
+} from './scenario.ts'
+export {
+  SqliteWorkbenchRepository,
+  WORKBENCH_SCHEMA_VERSION,
+  WORKBENCH_SQLITE_APPLICATION_ID,
+} from './sqlite-repository.ts'
+export type {
+  SqliteWorkbenchRepositoryOptions,
+  WorkbenchJournalMode,
+} from './sqlite-repository.ts'
+
+export const DEFAULT_WORKBENCH_DATABASE_PATH = '.dsh/project-workbench.sqlite'
+export const DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS = 5_000
+export const DEFAULT_WORKBENCH_MAX_STATUS_LENGTH = 280
+const MAX_BUSY_TIMEOUT_MS = 2_147_483_647
+
+/** Public Loader configuration. Every property has an operational default. */
+export interface Config {
+  readonly databasePath?: string
+  readonly journalMode?: WorkbenchJournalMode
+  readonly busyTimeoutMs?: number
+  readonly maxStatusLength?: number
+}
+
+/** Runtime mirror of {@link Config}; Loader validation happens before activation. */
+export const Config: Schema<Config> = Schema.object({
+  databasePath: Schema.string()
+    .pattern(/^(?=.*\S)[^\0]+$/u)
+    .default(DEFAULT_WORKBENCH_DATABASE_PATH),
+  journalMode: Schema.union(['wal', 'delete', 'truncate', 'persist'] as const).default('wal'),
+  busyTimeoutMs: Schema.number()
+    .step(1)
+    .min(0)
+    .max(MAX_BUSY_TIMEOUT_MS)
+    .default(DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS),
+  maxStatusLength: Schema.number()
+    .step(1)
+    .min(1)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(DEFAULT_WORKBENCH_MAX_STATUS_LENGTH),
+})
+
+interface ResolvedConfig {
+  readonly databasePath: string
+  readonly journalMode: WorkbenchJournalMode
+  readonly busyTimeoutMs: number
+  readonly maxStatusLength: number
+}
+
+/** Optional construction ports used by WorkbenchScenario and focused Host tests. */
+export interface WorkbenchServiceInternals {
+  readonly clock?: WorkbenchClock
+  readonly ids?: WorkbenchIdGenerator
+  readonly repository?: WorkbenchRepository
+  readonly adapters?: WorkbenchExternalAdapters
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Host authority behind the generated `remote.workbench` namespace. */
+    workbench: WorkbenchService
+  }
+}
+
+/** Cordis class plugin owning the singleton status command/query path. */
+export class WorkbenchService extends TypertRemoteService {
+  static inject = []
+  static Config = Config
+
+  /** Highest-level seam shared with all future feature scenarios. */
+  readonly scenario: WorkbenchScenario
+
+  constructor(ctx: Context, config: Config = {}, internals: WorkbenchServiceInternals = {}) {
+    super(ctx, 'workbench')
+    const resolved = resolveConfig(config)
+    const repository = internals.repository ?? new SqliteWorkbenchRepository({
+      databasePath: resolved.databasePath,
+      journalMode: resolved.journalMode,
+      busyTimeoutMs: resolved.busyTimeoutMs,
+    })
+    this.scenario = new WorkbenchScenario({
+      clock: internals.clock ?? systemWorkbenchClock,
+      ids: internals.ids ?? randomWorkbenchIds,
+      repository,
+      adapters: internals.adapters ?? noWorkbenchExternalAdapters,
+      maxStatusLength: resolved.maxStatusLength,
+    })
+  }
+
+  /** Open storage before activation and install the quiescent teardown first. */
+  async *[Service.init](): AsyncGenerator<() => Promise<void>, void, void> {
+    yield () => this.scenario.close()
+    await this.scenario.open()
+  }
+
+  /** Read the current durable projection, or null before the first command. */
+  @Remote
+  snapshot(signal: AbortSignal): Promise<WorkbenchStatusSnapshot | null> {
+    return this.scenario.snapshot(signal)
+  }
+
+  /** Commit a status with optimistic concurrency. */
+  @Remote
+  setStatus(request: SetStatusRequest, signal: AbortSignal): Promise<SetStatusResult> {
+    return this.scenario.setStatus(request, signal)
+  }
+}
+
+function resolveConfig(config: Config): ResolvedConfig {
+  const resolved = Config(config)
+  return {
+    databasePath: resolved.databasePath ?? DEFAULT_WORKBENCH_DATABASE_PATH,
+    journalMode: resolved.journalMode ?? 'wal',
+    busyTimeoutMs: resolved.busyTimeoutMs ?? DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS,
+    maxStatusLength: resolved.maxStatusLength ?? DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
+  }
+}
+
+export default WorkbenchService

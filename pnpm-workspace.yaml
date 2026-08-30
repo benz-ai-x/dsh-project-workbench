@@ -1,0 +1,37 @@
+packages:
+  - packages/*
+  - profiles/*
+
+# Published peer ranges stay honest in each plugin manifest, while this
+# external workspace resolves every audited Harness package to the pinned
+# source checkout.  In particular this also covers pnpm's auto-installed
+# peers, which a root-only devDependency does not override.
+linkWorkspacePackages: true
+
+overrides:
+  '@deepseek-ai/cordis': 'link:../deepseek-harness-baseline/vendor/cordis'
+  '@deepseek-ai/cordis-plugin-include': 'link:../deepseek-harness-baseline/vendor/include'
+  '@deepseek-ai/cordis-plugin-loader': 'link:../deepseek-harness-baseline/vendor/loader'
+  '@deepseek-ai/dsh-app-boot': 'link:../deepseek-harness-baseline/packages/boot/app-boot'
+  '@deepseek-ai/dsh-api-remotes': 'link:../deepseek-harness-baseline/packages/api/remotes'
+  '@deepseek-ai/dsh-base': 'link:../deepseek-harness-baseline/packages/bundle/base'
+  '@deepseek-ai/dsh-client-connection': 'link:../deepseek-harness-baseline/packages/client/connection'
+  '@deepseek-ai/dsh-client-locale': 'link:../deepseek-harness-baseline/packages/client/locale'
+  '@deepseek-ai/dsh-client-store': 'link:../deepseek-harness-baseline/packages/client/store'
+  '@deepseek-ai/dsh-client-test-runtime': 'link:../deepseek-harness-baseline/packages/test-support/client-runtime'
+  '@deepseek-ai/dsh-client-ui-layout': 'link:../deepseek-harness-baseline/packages/client/ui-layout'
+  '@deepseek-ai/dsh-client-ui-primitives': 'link:../deepseek-harness-baseline/packages/client/ui-primitives'
+  '@deepseek-ai/dsh-client-ui-renderer': 'link:../deepseek-harness-baseline/packages/client/ui-renderer'
+  '@deepseek-ai/dsh-client-ui-session': 'link:../deepseek-harness-baseline/packages/client/ui-session'
+  '@deepseek-ai/dsh-client-ui-sidebar': 'link:../deepseek-harness-baseline/packages/client/ui-sidebar'
+  '@deepseek-ai/dsh-client-ui-slots': 'link:../deepseek-harness-baseline/packages/client/ui-slots'
+  '@deepseek-ai/dsh-typert-generator': 'link:../deepseek-harness-baseline/packages/typert/generator'
+  '@deepseek-ai/dsh-typert-loader': 'link:../deepseek-harness-baseline/packages/typert/loader'
+  '@deepseek-ai/dsh-typert-protocol': 'link:../deepseek-harness-baseline/packages/typert/protocol'
+  '@deepseek-ai/dsh-typert-registry': 'link:../deepseek-harness-baseline/packages/typert/registry'
+  '@deepseek-ai/dsh-web-app': 'link:../deepseek-harness-baseline/packages/bundle/web-app'
+  '@deepseek-ai/schemastery': 'link:../deepseek-harness-baseline/vendor/schemastery'
+
+allowBuilds:
+  esbuild: true
+  node-addon-require-builtin: false

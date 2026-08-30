@@ -1,0 +1,37 @@
+{
+  "name": "@benz-ai-x/dsh-project-workbench-bundle",
+  "description": "Ordered DeepSeek Harness profile layer for Project Workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benz-ai-x/dsh-project-workbench.git",
+    "directory": "packages/workbench-bundle"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@benz-ai-x/dsh-project-workbench": "workspace:*",
+    "@benz-ai-x/dsh-project-workbench-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.2.0",
+    "vitest": "^4.1.8"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

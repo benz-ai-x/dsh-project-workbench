@@ -1,0 +1,14 @@
+# Project Workbench's ordered layer over dsh-base and dsh-web-app.
+# Stable row ids let a later profile or DSH_HOME patch replace either face.
+
+- insert:
+    - id: workbench-host
+      name: '@benz-ai-x/dsh-project-workbench'
+      config:
+        databasePath: '.dsh/project-workbench.sqlite'
+        journalMode: wal
+        busyTimeoutMs: 5000
+        maxStatusLength: 280
+
+    - id: workbench-client
+      name: '@benz-ai-x/dsh-project-workbench-client'

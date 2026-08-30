@@ -1,0 +1,10 @@
+node_modules/
+packages/*/lib/
+coverage/
+.dsh/
+.env
+*.tsbuildinfo
+*.tgz
+playwright-report/
+test-results/
+.DS_Store
