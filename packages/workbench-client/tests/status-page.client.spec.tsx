@@ -25,14 +25,44 @@ function ok<T>(value: T): RemoteResult<T> {
   return { ok: true, value }
 }
 
+function receipt(suffix = '1') {
+  return {
+    commandId: `command-${suffix}`,
+    auditEventId: `audit-${suffix}`,
+    outboxId: `outbox-${suffix}`,
+  } as const
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>(res => { resolve = res })
   return { promise, resolve }
 }
 
-async function renderPage(remote: WorkbenchRemote) {
-  const controller = new WorkbenchStatusController(remote)
+type StatusPageRemote = Pick<WorkbenchRemote, 'snapshot' | 'setStatus'>
+  & Partial<Pick<WorkbenchRemote, 'activity' | 'auditIntegrity'>>
+
+async function renderPage(remote: StatusPageRemote) {
+  const controller = new WorkbenchStatusController({
+    snapshot: remote.snapshot,
+    setStatus: remote.setStatus,
+    activity: remote.activity ?? vi.fn(() => Promise.resolve(ok({
+      items: [],
+      nextBeforeSequence: null,
+      integrity: {
+        valid: true,
+        eventCount: 0,
+        headHash: `sha256:${'0'.repeat(64)}`,
+        issue: null,
+      },
+    }))),
+    auditIntegrity: remote.auditIntegrity ?? vi.fn(() => Promise.resolve(ok({
+      valid: true,
+      eventCount: 0,
+      headHash: `sha256:${'0'.repeat(64)}`,
+      issue: null,
+    }))),
+  })
   const view = render(<WorkbenchStatusPage controller={controller} t={t} />)
   await act(async () => { await controller.refresh() })
   return { controller, ...view }
@@ -58,10 +88,21 @@ describe('WorkbenchStatusPage', () => {
     fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true })
     fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true })
     expect(setStatus).toHaveBeenCalledOnce()
+    expect(setStatus.mock.calls[0]?.[0]).toEqual({
+      message: '准备第一个里程碑',
+      expectedRevision: null,
+      idempotencyKey: expect.any(String),
+      causationId: expect.any(String),
+      reason: 'owner-status-edit',
+    })
     expect((screen.getByRole('button', { name: '保存中…' }) as HTMLButtonElement).disabled).toBe(true)
 
     await act(async () => {
-      mutation.resolve(ok({ ok: true, value: snapshot(1, '准备第一个里程碑') }))
+      mutation.resolve(ok({
+        ok: true,
+        value: snapshot(1, '准备第一个里程碑'),
+        receipt: receipt(),
+      }))
       await mutation.promise
     })
     expect(screen.getByText('已与 Host 同步')).toBeTruthy()
@@ -82,6 +123,7 @@ describe('WorkbenchStatusPage', () => {
       .mockResolvedValueOnce(ok({
         ok: true,
         value: snapshot(3, '保留我的草稿'),
+        receipt: receipt('3'),
       } satisfies SetStatusResult))
     await renderPage({
       snapshot: vi.fn(() => Promise.resolve(ok(snapshot(1, '初始状态')))),
@@ -100,6 +142,9 @@ describe('WorkbenchStatusPage', () => {
     expect(setStatus.mock.calls[1]?.[0]).toEqual({
       message: '保留我的草稿',
       expectedRevision: 2,
+      idempotencyKey: expect.any(String),
+      causationId: expect.any(String),
+      reason: 'owner-status-edit',
     })
     expect(await screen.findByText('已与 Host 同步')).toBeTruthy()
   })
@@ -114,7 +159,11 @@ describe('WorkbenchStatusPage', () => {
       .mockResolvedValueOnce(ok(snapshot(2, '恢复后的内容')))
     const { controller } = await renderPage({
       snapshot: snapshotRemote,
-      setStatus: vi.fn(() => Promise.resolve(ok({ ok: true, value: snapshot(2, 'unused') }))),
+      setStatus: vi.fn(() => Promise.resolve(ok({
+        ok: true,
+        value: snapshot(2, 'unused'),
+        receipt: receipt('unused'),
+      }))),
     })
     const editor = screen.getByRole('textbox', { name: '项目状态' })
     fireEvent.change(editor, { target: { value: '离线草稿' } })
@@ -129,6 +178,50 @@ describe('WorkbenchStatusPage', () => {
 
     fireEvent.keyDown(editor, { key: 'Escape' })
     expect((editor as HTMLTextAreaElement).value).toBe('恢复后的内容')
+  })
+
+  it('keeps response-loss replay saveable after reconnect adopts the committed draft', async () => {
+    const committedMessage = '响应丢失但已提交'
+    const snapshotRemote = vi.fn()
+      .mockResolvedValueOnce(ok(snapshot(1, '提交前状态')))
+      .mockResolvedValueOnce(ok(snapshot(2, committedMessage)))
+    const setStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { code: 'unavailable', message: 'response lost', details: {} },
+      })
+      .mockResolvedValueOnce(ok({
+        ok: true,
+        value: snapshot(2, committedMessage),
+        receipt: receipt('response-loss'),
+      } satisfies SetStatusResult))
+    const { controller } = await renderPage({ snapshot: snapshotRemote, setStatus })
+    const editor = screen.getByRole('textbox', { name: '项目状态' })
+    fireEvent.change(editor, { target: { value: committedMessage } })
+
+    fireEvent.click(screen.getByRole('button', { name: '保存状态' }))
+    expect((await screen.findByRole('alert')).textContent)
+      .toContain('无法连接到 Project Workbench')
+    const firstRequest = setStatus.mock.calls[0]?.[0]
+    expect(firstRequest).toMatchObject({
+      message: committedMessage,
+      expectedRevision: 1,
+      idempotencyKey: expect.any(String),
+      causationId: expect.any(String),
+      reason: 'owner-status-edit',
+    })
+
+    await act(async () => { await controller.connectionReset() })
+    expect(snapshotRemote).toHaveBeenCalledTimes(2)
+    expect((editor as HTMLTextAreaElement).value).toBe(committedMessage)
+    const replay = screen.getByRole('button', { name: '保存状态' }) as HTMLButtonElement
+    expect(replay.disabled).toBe(false)
+
+    fireEvent.click(replay)
+    expect(setStatus).toHaveBeenCalledTimes(2)
+    expect(setStatus.mock.calls[1]?.[0]).toEqual(firstRequest)
+    expect(setStatus.mock.calls[1]?.[0]).toMatchObject({ expectedRevision: 1 })
+    expect(await screen.findByText('已与 Host 同步')).toBeTruthy()
   })
 
   it('shows an actionable input rejection without claiming that the connection failed', async () => {

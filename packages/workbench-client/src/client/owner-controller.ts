@@ -9,6 +9,7 @@ import {
   WorkbenchStatusController,
   type WorkbenchRemote,
 } from './controller.ts'
+import { WorkbenchActivityController } from './activity-controller.ts'
 
 /** User-visible shell modes. */
 export type OwnerPhase =
@@ -37,6 +38,7 @@ export interface OwnerClientState {
   readonly phase: OwnerPhase
   readonly access: OwnerAccessProjection | null
   readonly status: WorkbenchStatusController | null
+  readonly activity: WorkbenchActivityController | null
   readonly recoveryCode: string | null
   readonly issue: OwnerIssue | null
 }
@@ -45,6 +47,7 @@ const INITIAL_STATE: OwnerClientState = Object.freeze({
   phase: 'probing',
   access: null,
   status: null,
+  activity: null,
   recoveryCode: null,
   issue: null,
 })
@@ -60,13 +63,14 @@ export interface OwnerControllerOptions {
 
 /**
  * Owns the complete browser authentication lifetime and exactly one protected
- * status controller. Status admission only follows a signed-in auth result.
+ * status and Activity controllers. Protected admission only follows a signed-in result.
  */
 export class OwnerController {
   private state: OwnerClientState = INITIAL_STATE
   private readonly listeners = new Set<() => void>()
   private readonly inFlight = new Set<Promise<void>>()
   private status: WorkbenchStatusController | null = null
+  private activity: WorkbenchActivityController | null = null
   private authEpoch = 0
   private authAbort: AbortController | null = null
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
@@ -96,6 +100,7 @@ export class OwnerController {
   probe(): Promise<void> {
     if (this.hasExpiredSignedInAccess()) return Promise.resolve()
     this.status?.markDisconnected()
+    this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
 
@@ -140,6 +145,7 @@ export class OwnerController {
     this.authAbort?.abort(new Error('Workbench auth connection generation changed'))
     this.authAbort = null
     this.status?.markDisconnected()
+    this.activity?.markDisconnected()
 
     const unavailable = ownerIssue(connectionFallbackOperation(this.state.phase), 'unavailable')
     if (this.state.phase === 'setup-pending') {
@@ -157,6 +163,7 @@ export class OwnerController {
   connectionReset(): Promise<void> {
     if (this.disposed || this.hasExpiredSignedInAccess()) return Promise.resolve()
     this.status?.markDisconnected()
+    this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
 
@@ -169,12 +176,16 @@ export class OwnerController {
     this.authAbort = null
     this.clearExpiryTimer()
     const currentStatus = this.status
+    const currentActivity = this.activity
     this.status = null
+    this.activity = null
     const statusDisposal = currentStatus?.dispose()
+    const activityDisposal = currentActivity?.dispose()
     this.state = INITIAL_STATE
     this.listeners.clear()
     const pending = [...this.inFlight]
     if (statusDisposal !== undefined) pending.push(statusDisposal)
+    if (activityDisposal !== undefined) pending.push(activityDisposal)
     this.disposal = Promise.allSettled(pending).then(() => undefined)
     return this.disposal
   }
@@ -224,6 +235,7 @@ export class OwnerController {
             phase: 'login',
             access: Object.freeze({ state: 'signed-out' }),
             status: null,
+            activity: null,
             recoveryCode: null,
             issue,
           })
@@ -237,6 +249,7 @@ export class OwnerController {
         phase: 'recovery',
         access,
         status: null,
+        activity: null,
         recoveryCode: result.value.recoveryCode,
         issue: null,
       })
@@ -286,6 +299,7 @@ export class OwnerController {
   private async doLogout(): Promise<void> {
     const operation = this.beginAuth('Workbench Owner logout was superseded')
     this.status?.markDisconnected()
+    this.activity?.markDisconnected()
     this.publish({ ...this.state, phase: 'logout-pending', issue: null })
     try {
       const result = await this.auth.logout(operation.abort.signal)
@@ -302,11 +316,12 @@ export class OwnerController {
         return
       }
       this.clearExpiryTimer()
-      const draining = this.retireStatus()
+      const draining = this.retireProtectedControllers()
       this.publish({
         phase: 'login',
         access: detachAccess(result.value),
         status: null,
+        activity: null,
         recoveryCode: null,
         issue: null,
       })
@@ -348,6 +363,7 @@ export class OwnerController {
           phase: 'recovery',
           access,
           status: null,
+          activity: null,
           recoveryCode: this.state.recoveryCode,
           issue: null,
         })
@@ -359,11 +375,12 @@ export class OwnerController {
     }
 
     this.clearExpiryTimer()
-    const draining = this.retireStatus()
+    const draining = this.retireProtectedControllers()
     this.publish({
       phase: access.state === 'setup-required' ? 'setup' : 'login',
       access,
       status: null,
+      activity: null,
       recoveryCode: null,
       issue: null,
     })
@@ -377,31 +394,47 @@ export class OwnerController {
   ): Promise<void> {
     if (this.disposed || epoch !== this.authEpoch) return
     const existingAccess = this.state.access
-    if (this.status !== null
+    if ((this.status !== null || this.activity !== null)
       && existingAccess?.state === 'signed-in'
       && existingAccess.ownerId !== access.ownerId) {
-      await this.retireStatus()
+      await this.retireProtectedControllers()
       if (this.disposed || epoch !== this.authEpoch) return
     }
-    const created = this.status === null
+    const created = this.status === null || this.activity === null
     const status = this.status ?? this.createStatusController()
+    const activity = this.activity ?? this.createActivityController()
     this.status = status
+    this.activity = activity
     this.publish({
       phase: 'authenticated',
       access,
       status,
+      activity,
       recoveryCode: null,
       issue: null,
     })
     this.scheduleExpiry(access)
-    if (created || refreshStatus) await status.refresh()
+    if (created || refreshStatus) await Promise.all([status.refresh(), activity.refresh()])
   }
 
   private createStatusController(): WorkbenchStatusController {
     return new WorkbenchStatusController(this.remote, {
-      onBeforeProtectedOperation: () => this.checkSessionExpiry(),
+      onBeforeProtectedOperation: () => this.admitProtectedOperation(),
+      onTransportFailure: () => { this.revalidateAfterStatusFailure() },
+      onCommitted: () => { void this.activity?.refresh() },
+    })
+  }
+
+  private createActivityController(): WorkbenchActivityController {
+    return new WorkbenchActivityController(this.remote, {
+      onBeforeProtectedOperation: () => this.admitProtectedOperation(),
       onTransportFailure: () => { this.revalidateAfterStatusFailure() },
     })
+  }
+
+  /** Admit retained child controllers only while the Owner shell is fully authenticated. */
+  private admitProtectedOperation(): boolean {
+    return this.state.phase === 'authenticated' && this.checkSessionExpiry()
   }
 
   private revalidateAfterStatusFailure(): void {
@@ -409,10 +442,15 @@ export class OwnerController {
     void this.track(this.doProbe(false))
   }
 
-  private retireStatus(): Promise<void> {
-    const current = this.status
+  private retireProtectedControllers(): Promise<void> {
+    const currentStatus = this.status
+    const currentActivity = this.activity
     this.status = null
-    return current?.dispose() ?? Promise.resolve()
+    this.activity = null
+    return Promise.allSettled([
+      currentStatus?.dispose() ?? Promise.resolve(),
+      currentActivity?.dispose() ?? Promise.resolve(),
+    ]).then(() => undefined)
   }
 
   /**
@@ -470,11 +508,12 @@ export class OwnerController {
     this.authAbort?.abort(new Error('Workbench Owner session projection expired'))
     this.authAbort = null
     this.clearExpiryTimer()
-    const draining = this.retireStatus()
+    const draining = this.retireProtectedControllers()
     this.publish({
       phase: 'login',
       access: Object.freeze({ state: 'signed-out' }),
       status: null,
+      activity: null,
       recoveryCode: null,
       issue: null,
     })
@@ -489,8 +528,16 @@ export class OwnerController {
     const access = this.state.access
     if (access?.state === 'signed-in' && this.state.recoveryCode !== null) {
       this.publish({ ...this.state, phase: 'recovery', issue })
-    } else if (access?.state === 'signed-in' && this.status !== null) {
-      this.publish({ ...this.state, phase: 'authenticated', status: this.status, issue })
+    } else if (access?.state === 'signed-in'
+      && this.status !== null
+      && this.activity !== null) {
+      this.publish({
+        ...this.state,
+        phase: 'authenticated',
+        status: this.status,
+        activity: this.activity,
+        issue,
+      })
     } else if (access?.state === 'setup-required') {
       this.publish({ ...this.state, phase: 'setup', issue })
     } else if (access?.state === 'signed-out') {
@@ -533,8 +580,8 @@ export class OwnerController {
     for (const listener of [...this.listeners]) {
       try {
         listener()
-      } catch (error) {
-        console.error('[workbench-client] Owner state observer failed:', error)
+      } catch {
+        console.error('[workbench-client] Owner state observer failed')
       }
     }
   }

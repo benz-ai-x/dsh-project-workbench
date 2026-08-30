@@ -66,19 +66,43 @@ describe('WorkbenchService', () => {
     expect(remoteMethods(ctx.workbench)).toEqual([
       { method: 'snapshot', invocation: { kind: 'direct' } },
       { method: 'setStatus', invocation: { kind: 'direct' } },
+      { method: 'activity', invocation: { kind: 'direct' } },
+      { method: 'auditIntegrity', invocation: { kind: 'direct' } },
     ])
     const auth = ctx.get('workbenchAuth') as unknown as TestWorkbenchAuthService
     await expect(ctx.workbench.snapshot(new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })
+    await expect(ctx.workbench.activity(
+      {},
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.auditIntegrity(
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(auth.run(() =>
       ctx.workbench.snapshot(new AbortController().signal))).resolves.toBeNull()
     await expect(auth.run(() => ctx.workbench.setStatus({
       message: 'Walking skeleton',
       expectedRevision: null,
+      idempotencyKey: 'service-idempotency-key-0001',
+      causationId: 'service-causation-id-0001',
+      reason: 'owner-status-edit',
     }, new AbortController().signal))).resolves.toMatchObject({
       ok: true,
       value: { message: 'Walking skeleton', revision: 1 },
+    })
+    await expect(auth.run(() => ctx.workbench.activity(
+      { projectId: null, limit: 10 },
+      new AbortController().signal,
+    ))).resolves.toMatchObject({
+      items: [{ action: 'workbench.status.updated', outbox: { state: 'pending' } }],
+    })
+    await expect(auth.run(() =>
+      ctx.workbench.auditIntegrity(new AbortController().signal))).resolves.toMatchObject({
+      valid: true,
+      eventCount: 1,
+      issue: null,
     })
 
     const service = ctx.workbench

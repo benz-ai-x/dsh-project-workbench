@@ -26,13 +26,38 @@ function ok<T>(value: T): RemoteResult<T> {
   return { ok: true, value }
 }
 
+function receipt(suffix = '1') {
+  return {
+    commandId: `command-${suffix}`,
+    auditEventId: `audit-${suffix}`,
+    outboxId: `outbox-${suffix}`,
+  } as const
+}
+
 function remote(options: Partial<WorkbenchRemote> = {}): WorkbenchRemote {
   return {
     snapshot: options.snapshot ?? vi.fn(() => Promise.resolve(ok(null))),
     setStatus: options.setStatus ?? vi.fn(() => Promise.resolve(ok({
       ok: true,
       value: snapshot(1),
+      receipt: receipt(),
     } satisfies SetStatusResult))),
+    activity: options.activity ?? vi.fn(() => Promise.resolve(ok({
+      items: [],
+      nextBeforeSequence: null,
+      integrity: {
+        valid: true,
+        eventCount: 0,
+        headHash: `sha256:${'0'.repeat(64)}`,
+        issue: null,
+      },
+    }))),
+    auditIntegrity: options.auditIntegrity ?? vi.fn(() => Promise.resolve(ok({
+      valid: true,
+      eventCount: 0,
+      headHash: `sha256:${'0'.repeat(64)}`,
+      issue: null,
+    }))),
   }
 }
 
@@ -69,10 +94,16 @@ describe('WorkbenchStatusController', () => {
     const duplicate = controller.save()
     expect(controller.getSnapshot()).toMatchObject({ phase: 'pending', pending: true, draft: '  after  ' })
     expect(setStatus).toHaveBeenCalledOnce()
-    expect(setStatus.mock.calls[0]?.[0]).toEqual({ message: 'after', expectedRevision: 2 })
+    expect(setStatus.mock.calls[0]?.[0]).toEqual({
+      message: 'after',
+      expectedRevision: 2,
+      idempotencyKey: expect.any(String),
+      causationId: expect.any(String),
+      reason: 'owner-status-edit',
+    })
     expect(setStatus.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal)
 
-    pending.resolve(ok({ ok: true, value: snapshot(3, 'after') }))
+    pending.resolve(ok({ ok: true, value: snapshot(3, 'after'), receipt: receipt('3') }))
     await Promise.all([first, duplicate])
     expect(controller.getSnapshot()).toMatchObject({
       phase: 'value',
@@ -80,6 +111,43 @@ describe('WorkbenchStatusController', () => {
       snapshot: snapshot(3, 'after'),
       draft: 'after',
       draftDirty: false,
+    })
+  })
+
+  it('fences an older in-flight refresh when a newer status command begins', async () => {
+    const late = deferred<RemoteResult<WorkbenchStatusSnapshot | null>>()
+    let lateSignal: AbortSignal | undefined
+    const snapshots = vi.fn()
+      .mockResolvedValueOnce(ok(snapshot(1, 'before')))
+      .mockImplementationOnce((_signal?: AbortSignal) => {
+        lateSignal = _signal
+        return late.promise
+      })
+    const controller = new WorkbenchStatusController(remote({
+      snapshot: snapshots,
+      setStatus: vi.fn(() => Promise.resolve(ok({
+        ok: true,
+        value: snapshot(2, 'after'),
+        receipt: receipt('refresh-fence'),
+      } satisfies SetStatusResult))),
+    }))
+    await controller.refresh()
+
+    const refreshing = controller.refresh()
+    controller.setDraft('after')
+    await controller.save()
+    expect(lateSignal?.aborted).toBe(true)
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'value',
+      snapshot: snapshot(2, 'after'),
+    })
+
+    late.resolve(ok(snapshot(1, 'before')))
+    await refreshing
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'value',
+      snapshot: snapshot(2, 'after'),
+      draft: 'after',
     })
   })
 
@@ -93,7 +161,11 @@ describe('WorkbenchStatusController', () => {
           current: snapshot(5, 'another writer'),
         },
       } satisfies SetStatusResult))
-      .mockResolvedValueOnce(ok({ ok: true, value: snapshot(6, 'my draft') } satisfies SetStatusResult))
+      .mockResolvedValueOnce(ok({
+        ok: true,
+        value: snapshot(6, 'my draft'),
+        receipt: receipt('6'),
+      } satisfies SetStatusResult))
     const controller = new WorkbenchStatusController(remote({
       snapshot: vi.fn(() => Promise.resolve(ok(snapshot(4, 'old')))),
       setStatus,
@@ -121,8 +193,76 @@ describe('WorkbenchStatusController', () => {
     controller.setDraft('my draft')
 
     await controller.save()
-    expect(setStatus.mock.calls[1]?.[0]).toEqual({ message: 'my draft', expectedRevision: 5 })
+    expect(setStatus.mock.calls[1]?.[0]).toEqual({
+      message: 'my draft',
+      expectedRevision: 5,
+      idempotencyKey: expect.any(String),
+      causationId: expect.any(String),
+      reason: 'owner-status-edit',
+    })
     expect(controller.getSnapshot()).toMatchObject({ phase: 'value', snapshot: snapshot(6, 'my draft') })
+  })
+
+  it('replays the original CAS identities without regressing a later reconnect snapshot', async () => {
+    const setStatus = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { code: 'unavailable', message: 'response lost', details: {} },
+      })
+      .mockResolvedValueOnce(ok({
+        ok: true,
+        value: snapshot(2, 'committed despite response loss'),
+        receipt: receipt('replayed'),
+      } satisfies SetStatusResult))
+    const nextCommandKey = vi.fn()
+      .mockReturnValueOnce('idempotency-key-response-loss')
+      .mockReturnValueOnce('causation-id-response-loss')
+    const onCommitted = vi.fn()
+    const snapshots = vi.fn()
+      .mockResolvedValueOnce(ok(snapshot(1, 'before')))
+      .mockResolvedValueOnce(ok(snapshot(3, 'later writer')))
+    const controller = new WorkbenchStatusController(remote({
+      snapshot: snapshots,
+      setStatus,
+    }), { nextCommandKey, onCommitted })
+    await controller.refresh()
+    controller.setDraft('committed despite response loss')
+
+    await controller.save()
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'error',
+      draft: 'committed despite response loss',
+      draftDirty: true,
+      issue: { kind: 'transport', code: 'unavailable' },
+    })
+
+    await controller.connectionReset()
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'value',
+      snapshot: snapshot(3, 'later writer'),
+      draft: 'committed despite response loss',
+      draftDirty: true,
+    })
+
+    await controller.save()
+    expect(setStatus).toHaveBeenCalledTimes(2)
+    expect(setStatus.mock.calls[0]?.[0]).toEqual({
+      message: 'committed despite response loss',
+      expectedRevision: 1,
+      idempotencyKey: 'idempotency-key-response-loss',
+      causationId: 'causation-id-response-loss',
+      reason: 'owner-status-edit',
+    })
+    expect(setStatus.mock.calls[1]?.[0]).toEqual(setStatus.mock.calls[0]?.[0])
+    expect(nextCommandKey).toHaveBeenCalledTimes(2)
+    expect(onCommitted).toHaveBeenCalledOnce()
+    expect(onCommitted).toHaveBeenCalledWith(receipt('replayed'))
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'value',
+      snapshot: snapshot(3, 'later writer'),
+      draft: 'later writer',
+      draftDirty: false,
+    })
   })
 
   it('keeps a recoverable draft and last value on transport failure', async () => {
@@ -130,7 +270,11 @@ describe('WorkbenchStatusController', () => {
       snapshot: vi.fn(() => Promise.resolve(ok(snapshot(1, 'synced')))),
       setStatus: vi.fn(() => Promise.resolve({
         ok: false,
-        error: { code: 'unavailable', message: 'offline', details: {} },
+        error: {
+          code: 'unavailable',
+          message: 'Bearer TOP-SECRET must not enter Client state',
+          details: { raw: 'TOP-SECRET' },
+        },
       })),
     }))
     await controller.refresh()
@@ -142,8 +286,10 @@ describe('WorkbenchStatusController', () => {
       snapshot: snapshot(1, 'synced'),
       draft: 'unsaved work',
       draftDirty: true,
-      issue: { kind: 'transport', code: 'unavailable', message: 'offline' },
+      issue: { kind: 'transport', code: 'unavailable' },
     })
+    expect(controller.getSnapshot().issue).not.toHaveProperty('message')
+    expect(JSON.stringify(controller.getSnapshot())).not.toContain('TOP-SECRET')
   })
 
   it('keeps Host validation distinct from a transport outage without exposing details', async () => {
@@ -213,7 +359,7 @@ describe('WorkbenchStatusController', () => {
 
     const disposal = controller.dispose()
     expect(signal?.aborted).toBe(true)
-    mutation.resolve(ok({ ok: true, value: snapshot(2, 'late') }))
+    mutation.resolve(ok({ ok: true, value: snapshot(2, 'late'), receipt: receipt('late') }))
     await Promise.all([saving, disposal])
     expect(controller.getSnapshot()).toMatchObject({
       phase: 'loading',

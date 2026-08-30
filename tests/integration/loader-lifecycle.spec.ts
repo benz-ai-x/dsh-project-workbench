@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import type {
+  SetStatusRequest,
   SetStatusResult,
   WorkbenchStatusSnapshot,
 } from '../../packages/workbench-host/src/client.ts'
@@ -121,6 +122,20 @@ function realOwnerAuthConfig(databasePath: string): string {
   ].join('\n')
 }
 
+function statusRequest(
+  message: string,
+  idempotencyKey: string,
+  causationId: string,
+): SetStatusRequest {
+  return {
+    message,
+    expectedRevision: null,
+    idempotencyKey,
+    causationId,
+    reason: 'owner-status-edit',
+  }
+}
+
 async function openFixtureCarrier(context: WorkbenchContext): Promise<string> {
   const server = createServer((request, response) => {
     const pathname = new URL(request.url ?? '/', 'http://fixture.invalid').pathname
@@ -187,19 +202,69 @@ describe('built Workbench Host through the real DSH Loader', () => {
     })
     await expect(first.workbenchAuth.run(() =>
       firstService.snapshot(new AbortController().signal))).resolves.toBeNull()
-    const committed: SetStatusResult = await first.workbenchAuth.run(() => firstService.setStatus({
-      message: 'Loader-owned durable status',
-      expectedRevision: null,
-    }, new AbortController().signal))
+    const initialActivity = await first.workbenchAuth.run(() => firstService.activity(
+      { projectId: null, limit: 10 },
+      new AbortController().signal,
+    ))
+    expect(initialActivity).toMatchObject({
+      items: [],
+      nextBeforeSequence: null,
+      integrity: { valid: true, eventCount: 0, issue: null },
+    })
+    expect(initialActivity.integrity.headHash).toMatch(/^sha256:[0-9a-f]{64}$/u)
+    await expect(first.workbenchAuth.run(() =>
+      firstService.auditIntegrity(new AbortController().signal))).resolves.toEqual(
+      initialActivity.integrity,
+    )
+    const committed: SetStatusResult = await first.workbenchAuth.run(() => firstService.setStatus(
+      statusRequest(
+        'Loader-owned durable status',
+        'loader-idempotency-key-0001',
+        'loader-causation-id-0001',
+      ),
+      new AbortController().signal,
+    ))
     expect(committed).toMatchObject({
       ok: true,
       value: {
         message: 'Loader-owned durable status',
         revision: 1,
       },
+      receipt: {
+        commandId: expect.stringMatching(/^command-/u),
+        auditEventId: expect.stringMatching(/^audit-/u),
+        outboxId: expect.stringMatching(/^outbox-/u),
+      },
     })
     if (!committed.ok) throw new Error('expected the initial status commit to succeed')
     const expected: WorkbenchStatusSnapshot = committed.value
+    const activity = await first.workbenchAuth.run(() => firstService.activity({
+      projectId: null,
+      objectType: 'workbench-status',
+      objectId: expected.id,
+      action: 'workbench.status.updated',
+      limit: 10,
+    }, new AbortController().signal))
+    expect(activity).toMatchObject({
+      items: [{
+        eventId: committed.receipt.auditEventId,
+        action: 'workbench.status.updated',
+        reason: 'owner-status-edit',
+        causationId: 'loader-causation-id-0001',
+        commandId: committed.receipt.commandId,
+        object: { id: expected.id, version: 1 },
+        outbox: { id: committed.receipt.outboxId, state: 'pending' },
+      }],
+      nextBeforeSequence: null,
+      integrity: { valid: true, eventCount: 1, issue: null },
+    })
+    expect(activity.items).toHaveLength(1)
+    expect(JSON.stringify(activity)).not.toContain('Loader-owned durable status')
+    expect(activity.integrity.headHash).toBe(activity.items[0]?.hash)
+    await expect(first.workbenchAuth.run(() =>
+      firstService.auditIntegrity(new AbortController().signal))).resolves.toEqual(
+      activity.integrity,
+    )
 
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
@@ -209,6 +274,14 @@ describe('built Workbench Host through the real DSH Loader', () => {
     const restarted = await load(test.configPath)
     await expect(restarted.workbenchAuth.run(() =>
       restarted.workbench.snapshot(new AbortController().signal))).resolves.toEqual(expected)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.activity(
+      { projectId: null, limit: 10 },
+      new AbortController().signal,
+    ))).resolves.toEqual(activity)
+    await expect(restarted.workbenchAuth.run(() =>
+      restarted.workbench.auditIntegrity(new AbortController().signal))).resolves.toEqual(
+      activity.integrity,
+    )
     await restarted.fiber.dispose()
     contexts.splice(contexts.indexOf(restarted), 1)
     expect(restarted.get('workbench')).toBeUndefined()
@@ -224,10 +297,14 @@ describe('built Workbench Host through the real DSH Loader', () => {
       .find(candidate => candidate.options.id === 'workbench-host')
     if (entry === undefined) throw new Error('real Loader did not publish workbench-host entry')
     const firstService = context.workbench
-    const committed = await context.workbenchAuth.run(() => firstService.setStatus({
-      message: 'same-process HMR status',
-      expectedRevision: null,
-    }, new AbortController().signal))
+    const committed = await context.workbenchAuth.run(() => firstService.setStatus(
+      statusRequest(
+        'same-process HMR status',
+        'loader-hmr-idempotency-0001',
+        'loader-hmr-causation-0001',
+      ),
+      new AbortController().signal,
+    ))
     if (!committed.ok) throw new Error('expected the HMR fixture commit to succeed')
 
     await entry.update({ disabled: true })
@@ -244,6 +321,23 @@ describe('built Workbench Host through the real DSH Loader', () => {
     expect(context.workbench).not.toBe(firstService)
     await expect(context.workbenchAuth.run(() =>
       context.workbench.snapshot(new AbortController().signal))).resolves.toEqual(committed.value)
+    const remountedActivity = await context.workbenchAuth.run(() => context.workbench.activity(
+      { projectId: null, limit: 10 },
+      new AbortController().signal,
+    ))
+    expect(remountedActivity).toMatchObject({
+      items: [{
+        eventId: committed.receipt.auditEventId,
+        causationId: 'loader-hmr-causation-0001',
+        outbox: { id: committed.receipt.outboxId, state: 'pending' },
+      }],
+      integrity: { valid: true, eventCount: 1, issue: null },
+    })
+    expect(remountedActivity.integrity.headHash).toBe(remountedActivity.items[0]?.hash)
+    await expect(context.workbenchAuth.run(() =>
+      context.workbench.auditIntegrity(new AbortController().signal))).resolves.toEqual(
+      remountedActivity.integrity,
+    )
 
     const replacement = context.workbench
     await entry.update({ disabled: true })

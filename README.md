@@ -2,7 +2,7 @@
 
 Project Workbench 是一个外置 DeepSeek Harness Cordis 插件，目标是把项目状态、证据、文档、协作和 AI 原生项目分析组织成可追溯的项目驾驶舱。
 
-当前实现阶段是 T02：在 T01 的 Host 持久化、Typert Remote 与浏览器状态链路上，加入唯一 Owner 初始化、密码登录、可撤销会话、离线恢复和统一授权闸门。Project、Goal、审计、飞书、文件与 AI 分析仍由后续票据逐步实现。
+当前已完成 T03：在 T01/T02 的 Host 持久化、浏览器状态链路和唯一 Owner 授权闸门上，加入事务命令回执、Outbox、可验证的只追加审计链与安全 Activity。下一阶段 T04 才开始引入 Project、Goal 与 Outcome；飞书、文件和 AI 分析仍由后续票据逐步实现。
 
 ## Workspace layout
 
@@ -53,6 +53,6 @@ Workbench 会话 Cookie 使用 `__Host-` 前缀、`Secure`、`HttpOnly`、`SameS
 
 ## Verification boundary
 
-`pnpm verify` 覆盖 Config/Scenario/SQLite、Owner credential/session/recovery、真实 Loader、Client 状态与生命周期、Profile 组合、真实 Chrome 的设置/登录/登出/恢复/重启旅程、built exports、恢复 CLI 和三个真实 tarball。当前三个 Workbench 包仍是 `private`，DSH 依赖仍绑定到经审计源码；因此这些结果证明本地源码兼容和产物完整性，不代表已完成纯 registry 发布闭包。
+`pnpm verify` 覆盖 Config/Scenario/SQLite、Owner credential/session/recovery、事务回滚与响应丢失重放、审计链篡改检测、四态 Outbox、Activity 过滤与脱敏、真实 Loader、Client 状态与 HMR 生命周期、Profile 组合、真实 Chrome 的设置/登录/经审计命令/Activity/恢复/重启旅程、built exports、恢复 CLI 和三个真实 tarball。当前三个 Workbench 包仍是 `private`，DSH 依赖仍绑定到经审计源码；因此这些结果证明本地源码兼容和产物完整性，不代表已完成纯 registry 发布闭包。
 
 协作代理在修改前应先阅读 [AGENTS.md](./AGENTS.md) 和 [Project Contract](./docs/agent/PROJECT_CONTRACT.md)。

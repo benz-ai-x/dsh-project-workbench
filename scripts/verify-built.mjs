@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T01 actually loads.
+ * Verify the executable artifacts that T03 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -239,18 +239,101 @@ function verifyTypertFace(face, packageName, label) {
   check(Array.isArray(invocations), `${packageName}: ${label} Typert face contains invocation descriptors`)
   if (!Array.isArray(invocations)) return
   const methods = invocations.map(invocation => invocation?.method).sort()
+  const expectedMethods = ['activity', 'auditIntegrity', 'setStatus', 'snapshot']
   check(
-    methods.length === 2 && methods[0] === 'setStatus' && methods[1] === 'snapshot',
-    `${packageName}: ${label} Typert face contains only snapshot and setStatus`,
+    sameStrings(methods, expectedMethods),
+    `${packageName}: ${label} Typert face contains exactly activity, auditIntegrity, setStatus, and snapshot`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
     check(invocation?.service === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench service`)
   }
+  const activity = invocations.find(invocation => invocation?.method === 'activity')
+  const auditIntegrity = invocations.find(invocation => invocation?.method === 'auditIntegrity')
   const setStatus = invocations.find(invocation => invocation?.method === 'setStatus')
   const snapshot = invocations.find(invocation => invocation?.method === 'snapshot')
-  check(snapshot?.cancellation?.parameter === 'signal', `${packageName}: ${label} snapshot carries caller cancellation`)
-  check(setStatus?.cancellation?.parameter === 'signal', `${packageName}: ${label} setStatus carries caller cancellation`)
+  for (const invocation of [activity, auditIntegrity, setStatus, snapshot]) {
+    check(
+      invocation?.cancellation?.parameter === 'signal',
+      `${packageName}: ${label} ${String(invocation?.method)} carries caller cancellation`,
+    )
+  }
+
+  const request = setStatus?.parameters?.find(parameter => parameter?.name === 'request')
+  check(
+    sameStrings(schemaObjectKeys(request?.codec?.schema), [
+      'causationId',
+      'expectedRevision',
+      'idempotencyKey',
+      'message',
+      'reason',
+    ]),
+    `${packageName}: ${label} SetStatusRequest contains the exact T03 command fields`,
+  )
+  const resultOptions = unwrapSchema(setStatus?.result?.schema)?.def?.options
+  const successfulResult = Array.isArray(resultOptions)
+    ? resultOptions.find(option => schemaObjectKeys(option).includes('receipt'))
+    : undefined
+  check(
+    sameStrings(schemaObjectKeys(successfulResult), ['ok', 'receipt', 'value']),
+    `${packageName}: ${label} successful SetStatusResult contains its durable receipt`,
+  )
+  const successShape = unwrapSchema(successfulResult)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(successShape?.receipt), [
+      'auditEventId',
+      'commandId',
+      'outboxId',
+    ]),
+    `${packageName}: ${label} command receipt contains command, audit, and Outbox identities`,
+  )
+  const activityShape = unwrapSchema(activity?.result?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(activity?.result?.schema), ['integrity', 'items', 'nextBeforeSequence']),
+    `${packageName}: ${label} Activity result embeds integrity with the paged browser projection`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(activityShape?.integrity), [
+      'eventCount',
+      'headHash',
+      'issue',
+      'valid',
+    ]),
+    `${packageName}: ${label} Activity result embeds the safe same-snapshot integrity projection`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(auditIntegrity?.result?.schema), [
+      'eventCount',
+      'headHash',
+      'issue',
+      'valid',
+    ]),
+    `${packageName}: ${label} auditIntegrity result exposes the safe verification projection`,
+  )
+}
+
+function unwrapSchema(value) {
+  let current = value
+  const seen = new Set()
+  while (current !== null && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current)
+    if (current.def?.type !== 'readonly' && current.def?.type !== 'optional') break
+    current = current.def.innerType
+  }
+  return current
+}
+
+function schemaObjectKeys(value) {
+  const shape = unwrapSchema(value)?.def?.shape
+  return shape !== null && typeof shape === 'object' && !Array.isArray(shape)
+    ? Object.keys(shape).sort()
+    : []
+}
+
+function sameStrings(actual, expected) {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && [...actual].sort().every((value, index) => value === [...expected].sort()[index])
 }
 
 function readManifest(packageDir) {

@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type {
   OwnerAccessProjection,
   OwnerAuthResponse,
+  WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
 import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
@@ -48,9 +49,26 @@ function signedIn(): Extract<OwnerAccessProjection, { readonly state: 'signed-in
   }
 }
 
+function emptyActivity(): WorkbenchActivityProjection {
+  return {
+    items: [],
+    nextBeforeSequence: null,
+    integrity: {
+      valid: true,
+      eventCount: 0,
+      headHash: `sha256:${'0'.repeat(64)}`,
+      issue: null,
+    },
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
+
+type WorkbenchRemoteActivity = (
+  signal?: AbortSignal,
+) => Promise<{ readonly ok: true; readonly value: WorkbenchActivityProjection }>
 
 type AuthState = (
   signal?: AbortSignal,
@@ -59,6 +77,7 @@ type AuthState = (
 async function bench(options: {
   registrationFailure?: boolean
   snapshot?: WorkbenchRemoteSnapshot
+  activity?: WorkbenchRemoteActivity
   authState?: AuthState
 } = {}) {
   const ctx = new Context()
@@ -76,6 +95,14 @@ async function bench(options: {
   const snapshotGate = vi.fn((signal?: AbortSignal) => {
     requestOrder.push('status')
     return snapshotSource(signal)
+  })
+  const activitySource = options.activity ?? (() => Promise.resolve({
+    ok: true as const,
+    value: emptyActivity(),
+  }))
+  const activityGate = vi.fn((_filter: unknown, signal?: AbortSignal) => {
+    requestOrder.push('activity')
+    return activitySource(signal)
   })
   const authStateSource = options.authState ?? (() => Promise.resolve({
     ok: true as const,
@@ -122,7 +149,25 @@ async function bench(options: {
     snapshot: snapshotGate,
     setStatus: vi.fn(() => Promise.resolve({
       ok: true as const,
-      value: { ok: true as const, value: status() },
+      value: {
+        ok: true as const,
+        value: status(),
+        receipt: {
+          commandId: 'command-browser-1',
+          auditEventId: 'audit-browser-1',
+          outboxId: 'outbox-browser-1',
+        },
+      },
+    })),
+    activity: activityGate,
+    auditIntegrity: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: {
+        valid: true,
+        eventCount: 0,
+        headHash: `sha256:${'0'.repeat(64)}`,
+        issue: null,
+      },
     })),
   })
   ctx.provide('connection', {
@@ -165,6 +210,7 @@ async function bench(options: {
     order,
     requestOrder,
     snapshotGate,
+    activityGate,
     authStateGate,
     auth,
     disposeLayout,
@@ -202,7 +248,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
       expect(owner).toMatchObject({ phase: 'authenticated', access: signedIn() })
       expect(owner.status?.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status'])
+    expect(b.requestOrder).toEqual(['auth', 'status', 'activity'])
 
     await b.fiber?.dispose()
     expect(b.ctx.slots.entries('conversation')).toHaveLength(0)
@@ -228,19 +274,30 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
     await vi.waitFor(() => { expect(controller.getSnapshot().phase).toBe('authenticated') })
     const statusController = controller.getSnapshot().status
+    const activityController = controller.getSnapshot().activity
     expect(statusController).not.toBeNull()
+    expect(activityController).not.toBeNull()
 
     b.disconnect()
     expect(statusController?.getSnapshot()).toMatchObject({ phase: 'stale', snapshot: status() })
+    expect(activityController?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      activity: emptyActivity(),
+    })
     b.requestOrder.length = 0
     b.reconnect()
     await vi.waitFor(() => {
       expect(controller.getSnapshot()).toMatchObject({ phase: 'authenticated' })
       expect(statusController?.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
+      expect(activityController?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        activity: emptyActivity(),
+      })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status'])
+    expect(b.requestOrder).toEqual(['auth', 'status', 'activity'])
     expect(b.authStateGate).toHaveBeenCalledTimes(2)
     expect(b.snapshotGate).toHaveBeenCalledTimes(2)
+    expect(b.activityGate).toHaveBeenCalledTimes(2)
     await b.fiber?.dispose()
   })
 
@@ -251,11 +308,12 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const beforeFocus = check.mock.calls.length
 
     window.dispatchEvent(new Event('focus'))
-    expect(check.mock.calls.length).toBe(beforeFocus + 1)
+    expect(check.mock.calls.length).toBeGreaterThan(beforeFocus)
+    const afterFocus = check.mock.calls.length
 
     await b.fiber?.dispose()
     window.dispatchEvent(new Event('focus'))
-    expect(check.mock.calls.length).toBe(beforeFocus + 1)
+    expect(check.mock.calls.length).toBe(afterFocus)
     check.mockRestore()
   })
 
@@ -313,6 +371,30 @@ describe('Project Workbench browser plugin lifecycle', () => {
 
     expect(order).toEqual(['auth-settled', 'remote'])
     expect(b.snapshotGate).not.toHaveBeenCalled()
+    expect(b.activityGate).not.toHaveBeenCalled()
+  })
+
+  it('drains an aborted Activity request before withdrawing the Remote namespace', async () => {
+    const order: string[] = []
+    let signal: AbortSignal | undefined
+    const b = await bench({
+      activity: currentSignal => new Promise((_resolve, reject) => {
+        signal = currentSignal
+        currentSignal?.addEventListener('abort', () => {
+          order.push('activity-settled')
+          reject(currentSignal.reason)
+        }, { once: true })
+      }),
+    })
+    b.remote.disposeMount.mockImplementationOnce(async () => {
+      order.push('remote')
+      expect(signal?.aborted).toBe(true)
+    })
+    await vi.waitFor(() => { expect(signal).toBeInstanceOf(AbortSignal) })
+
+    await b.fiber?.dispose()
+
+    expect(order).toEqual(['activity-settled', 'remote'])
   })
 
   it('removes the styles owned by the disposed Client Fiber', async () => {

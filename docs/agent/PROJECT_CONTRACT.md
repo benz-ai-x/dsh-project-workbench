@@ -2,7 +2,7 @@
 
 ## Product outcome
 
-Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton. The active implementation boundary is GitHub Issue #3 (T02): one local Owner, revocable browser sessions, local recovery, and a unified authorization gate.
+Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, and T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity. The next implementation boundary is GitHub Issue #5 (T04): create Goal, Outcome, and Project from an immutable knowledge-work template snapshot.
 
 ## Runtime shape
 
@@ -10,7 +10,7 @@ Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide
 - `@benz-ai-x/dsh-project-workbench-client` owns the browser projection and UI. It mounts the generated Remote artifact before registering into the `conversation` Slot and tears down in reverse order.
 - `@benz-ai-x/dsh-project-workbench-bundle` inserts the Host and Client rows. The tracked `workbench-test` profile composes `dsh-base`, `dsh-web-app`, and this bundle.
 - Host state never crosses through a custom Session event. Client code never imports Node, repository, credentials, or external adapter implementations.
-- T01 exposes one neutral status value. It is not a Project, Goal, risk, topic, or audit record.
+- T03 still uses the neutral status value as its first formal command target. It is not a Project, Goal, risk, or topic; those aggregates begin in T04 and later tickets.
 
 ## Pinned baseline
 
@@ -43,11 +43,21 @@ Before runtime changes:
 - The Client treats the server-issued absolute session deadline as a fail-closed projection fence: a deadline timer, window reactivation, and every protected local/Remote operation erase cached status, drafts, and recovery plaintext once expired. Host session validation remains authoritative on every request.
 - Logout removes the server-side session before clearing the browser cookie. Password recovery consumes the current code, increments the credential version, invalidates every session, and issues one replacement code exactly once.
 - Recovery is a local package CLI with hidden TTY input (and a bounded stdin mode for automation), not a public browser form. It uses the official DSH credential provider rather than parsing its backing file.
-- Auth and authorization security events become durable/hash-chained only in T03 (#4); T02 must not invent a competing audit store.
+- T02 deliberately did not invent a competing authentication audit store. T03's atomicity claim applies to formal business commands in the Workbench SQLite database. Owner credentials live in the separate DSH credential provider, so authentication/recovery mutations and this ledger cannot honestly be described as one atomic transaction; durable security-event integration requires an explicit later cross-store design rather than a best-effort optional sink.
+
+## T03 command, Outbox, and audit invariants
+
+- Every formal mutation carries a caller-stable idempotency key, causation ID, bounded reason code, expected version, and a server-derived authenticated actor. Browser input never supplies actor or organization scope.
+- The normalized business mutation, one immutable pending Outbox intent, one append-only audit event/hash-head advance, and the replay receipt live in the same SQLite file and one synchronous `BEGIN IMMEDIATE` transaction. No `await`, adapter call, observer, or log call occurs while that write transaction is held.
+- Receipt lookup precedes optimistic-concurrency validation. The same actor/key and same normalized intent returns its stored result without another mutation, event, or Outbox row; reuse for different intent is an explicit domain conflict.
+- A committed audit event contains only allowlisted fields: actor, organization/team scope, bounded reason, action, nullable Project scope, object identity/version, command ID, causation ID, Outbox ID, timestamp, and safe summary code. Status text, credentials, tokens, request bodies, headers, raw errors, and arbitrary metadata never enter audit or Activity.
+- Audit hashes use a versioned RFC 8785-compatible canonical JSON envelope and SHA-256 with sequence and previous hash. Verification recomputes the complete chain and compares the stored head. This is tamper evidence, not non-repudiation against an attacker able to rewrite the database and every external checkpoint.
+- Outbox states are facts: `pending`, `delivered`, `unknown`, and `failed`. A transport outcome that may have taken effect is `unknown`, never blindly retried with a fresh effect key or aged into `failed`.
+- Activity and audit-integrity reads authorize before storage, constrain organization from the Host principal, apply Project/object/action filters in the repository, and return only detached browser-safe projections.
 
 ## Ticket boundary
 
-T02 implements only Owner authentication, session/recovery lifecycle, and the reusable authorization entrypoint. It does not implement audit hash chains, outbox delivery, Project/Goal domains, members, Feishu, calendar, risks, topics, deliverables, file search/preview, AI analysis, agents, automation, backup, TLS/VPN, or production operations. It may expose typed future policy ports, but it must not simulate those capabilities.
+T03 deepens only the existing protected status command into the reusable transaction/receipt/Outbox/audit seam and renders its safe Activity. It does not invent Project rows merely to populate a filter and does not implement Goal, members, Feishu, calendar, risks, topics, deliverables, files, AI analysis, agents, automation, backup, TLS/VPN, or production operations. The Outbox dispatcher contract may prove all four states, but T03 does not simulate a third-party delivery adapter.
 
 ## Required evidence
 
@@ -58,3 +68,4 @@ T02 implements only Owner authentication, session/recovery lifecycle, and the re
 - A browser journey that writes through the public command, observes the Host projection, and observes it again after a full restart with the same database.
 - Built-entry, lazy-CJS bundle, generated Typert, and real tarball checks.
 - T02 additionally requires real carrier-level 401/403 evidence, server-observed Cookie attributes/round trips, one-time recovery behavior, and proof that an unauthenticated browser never renders or mutates the Workbench projection.
+- T03 additionally requires rollback fault evidence, response-loss replay without duplicate rows, hash-chain mutation/deletion/reorder detection, Activity filtering/redaction, all four observable Outbox states, generated four-method Typert faces, and a real-browser Activity journey that never renders protected data before authentication.

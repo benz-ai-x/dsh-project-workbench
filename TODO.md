@@ -21,9 +21,18 @@
 - [x] Provide a local, secret-safe recovery CLI that consumes the prior code, resets the password, invalidates every session, and prints one replacement code once.
 - [x] Prove setup races, password verification, cookie attributes, immediate logout, unauthenticated denial, recovery replay denial, HMR/disposal, restart, packed CLI, and real-browser behavior.
 
+## T03 — Traceable command, Outbox, and Activity (#4)
+
+- [x] Commit status state, one pending Outbox intent, append-only audit, hash head, and replay receipt in one SQLite transaction.
+- [x] Prove rollback leaves no partial artifacts and same-key/same-intent replay creates no duplicate effect; reject changed intent under the same key.
+- [x] Verify the versioned RFC 8785/SHA-256 audit chain and record server-derived actor, bounded reason, object version, and causation ID.
+- [x] Expose authorized Activity filtering by Project scope, object, and action without copying status text or sensitive request/adapter values into audit/log projections.
+- [x] Make pending, delivered, unknown, and failed Outbox truths observable, with ambiguous delivery remaining unknown.
+- [x] Prove Scenario, Loader/Profile, generated Remote, Client lifecycle, HMR, packed artifacts, restart, and real-browser behavior for the T03 surface.
+
 ## Later tickets
 
-- [ ] T03+ transactional outbox/audit, Project domain, collaboration, files, AI-native analysis, automation, and production hardening remain intentionally outside T02.
+- [ ] T04+ Project domain, collaboration, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T03.
 
 ## Definition of done
 

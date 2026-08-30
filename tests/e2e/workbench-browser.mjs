@@ -39,6 +39,8 @@ const OWNER_SESSION_COOKIE_NAME = '__Host-dsh-workbench-session'
 const OWNER_AUTH_STATE_PATH = '/api/workbench-auth/state'
 const OWNER_AUTH_INITIALIZE_PATH = '/api/workbench-auth/initialize'
 const WORKBENCH_SNAPSHOT_PATH = '/api/workbench/snapshot'
+const WORKBENCH_ACTIVITY_PATH = '/api/workbench/activity'
+const WORKBENCH_AUDIT_INTEGRITY_PATH = '/api/workbench/auditIntegrity'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -548,6 +550,28 @@ async function assertNoHorizontalOverflow(page, label) {
   )
 }
 
+async function assertActivityProjection(page, eventCount, statusMessage) {
+  const panel = page.locator('section[aria-labelledby="workbench-activity-title"]')
+  await panel.waitFor({ state: 'visible' })
+  await panel.getByText('审计链验证通过', { exact: true }).waitFor({ state: 'visible' })
+  await panel.getByText(`已检查事件: ${String(eventCount)}`, { exact: true })
+    .waitFor({ state: 'visible' })
+  if (eventCount === 0) {
+    await panel.getByText('没有匹配的活动', { exact: true }).waitFor({ state: 'visible' })
+  } else {
+    await panel.getByRole('heading', { name: '状态版本已提交' }).waitFor({ state: 'visible' })
+    await panel.getByText('待投递', { exact: true }).waitFor({ state: 'visible' })
+  }
+  if (statusMessage !== undefined) {
+    assert.equal(
+      (await panel.textContent())?.includes(statusMessage),
+      false,
+      'Activity copied protected status text into its audit projection',
+    )
+  }
+  return panel
+}
+
 async function assertWithinViewport(locator, page, label) {
   const box = await locator.boundingBox()
   assert.notEqual(box, null, `${label}: element has no rendered box`)
@@ -733,7 +757,7 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const initialStyleCount = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).count()
-  assert.equal(initialStyleCount, 2, 'Workbench Client did not own exactly two CSS Module resources')
+  assert.equal(initialStyleCount, 3, 'Workbench Client did not own exactly three CSS Module resources')
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -865,11 +889,11 @@ async function main() {
     ],
   })
 
-  const initialPassword = `T02 Owner initial ${new Date().toISOString()}!`
-  const wrongPassword = 'T02 deliberately wrong password!'
-  const firstRecoveredPassword = `T02 Owner recovered once ${new Date().toISOString()}!`
-  const finalRecoveredPassword = `T02 Owner recovered twice ${new Date().toISOString()}!`
-  const message = `T02 authenticated browser restart proof ${new Date().toISOString()}`
+  const initialPassword = `T03 Owner initial ${new Date().toISOString()}!`
+  const wrongPassword = 'T03 deliberately wrong password!'
+  const firstRecoveredPassword = `T03 Owner recovered once ${new Date().toISOString()}!`
+  const finalRecoveredPassword = `T03 Owner recovered twice ${new Date().toISOString()}!`
+  const message = `T03 audited browser restart proof ${new Date().toISOString()}`
   const expectedHttpError = /(?:401|Unauthorized)/u
 
   // Fresh browser: setup is visible, but the protected projection is neither
@@ -883,7 +907,10 @@ async function main() {
   await setupPassword.waitFor({ state: 'visible' })
   assert.equal(await firstJourney.page.locator('#workbench-login-password').count(), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
   await captureVisual(firstJourney.page, '01-setup-desktop')
   await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
@@ -896,6 +923,7 @@ async function main() {
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 1)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
 
   // Hold the real initialize request briefly so the actual disabled/pending
   // UI is observable rather than inferred from component internals.
@@ -994,10 +1022,18 @@ async function main() {
 
   await firstJourney.page.getByRole('button', { name: '我已安全保存，进入工作台' }).click()
   await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
+  await assertActivityProjection(firstJourney.page, 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
+  assert.equal(
+    countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
+    0,
+    'Activity should receive audit integrity from the same Host snapshot, not a second RPC',
+  )
   assert.equal(await recoveryLocator.count(), 0)
   await firstJourney.page.reload({ waitUntil: 'load' })
   await dismissHarnessOnboarding(firstJourney.page)
   await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
+  await assertActivityProjection(firstJourney.page, 0)
   assert.equal(await recoveryLocator.count(), 0, 'refresh redisplayed the one-time recovery code')
   await assertSecretsAbsentFromBrowserStorage(
     firstJourney.page,
@@ -1008,7 +1044,7 @@ async function main() {
   await firstEditor.click()
   await firstEditor.pressSequentially(message)
   assert.equal(await firstEditor.inputValue(), message)
-  await firstJourney.page.locator('form button[type="submit"]').click()
+  await firstJourney.page.getByRole('button', { name: '保存状态' }).click()
   await firstJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
   const firstProjection = firstJourney.page
     .locator('main[data-workbench-phase="value"] p')
@@ -1016,11 +1052,20 @@ async function main() {
   await firstProjection.waitFor({ state: 'visible' })
   assert.equal(await firstProjection.textContent(), message)
   assert.equal(await firstEditor.inputValue(), message)
+  const activityPanel = await assertActivityProjection(firstJourney.page, 1, message)
+  const activityObjectId = activityPanel.getByLabel('对象 ID')
+  await activityObjectId.fill('status-not-visible')
+  await activityPanel.getByRole('button', { name: '应用筛选' }).click()
+  await activityPanel.getByText('没有匹配的活动', { exact: true }).waitFor({ state: 'visible' })
+  await activityObjectId.fill('')
+  await activityPanel.getByRole('button', { name: '应用筛选' }).click()
+  await assertActivityProjection(firstJourney.page, 1, message)
   await exerciseClientHmr(
     firstJourney,
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
     message,
   )
+  await assertActivityProjection(firstJourney.page, 1, message)
   const sessionBar = firstJourney.page.locator('header').filter({
     has: firstJourney.page.getByRole('button', { name: '退出登录' }),
   })
@@ -1049,6 +1094,7 @@ async function main() {
   await firstJourney.page.getByRole('button', { name: '退出登录' }).click()
   await firstJourney.page.locator('#workbench-login-password').waitFor({ state: 'visible' })
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   const postLogoutCookies = await firstNetwork.cdp.send('Network.getAllCookies')
   assert.equal(
@@ -1066,6 +1112,8 @@ async function main() {
   await separateLogin.waitFor({ state: 'visible' })
   assert.equal(await separateJourney.page.locator('#workbench-owner-password').count(), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SNAPSHOT_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_ACTIVITY_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_AUDIT_INTEGRITY_PATH), 0)
   await separateLogin.fill(wrongPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
@@ -1078,6 +1126,7 @@ async function main() {
     .filter({ hasText: message })
   await separateProjection.waitFor({ state: 'visible' })
   assert.equal(await separateProjection.textContent(), message)
+  await assertActivityProjection(separateJourney.page, 1, message)
   await assertNoBrowserErrors(separateJourney, [expectedHttpError])
   await separateJourney.context.close()
   await stopDsh(first.host)
@@ -1104,6 +1153,7 @@ async function main() {
   await recoveredProjection.waitFor({ state: 'visible' })
   assert.equal(await recoveredProjection.textContent(), message)
   assert.equal(await secondJourney.page.locator('#workbench-status-editor').inputValue(), message)
+  await assertActivityProjection(secondJourney.page, 1, message)
   await ownerCookieFromChrome(secondNetwork)
   await assertNoBrowserErrors(secondJourney)
   await stopDsh(second.host)
@@ -1204,12 +1254,13 @@ async function main() {
   await finalProjection.waitFor({ state: 'visible' })
   assert.equal(await finalProjection.textContent(), message)
   assert.equal(await postRecoveryJourney.page.locator('#workbench-status-editor').inputValue(), message)
+  await assertActivityProjection(postRecoveryJourney.page, 1, message)
   await assertNoBrowserErrors(postRecoveryJourney, [expectedHttpError])
   await postRecoveryJourney.context.close()
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS real Workbench setup -> protected carrier -> secure cookie -> Client HMR '
+    'PASS real Workbench setup -> audited command -> redacted Activity -> Client HMR '
       + '-> logout -> restart -> one-time offline recovery -> session revocation\n',
   )
 }

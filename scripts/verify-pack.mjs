@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T02 npm archives without touching publication.
+ * Create and inspect the real T03 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -62,6 +62,7 @@ const packageSpecs = [
     expectedDeclarations: [
       'lib/typert.host.d.ts',
       'lib/typert.remote-client.d.ts',
+      'lib/types/audit.d.ts',
       'lib/types/authorization.d.ts',
       'lib/types/client.d.ts',
       'lib/types/http-bridge.d.ts',
@@ -84,8 +85,10 @@ const packageSpecs = [
     requiredExports: ['.', './client', './package.json'],
     requiredFiles: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts'],
     expectedDeclarations: [
+      'lib/types/client/ActivityPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
       'lib/types/client/WorkbenchStatusPage.d.ts',
+      'lib/types/client/activity-controller.d.ts',
       'lib/types/client/auth-http.d.ts',
       'lib/types/client/controller.d.ts',
       'lib/types/client/index.d.ts',
@@ -496,6 +499,41 @@ export default class PackedAuthFixture extends Service {
   check(result?.unauthorizedCode === 'unauthorized', 'clean consumer: installed Host direct invocation fails closed without a principal')
   check(result?.initialSnapshot === null, 'clean consumer: installed Host starts with an empty projection')
   check(result?.committed?.message === 'packed consumer status' && result?.committed?.revision === 1, 'clean consumer: installed Host commits setStatus revision 1')
+  check(
+    typeof result?.receipt?.commandId === 'string'
+      && typeof result?.receipt?.auditEventId === 'string'
+      && typeof result?.receipt?.outboxId === 'string',
+    'clean consumer: installed Host returns the three durable receipt identities',
+  )
+  check(
+    result?.initialActivity?.items?.length === 0
+      && result?.initialActivity?.nextBeforeSequence === null
+      && result?.initialActivity?.integrity?.valid === true
+      && result?.initialActivity?.integrity?.eventCount === 0
+      && result?.initialActivity?.integrity?.issue === null,
+    'clean consumer: installed Host starts with an empty Activity page and same-snapshot integrity',
+  )
+  check(
+    result?.committedActivity?.items?.length === 1
+      && result?.committedActivity?.items?.[0]?.eventId === result?.receipt?.auditEventId
+      && result?.committedActivity?.items?.[0]?.commandId === result?.receipt?.commandId
+      && result?.committedActivity?.items?.[0]?.outbox?.id === result?.receipt?.outboxId
+      && result?.committedActivity?.items?.[0]?.outbox?.state === 'pending',
+    'clean consumer: installed Host projects the committed audit and pending Outbox receipt in Activity',
+  )
+  check(
+    result?.committedActivity?.integrity?.valid === true
+      && result?.committedActivity?.integrity?.eventCount === 1
+      && result?.committedActivity?.integrity?.issue === null
+      && result?.committedActivity?.integrity?.headHash === result?.committedActivity?.items?.[0]?.hash
+      && JSON.stringify(result?.committedIntegrity) === JSON.stringify(result?.committedActivity?.integrity),
+    'clean consumer: installed Host returns rows and one-event integrity from the Activity snapshot',
+  )
+  check(
+    JSON.stringify(result?.restartActivity) === JSON.stringify(result?.committedActivity)
+      && JSON.stringify(result?.restartIntegrity) === JSON.stringify(result?.restartActivity?.integrity),
+    'clean consumer: installed Host recovers Activity and audit integrity after restart',
+  )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
   check(result?.firstRepositoryClosed === true && result?.secondRepositoryClosed === true, 'clean consumer: dispose closes both packed SQLite repositories')
@@ -561,8 +599,9 @@ assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
 assert.ok(!('default' in hostContract))
 assert.equal(typeof client.apply, 'function')
 assert.ok(!('default' in client))
-assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), ['setStatus', 'snapshot'])
-assert.deepEqual(remoteTypert.TYPERT_REMOTE.descriptors.map(value => value.method).sort(), ['setStatus', 'snapshot'])
+const remoteMethods = ['activity', 'auditIntegrity', 'setStatus', 'snapshot']
+assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), remoteMethods)
+assert.deepEqual(remoteTypert.TYPERT_REMOTE.descriptors.map(value => value.method).sort(), remoteMethods)
 assert.equal(typeof recovery.recoverOwnerOffline, 'function')
 assert.ok(!('default' in recovery))
 assert.equal(bundle.dsh.bundle.patch, './cordis.patch.yml')
@@ -573,7 +612,12 @@ assert.ok(bundlePatch.includes(CLIENT))
 
 const bareModuleBaseUrl = pathToFileURL(join(CONSUMER_ROOT, 'consumer-anchor.mjs')).href
 let initialSnapshot
+let initialActivity
+let initialIntegrity
 let committed
+let receipt
+let committedActivity
+let committedIntegrity
 let firstContext
 let firstService
 let loaderEntryName
@@ -599,12 +643,61 @@ try {
   )
   initialSnapshot = await firstAuth.run(() => firstService.snapshot(new AbortController().signal))
   assert.equal(initialSnapshot, null)
-  const outcome = await firstAuth.run(() => firstService.setStatus({ message: 'packed consumer status', expectedRevision: null }, new AbortController().signal))
+  initialActivity = await firstAuth.run(() => firstService.activity(
+    { projectId: null, limit: 10 },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(initialActivity.items, [])
+  assert.equal(initialActivity.nextBeforeSequence, null)
+  assert.equal(initialActivity.integrity.valid, true)
+  assert.equal(initialActivity.integrity.eventCount, 0)
+  assert.equal(initialActivity.integrity.issue, null)
+  assert.match(initialActivity.integrity.headHash, /^sha256:[0-9a-f]{64}$/u)
+  initialIntegrity = await firstAuth.run(() => firstService.auditIntegrity(
+    new AbortController().signal,
+  ))
+  assert.deepEqual(initialIntegrity, initialActivity.integrity)
+  const outcome = await firstAuth.run(() => firstService.setStatus({
+    message: 'packed consumer status',
+    expectedRevision: null,
+    idempotencyKey: 'packed-consumer-idempotency-0001',
+    causationId: 'packed-consumer-causation-0001',
+    reason: 'owner-status-edit',
+  }, new AbortController().signal))
   assert.equal(outcome.ok, true)
   committed = outcome.value
+  receipt = outcome.receipt
   assert.equal(committed.message, 'packed consumer status')
   assert.equal(committed.revision, 1)
+  assert.match(receipt.commandId, /^command-/u)
+  assert.match(receipt.auditEventId, /^audit-/u)
+  assert.match(receipt.outboxId, /^outbox-/u)
   assert.deepEqual(await firstAuth.run(() => firstService.snapshot(new AbortController().signal)), committed)
+  committedActivity = await firstAuth.run(() => firstService.activity({
+    projectId: null,
+    objectType: 'workbench-status',
+    objectId: committed.id,
+    action: 'workbench.status.updated',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(committedActivity.items.length, 1)
+  const item = committedActivity.items[0]
+  assert.equal(item.eventId, receipt.auditEventId)
+  assert.equal(item.commandId, receipt.commandId)
+  assert.equal(item.causationId, 'packed-consumer-causation-0001')
+  assert.equal(item.object.id, committed.id)
+  assert.equal(item.object.version, 1)
+  assert.equal(item.outbox.id, receipt.outboxId)
+  assert.equal(item.outbox.state, 'pending')
+  assert.equal(JSON.stringify(committedActivity).includes('packed consumer status'), false)
+  assert.equal(committedActivity.integrity.valid, true)
+  assert.equal(committedActivity.integrity.eventCount, 1)
+  assert.equal(committedActivity.integrity.issue, null)
+  assert.equal(committedActivity.integrity.headHash, item.hash)
+  committedIntegrity = await firstAuth.run(() => firstService.auditIntegrity(
+    new AbortController().signal,
+  ))
+  assert.deepEqual(committedIntegrity, committedActivity.integrity)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -613,6 +706,8 @@ assert.equal(firstService.scenario.options.repository.closed, true)
 await assert.rejects(() => firstService.snapshot(), error => error?.failure?.code === 'unavailable')
 
 let restartSnapshot
+let restartActivity
+let restartIntegrity
 let secondContext
 let secondService
 try {
@@ -622,6 +717,15 @@ try {
   assert.ok(secondService instanceof host.WorkbenchService)
   restartSnapshot = await secondAuth.run(() => secondService.snapshot(new AbortController().signal))
   assert.deepEqual(restartSnapshot, committed)
+  restartActivity = await secondAuth.run(() => secondService.activity(
+    { projectId: null, limit: 10 },
+    new AbortController().signal,
+  ))
+  restartIntegrity = await secondAuth.run(() => secondService.auditIntegrity(
+    new AbortController().signal,
+  ))
+  assert.deepEqual(restartActivity, committedActivity)
+  assert.deepEqual(restartIntegrity, restartActivity.integrity)
 } finally {
   await secondContext?.fiber.dispose()
 }
@@ -638,8 +742,15 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   loadedInstanceMatchesPublicImport,
   unauthorizedCode,
   initialSnapshot,
+  initialActivity,
+  initialIntegrity,
   committed,
+  receipt,
+  committedActivity,
+  committedIntegrity,
   restartSnapshot,
+  restartActivity,
+  restartIntegrity,
   firstLifecycle: firstService.scenario.lifecycle,
   secondLifecycle: secondService.scenario.lifecycle,
   firstRepositoryClosed: firstService.scenario.options.repository.closed,

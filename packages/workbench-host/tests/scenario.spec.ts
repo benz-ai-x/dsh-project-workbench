@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  SetStatusRequest,
   SetStatusResult,
+  WorkbenchActivityProjection,
+  WorkbenchActivityQuery,
+  WorkbenchAuditIntegrityProjection,
+  WorkbenchOutboxClaim,
+  WorkbenchOutboxClaimRequest,
+  WorkbenchOutboxSettlement,
   WorkbenchRepository,
   WorkbenchStatusMutation,
   WorkbenchStatusSnapshot,
 } from '../src/index.ts'
+
+const TEST_AUDIT_GENESIS = `sha256:${'0'.repeat(64)}`
 import { WorkbenchScenario } from '../src/index.ts'
 import { WorkbenchAuthorizationContext, type WorkbenchAuthorization } from '../src/authorization.ts'
 
@@ -24,6 +33,8 @@ class MemoryRepository implements WorkbenchRepository {
   closeCalls = 0
   readCalls = 0
   writeCalls = 0
+  activityCalls = 0
+  integrityCalls = 0
   onSnapshot: ((signal: AbortSignal) => Promise<void>) | undefined
   onSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
   afterSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
@@ -38,11 +49,14 @@ class MemoryRepository implements WorkbenchRepository {
     return this.state === null ? null : { ...this.state }
   }
 
-  async setStatus(
+  lastMutation: WorkbenchStatusMutation | null = null
+
+  async commitStatus(
     mutation: WorkbenchStatusMutation,
     signal: AbortSignal,
   ): Promise<SetStatusResult> {
     this.writeCalls += 1
+    this.lastMutation = mutation
     await this.onSetStatus?.(signal)
     const actualRevision = this.state?.revision ?? null
     if (actualRevision !== mutation.expectedRevision) {
@@ -69,7 +83,50 @@ class MemoryRepository implements WorkbenchRepository {
         updatedAt: mutation.updatedAt,
       }
     await this.afterSetStatus?.(signal)
-    return { ok: true, value: { ...this.state } }
+    return {
+      ok: true,
+      value: { ...this.state },
+      receipt: {
+        commandId: mutation.command.commandId,
+        auditEventId: mutation.command.auditEventId,
+        outboxId: mutation.command.outboxId,
+      },
+    }
+  }
+
+  lastActivityQuery: WorkbenchActivityQuery | null = null
+
+  async readActivity(query: WorkbenchActivityQuery): Promise<WorkbenchActivityProjection> {
+    this.activityCalls += 1
+    this.lastActivityQuery = query
+    return Object.freeze({
+      items: Object.freeze([]),
+      nextBeforeSequence: null,
+      integrity: Object.freeze({
+        valid: true,
+        eventCount: 0,
+        headHash: TEST_AUDIT_GENESIS,
+        issue: null,
+      }),
+    })
+  }
+
+  async verifyAuditChain(): Promise<WorkbenchAuditIntegrityProjection> {
+    this.integrityCalls += 1
+    return Object.freeze({
+      valid: true,
+      eventCount: 0,
+      headHash: TEST_AUDIT_GENESIS,
+      issue: null,
+    })
+  }
+
+  async claimOutbox(_request: WorkbenchOutboxClaimRequest): Promise<WorkbenchOutboxClaim | null> {
+    return null
+  }
+
+  async settleOutbox(_settlement: WorkbenchOutboxSettlement): Promise<boolean> {
+    return false
   }
 
   async close(): Promise<void> {
@@ -88,14 +145,22 @@ function createScenario(
     new Date('2026-08-31T01:02:03.000Z'),
     new Date('2026-08-31T02:03:04.000Z'),
   ]
-  const ids = ['status-001', 'status-002']
+  const statusIds = ['status-001', 'status-002']
+  const commandIds = ['command-001', 'command-002']
+  const auditIds = ['audit-001', 'audit-002']
+  const outboxIds = ['outbox-001', 'outbox-002']
   const adapters = { feishu: { adapterId: 'fixture-feishu' } } as const
   return {
     repository,
     scenario: new WorkbenchScenario({
       repository,
       clock: { now: () => instants.shift() ?? new Date('2026-08-31T03:04:05.000Z') },
-      ids: { nextStatusId: () => ids.shift() ?? 'status-fallback' },
+      ids: {
+        nextStatusId: () => statusIds.shift() ?? 'status-fallback',
+        nextCommandId: () => commandIds.shift() ?? 'command-fallback',
+        nextAuditEventId: () => auditIds.shift() ?? 'audit-fallback',
+        nextOutboxId: () => outboxIds.shift() ?? 'outbox-fallback',
+      },
       adapters,
       authorization: access,
       maxStatusLength: 12,
@@ -107,22 +172,41 @@ function failureCode(error: unknown): string | undefined {
   return error instanceof TypertRemoteFailure ? error.failure.code : undefined
 }
 
+function statusRequest(message: string, expectedRevision: number | null) {
+  return {
+    message,
+    expectedRevision,
+    idempotencyKey: 'idempotency-key-001',
+    causationId: 'causation-id-000001',
+    reason: 'owner-status-edit' as const,
+  }
+}
+
 describe('WorkbenchScenario', () => {
   it('drives a deterministic command through the repository into the public projection', async () => {
     const { scenario, repository } = createScenario()
     await scenario.open()
 
     await expect(scenario.snapshot()).resolves.toBeNull()
-    await expect(scenario.setStatus({
-      message: '  On track  ',
-      expectedRevision: null,
-    }, new AbortController().signal)).resolves.toEqual({
+    await expect(scenario.setStatus(
+      {
+        ...statusRequest('  On track  ', null),
+        actor: { kind: 'owner', id: 'browser-forged-owner' },
+        organizationId: 'browser-forged-organization',
+      } as SetStatusRequest,
+      new AbortController().signal,
+    )).resolves.toEqual({
       ok: true,
       value: {
         id: 'status-001',
         message: 'On track',
         revision: 1,
         updatedAt: '2026-08-31T01:02:03.000Z',
+      },
+      receipt: {
+        commandId: 'command-001',
+        auditEventId: 'audit-001',
+        outboxId: 'outbox-001',
       },
     })
     await expect(scenario.snapshot()).resolves.toEqual({
@@ -132,6 +216,17 @@ describe('WorkbenchScenario', () => {
       updatedAt: '2026-08-31T01:02:03.000Z',
     })
     expect(repository.openCalls).toBe(1)
+    expect(repository.lastMutation?.command).toMatchObject({
+      actor: {
+        kind: 'owner',
+        id: 'owner-test',
+        organizationId: 'organization-test',
+        teamId: 'team-test',
+      },
+      idempotencyKey: 'idempotency-key-001',
+      causationId: 'causation-id-000001',
+      reason: 'owner-status-edit',
+    })
     expect(scenario.adapters).toEqual({ feishu: { adapterId: 'fixture-feishu' } })
 
     await scenario.close()
@@ -147,10 +242,10 @@ describe('WorkbenchScenario', () => {
     }
     await scenario.open()
 
-    await expect(scenario.setStatus({
-      message: 'Stale update',
-      expectedRevision: 2,
-    }, new AbortController().signal)).resolves.toEqual({
+    await expect(scenario.setStatus(
+      statusRequest('Stale update', 2),
+      new AbortController().signal,
+    )).resolves.toEqual({
       ok: false,
       error: {
         code: 'revision-conflict',
@@ -168,21 +263,26 @@ describe('WorkbenchScenario', () => {
     const signal = new AbortController().signal
 
     for (const request of [
-      { message: '   ', expectedRevision: null },
-      { message: '1234567890123', expectedRevision: null },
-      { message: 'valid', expectedRevision: 0 },
+      { ...statusRequest('   ', null) },
+      { ...statusRequest('1234567890123', null) },
+      { ...statusRequest('valid', 0) },
+      { ...statusRequest('valid', null), idempotencyKey: 'short' },
+      { ...statusRequest('valid', null), reason: 'raw user text' },
     ]) {
-      const error = await scenario.setStatus(request, signal).catch((reason: unknown) => reason)
+      const error = await scenario.setStatus(
+        request as SetStatusRequest,
+        signal,
+      ).catch((reason: unknown) => reason)
       expect(failureCode(error)).toBe('bad-request')
     }
     expect(repository.writeCalls).toBe(0)
 
     const cancelled = new AbortController()
     cancelled.abort(new Error('caller left'))
-    const error = await scenario.setStatus({
-      message: 'valid',
-      expectedRevision: null,
-    }, cancelled.signal).catch((reason: unknown) => reason)
+    const error = await scenario.setStatus(
+      statusRequest('valid', null),
+      cancelled.signal,
+    ).catch((reason: unknown) => reason)
     expect(failureCode(error)).toBe('cancelled')
     expect(repository.writeCalls).toBe(0)
 
@@ -196,14 +296,76 @@ describe('WorkbenchScenario', () => {
 
     const readError = await scenario.snapshot().catch((reason: unknown) => reason)
     expect(failureCode(readError)).toBe('unauthorized')
-    const writeError = await scenario.setStatus({
-      message: 'Must not pass',
-      expectedRevision: null,
-    }, new AbortController().signal).catch((reason: unknown) => reason)
+    const writeError = await scenario.setStatus(
+      statusRequest('Must not pass', null),
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
     expect(failureCode(writeError)).toBe('unauthorized')
     expect(repository.readCalls).toBe(0)
     expect(repository.writeCalls).toBe(0)
+    expect(repository.activityCalls).toBe(0)
+    expect(repository.integrityCalls).toBe(0)
 
+    await scenario.close()
+  })
+
+  it('derives Activity scope from authorization and validates safe filters before storage', async () => {
+    const repository = new MemoryRepository()
+    const required: string[] = []
+    const filtered: string[] = []
+    const access: WorkbenchAuthorization = {
+      require: action => {
+        required.push(action)
+        return Promise.resolve({
+          ownerId: 'owner-authoritative',
+          organizationId: 'organization-authoritative',
+          teamId: 'team-authoritative',
+        })
+      },
+      filterProjection: (action, projection) => {
+        filtered.push(action)
+        return Promise.resolve(projection)
+      },
+    }
+    const { scenario } = createScenario(repository, access)
+    await scenario.open()
+
+    await expect(scenario.activity({
+      projectId: 'project-safe',
+      objectType: 'workbench-status',
+      objectId: 'status-safe',
+      action: 'workbench.status.updated',
+      beforeSequence: 4,
+      limit: 10,
+    })).resolves.toEqual({
+      items: [],
+      nextBeforeSequence: null,
+      integrity: {
+        valid: true,
+        eventCount: 0,
+        headHash: TEST_AUDIT_GENESIS,
+        issue: null,
+      },
+    })
+    expect(repository.lastActivityQuery).toEqual({
+      organizationId: 'organization-authoritative',
+      filter: {
+        projectId: 'project-safe',
+        objectType: 'workbench-status',
+        objectId: 'status-safe',
+        action: 'workbench.status.updated',
+        beforeSequence: 4,
+        limit: 10,
+      },
+    })
+    await expect(scenario.auditIntegrity()).resolves.toMatchObject({ valid: true, eventCount: 0 })
+    expect(required).toEqual(['workbench.activity.read', 'workbench.audit.verify'])
+    expect(filtered).toEqual(['workbench.activity.read', 'workbench.audit.verify'])
+
+    const error = await scenario.activity({ limit: 101 } as never)
+      .catch((reason: unknown) => reason)
+    expect(failureCode(error)).toBe('bad-request')
+    expect(repository.activityCalls).toBe(1)
     await scenario.close()
   })
 
@@ -243,10 +405,7 @@ describe('WorkbenchScenario', () => {
     await scenario.open()
     const caller = new AbortController()
 
-    const pending = scenario.setStatus({
-      message: 'In flight',
-      expectedRevision: null,
-    }, caller.signal)
+    const pending = scenario.setStatus(statusRequest('In flight', null), caller.signal)
     await started.promise
     caller.abort(new Error('caller left'))
 
@@ -269,10 +428,7 @@ describe('WorkbenchScenario', () => {
     await scenario.open()
     const caller = new AbortController()
 
-    const pending = scenario.setStatus({
-      message: 'Committed',
-      expectedRevision: null,
-    }, caller.signal)
+    const pending = scenario.setStatus(statusRequest('Committed', null), caller.signal)
     await committed.promise
     caller.abort(new Error('caller left after commit'))
     release.resolve()
@@ -284,6 +440,11 @@ describe('WorkbenchScenario', () => {
         message: 'Committed',
         revision: 1,
         updatedAt: '2026-08-31T01:02:03.000Z',
+      },
+      receipt: {
+        commandId: 'command-001',
+        auditEventId: 'audit-001',
+        outboxId: 'outbox-001',
       },
     })
     await scenario.close()

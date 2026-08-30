@@ -3,6 +3,7 @@ import type {
   LoginOwnerResult,
   OwnerAccessProjection,
   OwnerAuthResponse,
+  WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
@@ -80,6 +81,19 @@ function remoteOk<T>(value: T): RemoteResult<T> {
   return { ok: true, value }
 }
 
+function activityProjection(): WorkbenchActivityProjection {
+  return {
+    items: [],
+    nextBeforeSequence: null,
+    integrity: {
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    },
+  }
+}
+
 function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
   return {
     state: overrides.state ?? vi.fn(() => Promise.resolve(authOk({ state: 'signed-out' }))),
@@ -99,18 +113,37 @@ function remote(overrides: Partial<WorkbenchRemote> = {}): WorkbenchRemote {
   return {
     snapshot: overrides.snapshot ?? vi.fn(() => Promise.resolve(remoteOk(snapshot()))),
     setStatus: overrides.setStatus ?? vi.fn(() => Promise.resolve(remoteOk({
-      ok: true,
+      ok: true as const,
       value: snapshot(2),
+      receipt: {
+        commandId: 'command-test',
+        auditEventId: 'audit-test',
+        outboxId: 'outbox-test',
+      },
+    }))),
+    activity: overrides.activity ?? vi.fn(() => Promise.resolve(remoteOk(activityProjection()))),
+    auditIntegrity: overrides.auditIntegrity ?? vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
     }))),
   }
 }
 
 describe('OwnerController', () => {
-  it('probes auth first and never creates or calls status while setup is required', async () => {
+  it('probes auth first and never creates or calls protected controllers while setup is required', async () => {
     const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(snapshot())))
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const auditIntegrity = vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    })))
     const controller = new OwnerController(auth({
       state: vi.fn(() => Promise.resolve(authOk({ state: 'setup-required' }))),
-    }), remote({ snapshot: snapshotRemote }))
+    }), remote({ snapshot: snapshotRemote, activity: activityRemote, auditIntegrity }))
 
     expect(controller.getSnapshot()).toMatchObject({ phase: 'probing', status: null })
     await controller.start()
@@ -118,20 +151,30 @@ describe('OwnerController', () => {
       phase: 'setup',
       access: { state: 'setup-required' },
       status: null,
+      activity: null,
       recoveryCode: null,
       issue: null,
     })
     expect(snapshotRemote).not.toHaveBeenCalled()
+    expect(activityRemote).not.toHaveBeenCalled()
+    expect(auditIntegrity).not.toHaveBeenCalled()
   })
 
   it('checks confirmation, locks setup, and withholds status until recovery acknowledgement', async () => {
     const setup = deferred<OwnerAuthResponse<InitializeOwnerResult>>()
     const initialize = vi.fn(() => setup.promise)
     const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(snapshot())))
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const auditIntegrity = vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    })))
     const controller = new OwnerController(auth({
       state: vi.fn(() => Promise.resolve(authOk({ state: 'setup-required' }))),
       initialize,
-    }), remote({ snapshot: snapshotRemote }))
+    }), remote({ snapshot: snapshotRemote, activity: activityRemote, auditIntegrity }))
     await controller.start()
 
     await controller.initialize('one', 'two')
@@ -155,17 +198,23 @@ describe('OwnerController', () => {
       phase: 'recovery',
       access: access(),
       status: null,
+      activity: null,
       recoveryCode: 'WB1-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH',
     })
     expect(snapshotRemote).not.toHaveBeenCalled()
+    expect(activityRemote).not.toHaveBeenCalled()
+    expect(auditIntegrity).not.toHaveBeenCalled()
 
     await controller.acknowledgeRecovery()
     expect(controller.getSnapshot()).toMatchObject({
       phase: 'authenticated',
       recoveryCode: null,
       status: expect.anything(),
+      activity: expect.anything(),
     })
     expect(snapshotRemote).toHaveBeenCalledOnce()
+    expect(activityRemote).toHaveBeenCalledOnce()
+    expect(auditIntegrity).not.toHaveBeenCalled()
   })
 
   it('keeps login errors safe, locks duplicate work, then opens status after success', async () => {
@@ -196,8 +245,52 @@ describe('OwnerController', () => {
     successful.resolve(authOk({ access: access() }))
     await Promise.all([first, duplicate])
 
-    expect(controller.getSnapshot()).toMatchObject({ phase: 'authenticated', issue: null })
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'authenticated',
+      status: expect.anything(),
+      activity: expect.anything(),
+      issue: null,
+    })
     expect(snapshotRemote).toHaveBeenCalledOnce()
+  })
+
+  it('creates Activity after authentication and refreshes it after a committed status command', async () => {
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const auditIntegrity = vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    })))
+    const controller = new OwnerController(auth({
+      state: vi.fn(() => Promise.resolve(authOk(access()))),
+    }), remote({ activity: activityRemote, auditIntegrity }))
+
+    await controller.start()
+    const statusController = controller.getSnapshot().status
+    const activityController = controller.getSnapshot().activity
+    expect(activityController?.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      activity: {
+        items: [],
+        nextBeforeSequence: null,
+        integrity: { valid: true, eventCount: 0, issue: null },
+      },
+      integrity: { valid: true, eventCount: 0, issue: null },
+      loadingMore: false,
+    })
+    expect(activityRemote).toHaveBeenCalledOnce()
+    expect(auditIntegrity).not.toHaveBeenCalled()
+
+    statusController?.setDraft('committed status')
+    await statusController?.save()
+    await vi.waitFor(() => {
+      expect(activityRemote).toHaveBeenCalledTimes(2)
+    })
+    expect(auditIntegrity).not.toHaveBeenCalled()
+    expect(controller.getSnapshot().activity).toBe(activityController)
+
+    await controller.dispose()
   })
 
   it('erases the protected snapshot and draft after confirmed logout', async () => {
@@ -208,7 +301,9 @@ describe('OwnerController', () => {
     }), remote())
     await controller.start()
     const status = controller.getSnapshot().status
+    const activity = controller.getSnapshot().activity
     expect(status).not.toBeNull()
+    expect(activity?.getSnapshot().phase).toBe('ready')
     status?.setDraft('sensitive unsaved draft')
 
     const leaving = controller.logout()
@@ -217,6 +312,7 @@ describe('OwnerController', () => {
       phase: 'stale',
       draft: 'sensitive unsaved draft',
     })
+    expect(activity?.getSnapshot().phase).toBe('stale')
     logout.resolve(authOk({ state: 'signed-out' }))
     await leaving
 
@@ -224,6 +320,7 @@ describe('OwnerController', () => {
       phase: 'login',
       access: { state: 'signed-out' },
       status: null,
+      activity: null,
       recoveryCode: null,
       issue: null,
     })
@@ -232,6 +329,11 @@ describe('OwnerController', () => {
       snapshot: null,
       draft: '',
       draftDirty: false,
+    })
+    expect(activity?.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      activity: null,
+      integrity: null,
     })
   })
 
@@ -242,6 +344,7 @@ describe('OwnerController', () => {
     }), remote(), clock.options)
     await controller.start()
     const status = controller.getSnapshot().status
+    const activity = controller.getSnapshot().activity
     status?.setDraft('deadline-sensitive draft')
 
     clock.advanceTo('2026-08-31T00:00:01.000Z')
@@ -250,6 +353,7 @@ describe('OwnerController', () => {
       phase: 'login',
       access: { state: 'signed-out' },
       status: null,
+      activity: null,
       recoveryCode: null,
       issue: null,
     })
@@ -259,6 +363,11 @@ describe('OwnerController', () => {
       draft: '',
       draftDirty: false,
     })
+    expect(activity?.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      activity: null,
+      integrity: null,
+    })
     expect(clock.count()).toBe(0)
   })
 
@@ -267,6 +376,11 @@ describe('OwnerController', () => {
     const setStatus = vi.fn(() => Promise.resolve(remoteOk({
       ok: true as const,
       value: snapshot(2),
+      receipt: {
+        commandId: 'command-expired',
+        auditEventId: 'audit-expired',
+        outboxId: 'outbox-expired',
+      },
     })))
     const controller = new OwnerController(auth({
       state: vi.fn(() => Promise.resolve(authOk(access('2026-08-31T00:00:01.000Z')))),
@@ -332,6 +446,92 @@ describe('OwnerController', () => {
       draft: 'recoverable draft',
       draftDirty: true,
     })
+  })
+
+  it('denies retained protected controllers while an auth probe is pending', async () => {
+    const probe = deferred<OwnerAuthResponse<OwnerAccessProjection>>()
+    const state = vi.fn()
+      .mockResolvedValueOnce(authOk(access()))
+      .mockImplementationOnce(() => probe.promise)
+    const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(snapshot())))
+    const setStatus = vi.fn(() => Promise.resolve(remoteOk({
+      ok: true as const,
+      value: snapshot(2),
+      receipt: {
+        commandId: 'command-probe-denied',
+        auditEventId: 'audit-probe-denied',
+        outboxId: 'outbox-probe-denied',
+      },
+    })))
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const controller = new OwnerController(
+      auth({ state }),
+      remote({ snapshot: snapshotRemote, setStatus, activity: activityRemote }),
+    )
+    await controller.start()
+    const status = controller.getSnapshot().status
+    const activity = controller.getSnapshot().activity
+    status?.setDraft('must not submit during probe')
+
+    const probing = controller.start()
+    expect(controller.getSnapshot().phase).toBe('probing')
+    await Promise.all([
+      status?.refresh(),
+      status?.save(),
+      activity?.refresh(),
+      activity?.setFilter({ objectId: 'status-probe-denied' }),
+    ])
+
+    expect(snapshotRemote).toHaveBeenCalledOnce()
+    expect(activityRemote).toHaveBeenCalledOnce()
+    expect(setStatus).not.toHaveBeenCalled()
+
+    probe.resolve(authOk(access()))
+    await probing
+    await controller.dispose()
+  })
+
+  it('denies retained protected controllers while logout is pending', async () => {
+    const logout = deferred<OwnerAuthResponse<OwnerAccessProjection>>()
+    const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(snapshot())))
+    const setStatus = vi.fn(() => Promise.resolve(remoteOk({
+      ok: true as const,
+      value: snapshot(2),
+      receipt: {
+        commandId: 'command-logout-denied',
+        auditEventId: 'audit-logout-denied',
+        outboxId: 'outbox-logout-denied',
+      },
+    })))
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const controller = new OwnerController(auth({
+      state: vi.fn(() => Promise.resolve(authOk(access()))),
+      logout: vi.fn(() => logout.promise),
+    }), remote({ snapshot: snapshotRemote, setStatus, activity: activityRemote }))
+    await controller.start()
+    const status = controller.getSnapshot().status
+    const activity = controller.getSnapshot().activity
+    status?.setDraft('draft before logout')
+
+    const leaving = controller.logout()
+    expect(controller.getSnapshot().phase).toBe('logout-pending')
+    const staleDraft = status?.getSnapshot().draft
+    status?.setDraft('must not enter a retained controller')
+    await Promise.all([
+      status?.refresh(),
+      status?.connectionReset(),
+      status?.save(),
+      activity?.refresh(),
+      activity?.setFilter({ objectId: 'status-logout-denied' }),
+    ])
+
+    expect(status?.getSnapshot().draft).toBe(staleDraft)
+    expect(snapshotRemote).toHaveBeenCalledOnce()
+    expect(activityRemote).toHaveBeenCalledOnce()
+    expect(setStatus).not.toHaveBeenCalled()
+
+    logout.resolve(authOk({ state: 'signed-out' }))
+    await leaving
   })
 
   it('erases protected state when a reconnect probe confirms auth loss without another status call', async () => {
@@ -412,9 +612,35 @@ describe('OwnerController', () => {
       phase: 'probing',
       access: null,
       status: null,
+      activity: null,
       recoveryCode: null,
       issue: null,
     })
     await Promise.all([probing, disposal])
+  })
+
+  it('synchronously erases and disposes Activity after authenticated Owner disposal', async () => {
+    const controller = new OwnerController(auth({
+      state: vi.fn(() => Promise.resolve(authOk(access()))),
+    }), remote())
+    await controller.start()
+    const activity = controller.getSnapshot().activity
+    expect(activity?.getSnapshot().phase).toBe('ready')
+
+    const disposal = controller.dispose()
+    expect(controller.getSnapshot()).toEqual({
+      phase: 'probing',
+      access: null,
+      status: null,
+      activity: null,
+      recoveryCode: null,
+      issue: null,
+    })
+    expect(activity?.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      activity: null,
+      integrity: null,
+    })
+    await disposal
   })
 })

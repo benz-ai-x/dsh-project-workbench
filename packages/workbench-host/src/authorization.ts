@@ -7,6 +7,8 @@ import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 export type WorkbenchAction =
   | 'workbench.status.read'
   | 'workbench.status.write'
+  | 'workbench.activity.read'
+  | 'workbench.audit.verify'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

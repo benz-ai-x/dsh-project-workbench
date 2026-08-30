@@ -15,6 +15,18 @@ export type {
   WorkbenchStatusControllerOptions,
   WorkbenchTransportIssue,
 } from './controller.ts'
+export {
+  INITIAL_WORKBENCH_ACTIVITY_STATE,
+  WorkbenchActivityController,
+} from './activity-controller.ts'
+export type {
+  WorkbenchActivityClientState,
+  WorkbenchActivityControllerFace,
+  WorkbenchActivityControllerOptions,
+  WorkbenchActivityPhase,
+  WorkbenchActivityRemote,
+  WorkbenchActivityTransportIssue,
+} from './activity-controller.ts'
 export { OWNER_AUTH_ENDPOINTS, OwnerAuthHttpAdapter } from './auth-http.ts'
 export type { OwnerAuthFetch, OwnerAuthHttp } from './auth-http.ts'
 export { OwnerController } from './owner-controller.ts'
@@ -28,6 +40,8 @@ export type {
 } from './owner-controller.ts'
 export { OwnerPage } from './OwnerPage.tsx'
 export type { OwnerPageProps } from './OwnerPage.tsx'
+export { ActivityPanel, DEFAULT_ACTIVITY_PANEL_COPY } from './ActivityPanel.tsx'
+export type { ActivityPanelCopy, ActivityPanelProps } from './ActivityPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

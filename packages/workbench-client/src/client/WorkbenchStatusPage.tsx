@@ -1,7 +1,7 @@
 /** Pure React Project Workbench status page. */
 
 import { useSyncExternalStore } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WorkbenchStatusController, WorkbenchClientState } from './controller.ts'
@@ -12,6 +12,7 @@ import css from './WorkbenchStatusPage.module.css'
 export interface WorkbenchStatusPageProps {
   readonly controller: WorkbenchStatusController
   readonly t: (key: WorkbenchKey) => string
+  readonly children?: ReactNode
 }
 
 function statePresentation(state: WorkbenchClientState): {
@@ -45,17 +46,15 @@ function readableTimestamp(value: string): string {
 }
 
 /** Full center-column replacement registered into ui-layout's conversation seat. */
-export function WorkbenchStatusPage({ controller, t }: WorkbenchStatusPageProps) {
+export function WorkbenchStatusPage({ controller, t, children }: WorkbenchStatusPageProps) {
   const state = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
     controller.getSnapshot,
   )
   const presentation = statePresentation(state)
-  const message = state.draft.trim()
-  const unchanged = message === (state.snapshot?.message ?? '')
-  const unavailable = state.phase === 'loading' || state.phase === 'stale'
-  const saveDisabled = state.pending || unavailable || message === '' || unchanged
+  const unchanged = state.draft.trim() === (state.snapshot?.message ?? '')
+  const saveDisabled = !controller.canSave()
   const resetDisabled = state.pending || (!state.draftDirty && unchanged)
 
   const submit = (event: FormEvent<HTMLFormElement>): void => {
@@ -188,6 +187,7 @@ export function WorkbenchStatusPage({ controller, t }: WorkbenchStatusPageProps)
             </div>
           </form>
         </section>
+        {children !== undefined && <div className={css.secondary}>{children}</div>}
       </div>
     </main>
   )

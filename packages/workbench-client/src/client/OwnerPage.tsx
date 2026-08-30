@@ -10,6 +10,7 @@ import {
 import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { OwnerController, OwnerIssueCode } from './owner-controller.ts'
 import { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
+import { ActivityPanel, type ActivityPanelCopy } from './ActivityPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -218,7 +219,8 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
 
   if ((state.phase === 'authenticated' || state.phase === 'logout-pending')
     && state.access?.state === 'signed-in'
-    && state.status !== null) {
+    && state.status !== null
+    && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
       <div className={css.authenticated}>
@@ -251,7 +253,9 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
             </Button>
           </div>
         )}
-        <WorkbenchStatusPage controller={state.status} t={t} />
+        <WorkbenchStatusPage controller={state.status} t={t}>
+          <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
+        </WorkbenchStatusPage>
       </div>
     )
   }
@@ -333,5 +337,59 @@ function readableTimestamp(value: string): string {
     }).format(parsed)
   } catch {
     return value
+  }
+}
+
+function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
+  return {
+    title: t('activity.title'),
+    subtitle: t('activity.subtitle'),
+    filtersLegend: t('activity.filters.legend'),
+    projectScopeLabel: t('activity.project.scope'),
+    projectAll: t('activity.project.all'),
+    projectWorkspace: t('activity.project.workspace'),
+    projectSpecific: t('activity.project.specific'),
+    projectIdLabel: t('activity.project.id'),
+    objectTypeLabel: t('activity.object.type'),
+    objectAll: t('activity.object.all'),
+    objectStatus: t('activity.object.status'),
+    objectIdLabel: t('activity.object.id'),
+    actionLabel: t('activity.action.label'),
+    actionAll: t('activity.action.all'),
+    actionStatusUpdated: t('activity.action.statusUpdated'),
+    applyFilters: t('activity.filters.apply'),
+    loading: t('activity.loading'),
+    stale: t('activity.stale'),
+    unavailableTitle: t('activity.unavailable.title'),
+    unavailableBody: t('activity.unavailable.body'),
+    invalidTitle: t('activity.invalid.title'),
+    invalidBody: t('activity.invalid.body'),
+    retry: t('activity.retry'),
+    loadMore: t('activity.loadMore'),
+    loadingMore: t('activity.loadingMore'),
+    paginationLoaded: t('activity.pagination.loaded'),
+    paginationComplete: t('activity.pagination.complete'),
+    emptyTitle: t('activity.empty.title'),
+    emptyBody: t('activity.empty.body'),
+    integrityValid: t('activity.integrity.valid'),
+    integrityInvalid: t('activity.integrity.invalid'),
+    integrityEvents: t('activity.integrity.events'),
+    integrityHead: t('activity.integrity.head'),
+    integrityEmptyHead: t('activity.integrity.emptyHead'),
+    summaryStatusCommitted: t('activity.summary.statusCommitted'),
+    workspaceScope: t('activity.scope.workspace'),
+    projectPrefix: t('activity.prefix.project'),
+    actorPrefix: t('activity.prefix.actor'),
+    objectPrefix: t('activity.prefix.object'),
+    revisionPrefix: t('activity.prefix.revision'),
+    reasonPrefix: t('activity.prefix.reason'),
+    reasonOwnerStatusEdit: t('activity.reason.ownerEdit'),
+    causationPrefix: t('activity.prefix.causation'),
+    outboxPrefix: t('activity.prefix.outbox'),
+    attemptsPrefix: t('activity.prefix.attempts'),
+    outboxPending: t('activity.outbox.pending'),
+    outboxDelivered: t('activity.outbox.delivered'),
+    outboxUnknown: t('activity.outbox.unknown'),
+    outboxFailed: t('activity.outbox.failed'),
   }
 }

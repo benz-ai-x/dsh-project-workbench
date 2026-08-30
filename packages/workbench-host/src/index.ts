@@ -6,6 +6,9 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   SetStatusRequest,
   SetStatusResult,
+  WorkbenchActivityFilter,
+  WorkbenchActivityProjection,
+  WorkbenchAuditIntegrityProjection,
   WorkbenchStatusSnapshot,
 } from './client.ts'
 import type { WorkbenchRepository } from './repository.ts'
@@ -212,6 +215,21 @@ export class WorkbenchService extends TypertRemoteService {
   @Remote
   setStatus(request: SetStatusRequest, signal: AbortSignal): Promise<SetStatusResult> {
     return this.scenario.setStatus(request, signal)
+  }
+
+  /** Read safe audit summaries and their observable Outbox delivery state. */
+  @Remote
+  activity(
+    filter: WorkbenchActivityFilter,
+    signal: AbortSignal,
+  ): Promise<WorkbenchActivityProjection> {
+    return this.scenario.activity(filter, signal)
+  }
+
+  /** Recompute the complete versioned audit chain and compare its stored head. */
+  @Remote
+  auditIntegrity(signal: AbortSignal): Promise<WorkbenchAuditIntegrityProjection> {
+    return this.scenario.auditIntegrity(signal)
   }
 }
 

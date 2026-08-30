@@ -5,6 +5,7 @@ import type {
   LoginOwnerResult,
   OwnerAccessProjection,
   OwnerAuthResponse,
+  WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
@@ -57,6 +58,19 @@ function remoteOk<T>(value: T): RemoteResult<T> {
   return { ok: true, value }
 }
 
+function activityProjection(): WorkbenchActivityProjection {
+  return {
+    items: [],
+    nextBeforeSequence: null,
+    integrity: {
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    },
+  }
+}
+
 function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
   return {
     state: overrides.state ?? vi.fn(() => Promise.resolve(authOk({ state: 'signed-out' }))),
@@ -76,8 +90,20 @@ function remote(overrides: Partial<WorkbenchRemote> = {}): WorkbenchRemote {
   return {
     snapshot: overrides.snapshot ?? vi.fn(() => Promise.resolve(remoteOk(status()))),
     setStatus: overrides.setStatus ?? vi.fn(() => Promise.resolve(remoteOk({
-      ok: true,
+      ok: true as const,
       value: status(),
+      receipt: {
+        commandId: 'command-test',
+        auditEventId: 'audit-test',
+        outboxId: 'outbox-test',
+      },
+    }))),
+    activity: overrides.activity ?? vi.fn(() => Promise.resolve(remoteOk(activityProjection()))),
+    auditIntegrity: overrides.auditIntegrity ?? vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
     }))),
   }
 }
@@ -90,32 +116,52 @@ function renderOwner(ownerAuth: OwnerAuthHttp, workbenchRemote: WorkbenchRemote,
 }
 
 describe('OwnerPage', () => {
-  it('renders an explicit probe before any protected status request', async () => {
+  it('renders an explicit probe before any protected Workbench request', async () => {
     const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(status())))
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const auditIntegrity = vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    })))
     const state = deferred<OwnerAuthResponse<OwnerAccessProjection>>()
     const { controller } = renderOwner(auth({ state: vi.fn(() => state.promise) }), remote({
       snapshot: snapshotRemote,
+      activity: activityRemote,
+      auditIntegrity,
     }))
 
     expect(screen.getByRole('main', { name: '正在确认访问状态' })).toBeTruthy()
     expect(screen.getByRole('status').textContent).toContain('先验证本机 Owner 会话')
     const starting = controller.start()
     expect(snapshotRemote).not.toHaveBeenCalled()
+    expect(activityRemote).not.toHaveBeenCalled()
+    expect(auditIntegrity).not.toHaveBeenCalled()
     state.resolve(authOk({ state: 'signed-out' }))
     await act(async () => { await starting })
     expect(screen.getByRole('heading', { name: 'Owner 登录' })).toBeTruthy()
     expect(snapshotRemote).not.toHaveBeenCalled()
+    expect(activityRemote).not.toHaveBeenCalled()
+    expect(auditIntegrity).not.toHaveBeenCalled()
   })
 
   it('supports setup confirmation, pending lock, one-time copy/CLI guidance, and acknowledgement', async () => {
     const setup = deferred<OwnerAuthResponse<InitializeOwnerResult>>()
     const initialize = vi.fn(() => setup.promise)
     const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(status())))
+    const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const auditIntegrity = vi.fn(() => Promise.resolve(remoteOk({
+      valid: true,
+      eventCount: 0,
+      headHash: '',
+      issue: null,
+    })))
     const copyText = vi.fn(() => Promise.resolve())
     const { controller } = renderOwner(auth({
       state: vi.fn(() => Promise.resolve(authOk({ state: 'setup-required' }))),
       initialize,
-    }), remote({ snapshot: snapshotRemote }), copyText)
+    }), remote({ snapshot: snapshotRemote, activity: activityRemote, auditIntegrity }), copyText)
     await act(async () => { await controller.start() })
 
     const password = screen.getByLabelText('Owner 密码')
@@ -142,6 +188,8 @@ describe('OwnerPage', () => {
     expect(screen.queryByRole('textbox')).toBeNull()
     expect(screen.getByText('dsh-workbench owner recover')).toBeTruthy()
     expect(snapshotRemote).not.toHaveBeenCalled()
+    expect(activityRemote).not.toHaveBeenCalled()
+    expect(auditIntegrity).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: '复制恢复码' }))
     await screen.findByRole('button', { name: '恢复码已复制' })
@@ -149,8 +197,12 @@ describe('OwnerPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '我已安全保存，进入工作台' }))
 
     expect(await screen.findByRole('main', { name: '让项目状态始终清晰可见' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
+    expect(screen.getByText('审计链验证通过')).toBeTruthy()
     expect(screen.queryByText(recoveryCode)).toBeNull()
     expect(snapshotRemote).toHaveBeenCalledOnce()
+    expect(activityRemote).toHaveBeenCalledOnce()
+    expect(auditIntegrity).not.toHaveBeenCalled()
   })
 
   it('localizes login failure, disables duplicate login, and clears protected UI after logout', async () => {
@@ -182,6 +234,8 @@ describe('OwnerPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '登录' }))
     expect(await screen.findByRole('main', { name: '让项目状态始终清晰可见' })).toBeTruthy()
     const statusController = controller.getSnapshot().status
+    const activityController = controller.getSnapshot().activity
+    expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     fireEvent.change(screen.getByRole('textbox', { name: '项目状态' }), {
       target: { value: '退出后必须清除的草稿' },
     })
@@ -194,6 +248,12 @@ describe('OwnerPage', () => {
 
     expect(screen.getByRole('heading', { name: 'Owner 登录' })).toBeTruthy()
     expect(screen.queryByText('Host 保护的状态')).toBeNull()
+    expect(screen.queryByRole('heading', { name: '活动记录' })).toBeNull()
     expect(statusController?.getSnapshot()).toMatchObject({ snapshot: null, draft: '' })
+    expect(activityController?.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      activity: null,
+      integrity: null,
+    })
   })
 })

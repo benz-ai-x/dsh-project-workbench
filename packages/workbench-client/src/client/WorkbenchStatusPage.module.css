@@ -16,6 +16,10 @@
   padding: clamp(44px, 8vh, 88px) clamp(24px, 5vw, 64px) 64px;
 }
 
+.secondary {
+  margin-top: 28px;
+}
+
 .hero {
   max-width: 720px;
   margin-bottom: 32px;
