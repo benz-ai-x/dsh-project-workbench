@@ -3,6 +3,14 @@
 import { randomUUID } from 'node:crypto'
 import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  CreateProjectRequest,
+  CreateProjectResult,
+  OutcomeDraft,
+  ProjectDetailProjection,
+  ProjectQuery,
+  ProjectStartFilter,
+  ProjectStartProjection,
+  ProjectTemplateSelection,
   SetStatusRequest,
   SetStatusResult,
   WorkbenchActivityFilter,
@@ -11,8 +19,12 @@ import type {
   WorkbenchStatusSnapshot,
 } from './client.ts'
 import {
+  projectDetailProjection,
+  projectResult,
+  projectStartProjection,
   statusResult,
   statusSnapshot,
+  type WorkbenchProjectMutation,
   type WorkbenchRepository,
 } from './repository.ts'
 import type { WorkbenchAuthorization } from './authorization.ts'
@@ -25,6 +37,9 @@ export interface WorkbenchClock {
 /** Injectable identities for every durable fact in one transactional command. */
 export interface WorkbenchIdGenerator {
   nextStatusId(): string
+  nextProjectId(): string
+  nextGoalId(): string
+  nextOutcomeId(): string
   nextCommandId(): string
   nextAuditEventId(): string
   nextOutboxId(): string
@@ -62,6 +77,9 @@ export const systemWorkbenchClock: WorkbenchClock = Object.freeze({
 
 export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextStatusId: () => `status-${randomUUID()}`,
+  nextProjectId: () => `project-${randomUUID()}`,
+  nextGoalId: () => `goal-${randomUUID()}`,
+  nextOutcomeId: () => `outcome-${randomUUID()}`,
   nextCommandId: () => `command-${randomUUID()}`,
   nextAuditEventId: () => `audit-${randomUUID()}`,
   nextOutboxId: () => `outbox-${randomUUID()}`,
@@ -180,6 +198,144 @@ export class WorkbenchScenario {
       return this.options.authorization.filterProjection(
         'workbench.audit.verify',
         projection,
+        operationSignal,
+      )
+    })
+  }
+
+  /** Read the built-in template and one stable descending Project catalog page. */
+  projectStart(
+    filter: ProjectStartFilter,
+    signal: AbortSignal,
+  ): Promise<ProjectStartProjection> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('projectStart requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require('workbench.project.read', operationSignal)
+      const normalized = validateProjectStartFilter(filter)
+      throwIfCancelled(operationSignal)
+      let projection: ProjectStartProjection
+      try {
+        projection = await this.options.repository.readProjectStart(Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          filter: normalized,
+        }), operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return this.options.authorization.filterProjection(
+        'workbench.project.read',
+        projectStartProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Atomically create one Project, its Primary Goal, and measurable Outcomes. */
+  createProject(
+    request: CreateProjectRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('createProject requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require('workbench.project.create', operationSignal)
+      throwIfCancelled(operationSignal)
+      const normalized = validateCreateProjectRequest(request)
+      const projectId = generatedId(this.options.ids.nextProjectId(), 'project')
+      const primaryGoalId = generatedId(this.options.ids.nextGoalId(), 'goal')
+      if (normalized.supportingGoals.some(goal => goal.goalId === primaryGoalId)) {
+        throw badRequest('the new Primary Goal cannot also be a Supporting Goal', {
+          field: 'supportingGoals',
+        })
+      }
+      const outcomes = normalized.primaryGoal.outcomes.map((outcome) => Object.freeze({
+        outcomeId: generatedId(this.options.ids.nextOutcomeId(), 'outcome'),
+        name: outcome.name,
+        metric: Object.freeze({ ...outcome.metric }),
+      }))
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const auditEventId = generatedId(this.options.ids.nextAuditEventId(), 'audit event')
+      const outboxId = generatedId(this.options.ids.nextOutboxId(), 'outbox')
+      const now = this.options.clock.now()
+      if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+        throw infrastructure('Workbench clock returned an invalid instant')
+      }
+      const occurredAt = now.toISOString()
+      const mutation: WorkbenchProjectMutation = Object.freeze({
+        projectId,
+        primaryGoalId,
+        projectName: normalized.projectName,
+        primaryGoal: Object.freeze({
+          name: normalized.primaryGoal.name,
+          outcomes: Object.freeze(outcomes),
+        }),
+        supportingGoals: Object.freeze(normalized.supportingGoals.map(goal => Object.freeze({ ...goal }))),
+        template: Object.freeze({ ...normalized.template }),
+        expectedCatalogRevision: normalized.expectedCatalogRevision,
+        expectedRevision: null,
+        createdAt: occurredAt,
+        command: Object.freeze({
+          commandId,
+          auditEventId,
+          outboxId,
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: 'owner-project-create',
+          actor: Object.freeze({
+            kind: 'owner',
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      let result: CreateProjectResult
+      try {
+        result = await this.options.repository.commitProject(mutation, operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return projectResult(result)
+    })
+  }
+
+  /** Reopen one visible Project from Host truth. */
+  project(query: ProjectQuery, signal: AbortSignal): Promise<ProjectDetailProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('project requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require('workbench.project.read', operationSignal)
+      const normalized = validateProjectQuery(query)
+      throwIfCancelled(operationSignal)
+      let projection: ProjectDetailProjection | null
+      try {
+        projection = await this.options.repository.readProject(Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }), operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.project.read',
+        projectDetailProjection(projection),
         operationSignal,
       )
     })
@@ -333,6 +489,262 @@ function validateRequest(request: SetStatusRequest, maxStatusLength: number): Se
   })
 }
 
+const DEFAULT_PROJECT_START_LIMIT = 20
+const MAX_PROJECT_START_LIMIT = 100
+const MAX_OUTCOMES_PER_PROJECT = 20
+const MAX_SUPPORTING_GOALS_PER_PROJECT = 20
+const MAX_PROJECT_NAME_LENGTH = 200
+const MAX_GOAL_NAME_LENGTH = 200
+const MAX_OUTCOME_NAME_LENGTH = 200
+const MAX_METRIC_NAME_LENGTH = 120
+const MAX_METRIC_UNIT_LENGTH = 64
+const TEXT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u
+const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u
+
+function validateProjectStartFilter(value: ProjectStartFilter): ProjectStartFilter {
+  const record = exactRecord(value, 'projectStart filter', [], ['beforeSequence', 'limit'])
+  const beforeSequence = record.beforeSequence
+  if (beforeSequence !== undefined
+    && (!Number.isSafeInteger(beforeSequence) || (beforeSequence as number) < 1)) {
+    throw badRequest('beforeSequence must be a positive safe integer', {
+      field: 'beforeSequence',
+    })
+  }
+  const requestedLimit = record.limit
+  if (requestedLimit !== undefined
+    && (!Number.isSafeInteger(requestedLimit)
+      || (requestedLimit as number) < 1
+      || (requestedLimit as number) > MAX_PROJECT_START_LIMIT)) {
+    throw badRequest(`limit must be an integer from 1 to ${MAX_PROJECT_START_LIMIT}`, {
+      field: 'limit',
+    })
+  }
+  return Object.freeze({
+    ...(beforeSequence === undefined ? {} : { beforeSequence: beforeSequence as number }),
+    limit: requestedLimit === undefined ? DEFAULT_PROJECT_START_LIMIT : requestedLimit as number,
+  })
+}
+
+function validateCreateProjectRequest(value: CreateProjectRequest): CreateProjectRequest {
+  const record = exactRecord(value, 'createProject request', [
+    'template',
+    'projectName',
+    'primaryGoal',
+    'supportingGoals',
+    'expectedCatalogRevision',
+    'expectedRevision',
+    'idempotencyKey',
+    'causationId',
+    'reason',
+  ])
+  const template = validateTemplateSelection(record.template)
+  const projectName = boundedText(record.projectName, 'projectName', MAX_PROJECT_NAME_LENGTH)
+  const primaryGoalRecord = exactRecord(record.primaryGoal, 'primaryGoal', ['name', 'outcomes'])
+  const primaryGoalName = boundedText(primaryGoalRecord.name, 'primaryGoal.name', MAX_GOAL_NAME_LENGTH)
+  if (!Array.isArray(primaryGoalRecord.outcomes)
+    || primaryGoalRecord.outcomes.length < 1
+    || primaryGoalRecord.outcomes.length > MAX_OUTCOMES_PER_PROJECT) {
+    throw badRequest(`primaryGoal.outcomes must contain 1-${MAX_OUTCOMES_PER_PROJECT} items`, {
+      field: 'primaryGoal.outcomes',
+    })
+  }
+  const outcomes = Object.freeze(Array.from(primaryGoalRecord.outcomes, (outcome, index) =>
+    validateOutcomeDraft(outcome, index)))
+
+  if (!Array.isArray(record.supportingGoals)
+    || record.supportingGoals.length > MAX_SUPPORTING_GOALS_PER_PROJECT) {
+    throw badRequest(`supportingGoals must contain 0-${MAX_SUPPORTING_GOALS_PER_PROJECT} items`, {
+      field: 'supportingGoals',
+    })
+  }
+  const supportingGoals = Object.freeze(Array.from(record.supportingGoals, (goal, index) => {
+    const goalRecord = exactRecord(goal, `supportingGoals[${String(index)}]`, [
+      'goalId',
+      'expectedRevision',
+    ])
+    const goalId = safeId(goalRecord.goalId, `supportingGoals[${String(index)}].goalId`)
+    if (!Number.isSafeInteger(goalRecord.expectedRevision)
+      || (goalRecord.expectedRevision as number) < 1) {
+      throw badRequest('supporting Goal expectedRevision must be a positive safe integer', {
+        field: `supportingGoals[${String(index)}].expectedRevision`,
+      })
+    }
+    return Object.freeze({
+      goalId,
+      expectedRevision: goalRecord.expectedRevision as number,
+    })
+  }))
+  if (new Set(supportingGoals.map(goal => goal.goalId)).size !== supportingGoals.length) {
+    throw badRequest('supportingGoals must not contain duplicate Goal ids', {
+      field: 'supportingGoals',
+    })
+  }
+  if (!Number.isSafeInteger(record.expectedCatalogRevision)
+    || (record.expectedCatalogRevision as number) < 0) {
+    throw badRequest('expectedCatalogRevision must be a non-negative safe integer', {
+      field: 'expectedCatalogRevision',
+    })
+  }
+  if (record.expectedRevision !== null) {
+    throw badRequest('expectedRevision must be null for a new Project', {
+      field: 'expectedRevision',
+    })
+  }
+  const idempotencyKey = validateCommandKey(record.idempotencyKey, 'idempotencyKey')
+  const causationId = validateCommandKey(record.causationId, 'causationId')
+  if (record.reason !== 'owner-project-create') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    template,
+    projectName,
+    primaryGoal: Object.freeze({ name: primaryGoalName, outcomes }),
+    supportingGoals,
+    expectedCatalogRevision: record.expectedCatalogRevision as number,
+    expectedRevision: null,
+    idempotencyKey,
+    causationId,
+    reason: 'owner-project-create',
+  })
+}
+
+function validateTemplateSelection(value: unknown): ProjectTemplateSelection {
+  const record = exactRecord(value, 'template', [
+    'templateId',
+    'templateVersion',
+    'definitionDigest',
+  ])
+  const templateId = safeId(record.templateId, 'template.templateId')
+  if (!Number.isSafeInteger(record.templateVersion) || (record.templateVersion as number) < 1) {
+    throw badRequest('template.templateVersion must be a positive safe integer', {
+      field: 'template.templateVersion',
+    })
+  }
+  if (typeof record.definitionDigest !== 'string' || !DIGEST_PATTERN.test(record.definitionDigest)) {
+    throw badRequest('template.definitionDigest must be a lowercase SHA-256 digest', {
+      field: 'template.definitionDigest',
+    })
+  }
+  return Object.freeze({
+    templateId,
+    templateVersion: record.templateVersion,
+    definitionDigest: record.definitionDigest,
+  }) as ProjectTemplateSelection
+}
+
+function validateOutcomeDraft(value: unknown, index: number): OutcomeDraft {
+  const prefix = `primaryGoal.outcomes[${String(index)}]`
+  const record = exactRecord(value, prefix, ['name', 'metric'])
+  const metricRecord = exactRecord(record.metric, `${prefix}.metric`, [
+    'metricName',
+    'initialValue',
+    'targetValue',
+    'unit',
+    'direction',
+  ])
+  const initialValue = finiteNumber(metricRecord.initialValue, `${prefix}.metric.initialValue`)
+  const targetValue = finiteNumber(metricRecord.targetValue, `${prefix}.metric.targetValue`)
+  if (metricRecord.direction !== 'increase' && metricRecord.direction !== 'decrease') {
+    throw badRequest('Outcome metric direction must be increase or decrease', {
+      field: `${prefix}.metric.direction`,
+    })
+  }
+  if ((metricRecord.direction === 'increase' && targetValue <= initialValue)
+    || (metricRecord.direction === 'decrease' && targetValue >= initialValue)) {
+    throw badRequest('Outcome metric target must move in its declared direction', {
+      field: `${prefix}.metric.targetValue`,
+    })
+  }
+  return Object.freeze({
+    name: boundedText(record.name, `${prefix}.name`, MAX_OUTCOME_NAME_LENGTH),
+    metric: Object.freeze({
+      metricName: boundedText(
+        metricRecord.metricName,
+        `${prefix}.metric.metricName`,
+        MAX_METRIC_NAME_LENGTH,
+      ),
+      initialValue,
+      targetValue,
+      unit: boundedText(metricRecord.unit, `${prefix}.metric.unit`, MAX_METRIC_UNIT_LENGTH),
+      direction: metricRecord.direction,
+    }),
+  })
+}
+
+function validateProjectQuery(value: ProjectQuery): ProjectQuery {
+  const record = exactRecord(value, 'project query', ['projectId'])
+  return Object.freeze({ projectId: safeId(record.projectId, 'projectId') })
+}
+
+function exactRecord(
+  value: unknown,
+  label: string,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw badRequest(`${label} must be an object`, { field: label })
+  }
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw badRequest(`${label} must be a plain data object`, { field: label })
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw badRequest(`${label} must not contain symbol fields`, { field: label })
+  }
+  const allowed = new Set([...required, ...optional])
+  const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  for (const field of Object.getOwnPropertyNames(value)) {
+    if (!allowed.has(field)) {
+      throw badRequest(`${label} has unsupported field ${field}`, { field })
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, field)
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
+      throw badRequest(`${label}.${field} must be an enumerable data field`, { field })
+    }
+    copy[field] = descriptor.value
+  }
+  for (const field of required) {
+    if (!Object.hasOwn(copy, field)) {
+      throw badRequest(`${label} is missing field ${field}`, { field })
+    }
+  }
+  return copy
+}
+
+function boundedText(value: unknown, field: string, maximum: number): string {
+  if (typeof value !== 'string') {
+    throw badRequest(`${field} must be a string`, { field })
+  }
+  const normalized = value.trim()
+  const length = [...normalized].length
+  if (length < 1
+    || length > maximum
+    || !normalized.isWellFormed()
+    || TEXT_CONTROL_CHARACTER_PATTERN.test(normalized)) {
+    throw badRequest(`${field} must contain 1-${maximum} safe characters`, {
+      field,
+      maximum,
+      actualLength: length,
+    })
+  }
+  return normalized
+}
+
+function finiteNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Object.is(value, -0)) {
+    throw badRequest(`${field} must be a finite number other than negative zero`, { field })
+  }
+  return value
+}
+
+function safeId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !SAFE_FILTER_ID.test(value)) {
+    throw badRequest(`${field} must be a safe identifier`, { field })
+  }
+  return value
+}
+
 const SAFE_COMMAND_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u
 const SAFE_FILTER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 const DEFAULT_ACTIVITY_LIMIT = 50
@@ -355,7 +767,7 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     throw badRequest('projectId must be null or a safe identifier', { field: 'projectId' })
   }
   const objectType: unknown = Reflect.get(value, 'objectType')
-  if (objectType !== undefined && objectType !== 'workbench-status') {
+  if (objectType !== undefined && objectType !== 'workbench-status' && objectType !== 'project') {
     throw badRequest('objectType is not supported', { field: 'objectType' })
   }
   const objectId: unknown = Reflect.get(value, 'objectId')
@@ -364,7 +776,9 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     throw badRequest('objectId must be a safe identifier', { field: 'objectId' })
   }
   const action: unknown = Reflect.get(value, 'action')
-  if (action !== undefined && action !== 'workbench.status.updated') {
+  if (action !== undefined
+    && action !== 'workbench.status.updated'
+    && action !== 'workbench.project.created') {
     throw badRequest('action is not supported', { field: 'action' })
   }
   const beforeSequence: unknown = Reflect.get(value, 'beforeSequence')
@@ -385,9 +799,13 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
   }
   return Object.freeze({
     ...(projectId === undefined ? {} : { projectId: projectId as string | null }),
-    ...(objectType === undefined ? {} : { objectType: 'workbench-status' as const }),
+    ...(objectType === undefined ? {} : {
+      objectType: objectType as Exclude<WorkbenchActivityFilter['objectType'], undefined>,
+    }),
     ...(objectId === undefined ? {} : { objectId: objectId as string }),
-    ...(action === undefined ? {} : { action: 'workbench.status.updated' as const }),
+    ...(action === undefined ? {} : {
+      action: action as Exclude<WorkbenchActivityFilter['action'], undefined>,
+    }),
     ...(beforeSequence === undefined ? {} : { beforeSequence: beforeSequence as number }),
     limit: requestedLimit === undefined ? DEFAULT_ACTIVITY_LIMIT : requestedLimit as number,
   })

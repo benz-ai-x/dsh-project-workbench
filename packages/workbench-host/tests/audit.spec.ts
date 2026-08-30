@@ -186,6 +186,48 @@ describe('audit hash envelope', () => {
       },
     })).toThrow(/unsafe/u)
   })
+
+  it('admits only the correlated Project-created vocabulary without reason detail', () => {
+    const input: AuditEventInput = {
+      ...eventInput(),
+      action: 'workbench.project.created',
+      scope: {
+        organizationId: 'organization-001',
+        teamId: 'team-001',
+        projectId: 'project-001',
+      },
+      reason: { code: 'owner-project-create' },
+      object: { type: 'project', id: 'project-001', version: '1' },
+      command: { id: 'command-001', type: 'workbench.project.create' },
+      summary: {
+        code: 'project-created-from-template',
+        changedFields: ['template', 'primaryGoal', 'outcomes', 'supportingGoals'],
+      },
+    }
+    const created = createAuditEvent(input)
+    expect(created).toMatchObject({
+      action: 'workbench.project.created',
+      scope: { projectId: 'project-001' },
+      reason: { code: 'owner-project-create' },
+      object: { type: 'project', id: 'project-001', version: '1' },
+      command: { type: 'workbench.project.create' },
+      summary: { code: 'project-created-from-template' },
+    })
+    expect(created.canonicalEnvelope).not.toContain('detail')
+
+    expect(() => createAuditEvent({
+      ...input,
+      command: { ...input.command, type: 'workbench.status.set' },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...input,
+      scope: { ...input.scope, projectId: 'project-other' },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...input,
+      reason: { code: 'owner-project-create', detail: 'must-not-enter-audit' },
+    } as unknown as AuditEventInput)).toThrow(/no arbitrary detail/u)
+  })
 })
 
 describe('audit chain verification', () => {

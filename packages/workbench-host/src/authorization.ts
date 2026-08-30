@@ -9,6 +9,8 @@ export type WorkbenchAction =
   | 'workbench.status.write'
   | 'workbench.activity.read'
   | 'workbench.audit.verify'
+  | 'workbench.project.read'
+  | 'workbench.project.create'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

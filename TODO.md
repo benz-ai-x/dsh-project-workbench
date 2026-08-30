@@ -30,9 +30,18 @@
 - [x] Make pending, delivered, unknown, and failed Outbox truths observable, with ambiguous delivery remaining unknown.
 - [x] Prove Scenario, Loader/Profile, generated Remote, Client lifecycle, HMR, packed artifacts, restart, and real-browser behavior for the T03 surface.
 
+## T04 — Create Goal and Project from the Knowledge Work Template (#5)
+
+- [x] Publish one immutable, digest-verified Knowledge Work Template Version with a closed runtime schema.
+- [x] Atomically create one Project, its Primary Goal, one or more measurable Outcomes, and optional Supporting Goal links through the T03 command ledger.
+- [x] Preserve exact Template Version provenance and an independent, immutable Project Template Snapshot that survives later template versions and restart.
+- [x] Enforce Owner authorization, catalog and Supporting Goal optimistic concurrency, caller-stable replay, and redacted Project-scoped audit/Outbox facts.
+- [x] Let the authenticated browser create, list, reopen, and accessibly inspect the Project, Goal, Outcomes, Supporting Goals, and Template Version without becoming an authority.
+- [x] Prove migration, rollback, replay, contention, Scenario/Remote, Loader/Profile, Client HMR/drain, built/packed artifacts, restart, and real-browser behavior for T04.
+
 ## Later tickets
 
-- [ ] T04+ Project domain, collaboration, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T03.
+- [ ] T05+ collaboration, integrations, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T04.
 
 ## Definition of done
 

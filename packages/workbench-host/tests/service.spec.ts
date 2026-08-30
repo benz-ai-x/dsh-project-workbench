@@ -68,6 +68,9 @@ describe('WorkbenchService', () => {
       { method: 'setStatus', invocation: { kind: 'direct' } },
       { method: 'activity', invocation: { kind: 'direct' } },
       { method: 'auditIntegrity', invocation: { kind: 'direct' } },
+      { method: 'projectStart', invocation: { kind: 'direct' } },
+      { method: 'createProject', invocation: { kind: 'direct' } },
+      { method: 'project', invocation: { kind: 'direct' } },
     ])
     const auth = ctx.get('workbenchAuth') as unknown as TestWorkbenchAuthService
     await expect(ctx.workbench.snapshot(new AbortController().signal)).rejects.toMatchObject({
@@ -78,6 +81,31 @@ describe('WorkbenchService', () => {
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(ctx.workbench.auditIntegrity(
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.projectStart(
+      {},
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.createProject({
+      template: {
+        templateId: 'knowledge-work',
+        templateVersion: 1,
+        definitionDigest: `sha256:${'0'.repeat(64)}`,
+      },
+      projectName: 'must not pass',
+      primaryGoal: { name: 'must not pass', outcomes: [] },
+      supportingGoals: [],
+      expectedCatalogRevision: 0,
+      expectedRevision: null,
+      idempotencyKey: 'unauthorized-project-key-001',
+      causationId: 'unauthorized-project-cause-001',
+      reason: 'owner-project-create',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.project(
+      { projectId: 'project-secret' },
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(auth.run(() =>
@@ -104,6 +132,56 @@ describe('WorkbenchService', () => {
       eventCount: 1,
       issue: null,
     })
+    const projectStart = await auth.run(() => ctx.workbench.projectStart(
+      { limit: 10 },
+      new AbortController().signal,
+    ))
+    expect(projectStart).toMatchObject({
+      template: {
+        selection: { templateId: 'knowledge-work', templateVersion: 1 },
+        definition: { kind: 'knowledge-work', snapshotSchemaVersion: 1 },
+      },
+      catalogRevision: 0,
+      projects: [],
+      nextBeforeSequence: null,
+    })
+    const created = await auth.run(() => ctx.workbench.createProject({
+      template: projectStart.template.selection,
+      projectName: 'Service Project',
+      primaryGoal: {
+        name: 'Service Goal',
+        outcomes: [{
+          name: 'Service Outcome',
+          metric: {
+            metricName: 'Validated items',
+            initialValue: 0,
+            targetValue: 3,
+            unit: 'items',
+            direction: 'increase',
+          },
+        }],
+      },
+      supportingGoals: [],
+      expectedCatalogRevision: projectStart.catalogRevision,
+      expectedRevision: null,
+      idempotencyKey: 'service-project-idempotency-001',
+      causationId: 'service-project-causation-001',
+      reason: 'owner-project-create',
+    }, new AbortController().signal))
+    expect(created).toMatchObject({
+      ok: true,
+      catalogRevision: 1,
+      value: {
+        project: { name: 'Service Project', primaryGoal: { name: 'Service Goal' } },
+        primaryGoal: { outcomes: [{ name: 'Service Outcome' }] },
+        templateSnapshot: { definition: { kind: 'knowledge-work' } },
+      },
+    })
+    if (!created.ok) throw new Error('service Project creation unexpectedly failed')
+    await expect(auth.run(() => ctx.workbench.project(
+      { projectId: created.value.project.projectId },
+      new AbortController().signal,
+    ))).resolves.toEqual(created.value)
 
     const service = ctx.workbench
     await fiber.dispose()

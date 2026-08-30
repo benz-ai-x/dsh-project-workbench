@@ -41,6 +41,9 @@ const OWNER_AUTH_INITIALIZE_PATH = '/api/workbench-auth/initialize'
 const WORKBENCH_SNAPSHOT_PATH = '/api/workbench/snapshot'
 const WORKBENCH_ACTIVITY_PATH = '/api/workbench/activity'
 const WORKBENCH_AUDIT_INTEGRITY_PATH = '/api/workbench/auditIntegrity'
+const WORKBENCH_PROJECT_START_PATH = '/api/workbench/projectStart'
+const WORKBENCH_CREATE_PROJECT_PATH = '/api/workbench/createProject'
+const WORKBENCH_PROJECT_PATH = '/api/workbench/project'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -550,7 +553,7 @@ async function assertNoHorizontalOverflow(page, label) {
   )
 }
 
-async function assertActivityProjection(page, eventCount, statusMessage) {
+async function assertActivityProjection(page, eventCount, ...protectedBusinessText) {
   const panel = page.locator('section[aria-labelledby="workbench-activity-title"]')
   await panel.waitFor({ state: 'visible' })
   await panel.getByText('审计链验证通过', { exact: true }).waitFor({ state: 'visible' })
@@ -560,16 +563,74 @@ async function assertActivityProjection(page, eventCount, statusMessage) {
     await panel.getByText('没有匹配的活动', { exact: true }).waitFor({ state: 'visible' })
   } else {
     await panel.getByRole('heading', { name: '状态版本已提交' }).waitFor({ state: 'visible' })
-    await panel.getByText('待投递', { exact: true }).waitFor({ state: 'visible' })
-  }
-  if (statusMessage !== undefined) {
+    if (eventCount >= 2) {
+      await panel.getByRole('heading', { name: '已从 Template 创建 Project' })
+        .waitFor({ state: 'visible' })
+    }
+    const pendingOutbox = panel.getByText('待投递', { exact: true })
+    await pendingOutbox.first().waitFor({ state: 'visible' })
     assert.equal(
-      (await panel.textContent())?.includes(statusMessage),
+      await pendingOutbox.count(),
+      eventCount,
+      'Activity did not render one pending Outbox fact per committed event',
+    )
+  }
+  for (const protectedText of protectedBusinessText) {
+    if (protectedText === undefined) continue
+    assert.equal(
+      (await panel.textContent())?.includes(protectedText),
       false,
-      'Activity copied protected status text into its audit projection',
+      'Activity copied protected business text into its audit projection',
     )
   }
   return panel
+}
+
+async function assertProjectCatalog(page, projectName) {
+  const panel = page.locator('section[aria-labelledby="workbench-projects-title"]')
+  await panel.waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: 'Knowledge Work Template' })
+    .waitFor({ state: 'visible' })
+  await panel.getByText('项目目录已同步', { exact: true }).waitFor({ state: 'visible' })
+  const definitionDigest = (await panel.locator('article[aria-labelledby="workbench-template-title"] code')
+    .textContent())?.trim()
+  assert.match(definitionDigest ?? '', /^sha256:[0-9a-f]{64}$/u)
+  if (projectName !== undefined) {
+    const card = panel.locator('li').filter({ hasText: projectName }).first()
+    await card.waitFor({ state: 'visible' })
+    await card.getByRole('heading', { name: projectName, exact: true })
+      .waitFor({ state: 'visible' })
+    return { card, definitionDigest, panel }
+  }
+  return { definitionDigest, panel }
+}
+
+async function assertProjectDetail(page, expected) {
+  const detail = page.locator('article[aria-labelledby="workbench-project-detail-title"]')
+  await detail.getByRole('heading', { name: expected.projectName, exact: true })
+    .waitFor({ state: 'visible' })
+  await detail.getByText(expected.primaryGoalName, { exact: true }).waitFor({ state: 'visible' })
+  await detail.getByText(expected.outcomeName, { exact: true }).waitFor({ state: 'visible' })
+  await detail.getByText(expected.metricName, { exact: true }).waitFor({ state: 'visible' })
+  await detail.getByText('12 → 3 天 · 减少', { exact: true }).waitFor({ state: 'visible' })
+  await detail.getByRole('heading', { name: 'Project Template Snapshot', exact: true })
+    .waitFor({ state: 'visible' })
+  await detail.getByText('此 Project 没有关联 Supporting Goal。', { exact: true })
+    .waitFor({ state: 'visible' })
+  const digests = await detail.locator('code').allTextContents()
+  assert.equal(digests.length, 2, 'Project detail did not expose both Template and snapshot digests')
+  assert.equal(digests[0], expected.definitionDigest)
+  assert.equal(digests[1], expected.definitionDigest)
+  return detail
+}
+
+async function reopenProject(page, expected) {
+  const catalog = await assertProjectCatalog(page, expected.projectName)
+  await catalog.card.getByRole('button', { name: '打开 Project', exact: true }).click()
+  return await assertProjectDetail(page, {
+    ...expected,
+    definitionDigest: catalog.definitionDigest,
+  })
 }
 
 async function assertWithinViewport(locator, page, label) {
@@ -757,7 +818,7 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const initialStyleCount = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).count()
-  assert.equal(initialStyleCount, 3, 'Workbench Client did not own exactly three CSS Module resources')
+  assert.equal(initialStyleCount, 4, 'Workbench Client did not own exactly four CSS Module resources')
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -889,11 +950,15 @@ async function main() {
     ],
   })
 
-  const initialPassword = `T03 Owner initial ${new Date().toISOString()}!`
-  const wrongPassword = 'T03 deliberately wrong password!'
-  const firstRecoveredPassword = `T03 Owner recovered once ${new Date().toISOString()}!`
-  const finalRecoveredPassword = `T03 Owner recovered twice ${new Date().toISOString()}!`
-  const message = `T03 audited browser restart proof ${new Date().toISOString()}`
+  const initialPassword = `T04 Owner initial ${new Date().toISOString()}!`
+  const wrongPassword = 'T04 deliberately wrong password!'
+  const firstRecoveredPassword = `T04 Owner recovered once ${new Date().toISOString()}!`
+  const finalRecoveredPassword = `T04 Owner recovered twice ${new Date().toISOString()}!`
+  const message = `T04 audited browser restart proof ${new Date().toISOString()}`
+  const projectName = `T04 browser Project ${new Date().toISOString()}`
+  const primaryGoalName = '缩短 Workbench 浏览器反馈周期'
+  const outcomeName = '将浏览器验证反馈周期降至三天'
+  const metricName = '浏览器验证反馈周期'
   const expectedHttpError = /(?:401|Unauthorized)/u
 
   // Fresh browser: setup is visible, but the protected projection is neither
@@ -909,7 +974,11 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
   await captureVisual(firstJourney.page, '01-setup-desktop')
@@ -923,6 +992,7 @@ async function main() {
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 1)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
 
   // Hold the real initialize request briefly so the actual disabled/pending
@@ -1022,8 +1092,15 @@ async function main() {
 
   await firstJourney.page.getByRole('button', { name: '我已安全保存，进入工作台' }).click()
   await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
+  const initialProjectCatalog = await assertProjectCatalog(firstJourney.page)
+  await initialProjectCatalog.panel.getByText('还没有 Project。完成上面的表单即可创建第一个。', {
+    exact: true,
+  }).waitFor({ state: 'visible' })
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
     0,
@@ -1033,6 +1110,8 @@ async function main() {
   await firstJourney.page.reload({ waitUntil: 'load' })
   await dismissHarnessOnboarding(firstJourney.page)
   await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
+  const refreshedEmptyCatalog = await assertProjectCatalog(firstJourney.page)
+  assert.equal(refreshedEmptyCatalog.definitionDigest, initialProjectCatalog.definitionDigest)
   await assertActivityProjection(firstJourney.page, 0)
   assert.equal(await recoveryLocator.count(), 0, 'refresh redisplayed the one-time recovery code')
   await assertSecretsAbsentFromBrowserStorage(
@@ -1060,12 +1139,89 @@ async function main() {
   await activityObjectId.fill('')
   await activityPanel.getByRole('button', { name: '应用筛选' }).click()
   await assertActivityProjection(firstJourney.page, 1, message)
+
+  const projectPanel = refreshedEmptyCatalog.panel
+  await projectPanel.getByLabel('Project 名称', { exact: true }).fill(projectName)
+  await projectPanel.getByLabel('Primary Goal 名称', { exact: true }).fill(primaryGoalName)
+  await projectPanel.getByLabel('Outcome 名称', { exact: true }).fill(outcomeName)
+  await projectPanel.getByLabel('衡量指标', { exact: true }).fill(metricName)
+  await projectPanel.getByLabel('数值基线', { exact: true }).fill('12')
+  await projectPanel.getByLabel('数值目标', { exact: true }).fill('3')
+  await projectPanel.getByLabel('单位', { exact: true }).fill('天')
+  await projectPanel.getByLabel('改善方向', { exact: true }).selectOption('decrease')
+  const createProjectButton = projectPanel.getByRole('button', {
+    name: '创建 Project',
+    exact: true,
+  })
+  await createProjectButton.waitFor({ state: 'visible' })
+  assert.equal(await createProjectButton.isEnabled(), true)
+  await createProjectButton.click()
+  await assertProjectDetail(firstJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+    definitionDigest: refreshedEmptyCatalog.definitionDigest,
+  })
+  const committedCatalog = await assertProjectCatalog(firstJourney.page, projectName)
+  assert.equal(committedCatalog.definitionDigest, refreshedEmptyCatalog.definitionDigest)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH) > 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
+  await assertActivityProjection(
+    firstJourney.page,
+    2,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  )
+
+  const activityObjectType = activityPanel.getByLabel('对象类型')
+  const activityAction = activityPanel.getByLabel('动作')
+  await activityObjectType.selectOption('project')
+  await activityAction.selectOption('workbench.project.created')
+  await activityPanel.getByRole('button', { name: '应用筛选' }).click()
+  await activityPanel.getByRole('heading', { name: '已从 Template 创建 Project' })
+    .waitFor({ state: 'visible' })
+  assert.equal(await activityPanel.getByRole('heading', { name: '状态版本已提交' }).count(), 0)
+  await activityPanel.getByText('已检查事件: 2', { exact: true }).waitFor({ state: 'visible' })
+  for (const protectedText of [projectName, primaryGoalName, outcomeName, metricName]) {
+    assert.equal((await activityPanel.textContent())?.includes(protectedText), false)
+  }
+  await activityObjectType.selectOption('')
+  await activityAction.selectOption('')
+  await activityPanel.getByRole('button', { name: '应用筛选' }).click()
+  await assertActivityProjection(
+    firstJourney.page,
+    2,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  )
   await exerciseClientHmr(
     firstJourney,
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
     message,
   )
-  await assertActivityProjection(firstJourney.page, 1, message)
+  await reopenProject(firstJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH) > 0)
+  await assertActivityProjection(
+    firstJourney.page,
+    2,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  )
   const sessionBar = firstJourney.page.locator('header').filter({
     has: firstJourney.page.getByRole('button', { name: '退出登录' }),
   })
@@ -1076,6 +1232,11 @@ async function main() {
     await firstJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
     await assertWithinViewport(sessionBar, firstJourney.page, 'mobile Owner session bar')
     await assertWithinViewport(firstJourney.page.locator('#workbench-status-editor'), firstJourney.page, 'mobile status editor')
+    await assertWithinViewport(
+      firstJourney.page.getByLabel('Project 名称', { exact: true }),
+      firstJourney.page,
+      'mobile Project name editor',
+    )
     const layout = await firstJourney.page.evaluate(() => {
       const session = document.querySelector('header[aria-label]')
       const status = document.querySelector('main[data-workbench-phase]')
@@ -1094,6 +1255,7 @@ async function main() {
   await firstJourney.page.getByRole('button', { name: '退出登录' }).click()
   await firstJourney.page.locator('#workbench-login-password').waitFor({ state: 'visible' })
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   const postLogoutCookies = await firstNetwork.cdp.send('Network.getAllCookies')
@@ -1114,10 +1276,14 @@ async function main() {
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SNAPSHOT_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_ACTIVITY_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_AUDIT_INTEGRITY_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROJECT_START_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_CREATE_PROJECT_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROJECT_PATH), 0)
   await separateLogin.fill(wrongPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
   assert.equal(await separateJourney.page.locator('#workbench-status-editor').count(), 0)
+  assert.equal(await separateJourney.page.locator('#workbench-projects-title').count(), 0)
   await separateLogin.fill(initialPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
@@ -1126,7 +1292,21 @@ async function main() {
     .filter({ hasText: message })
   await separateProjection.waitFor({ state: 'visible' })
   assert.equal(await separateProjection.textContent(), message)
-  await assertActivityProjection(separateJourney.page, 1, message)
+  await reopenProject(separateJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  })
+  await assertActivityProjection(
+    separateJourney.page,
+    2,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  )
   await assertNoBrowserErrors(separateJourney, [expectedHttpError])
   await separateJourney.context.close()
   await stopDsh(first.host)
@@ -1153,7 +1333,21 @@ async function main() {
   await recoveredProjection.waitFor({ state: 'visible' })
   assert.equal(await recoveredProjection.textContent(), message)
   assert.equal(await secondJourney.page.locator('#workbench-status-editor').inputValue(), message)
-  await assertActivityProjection(secondJourney.page, 1, message)
+  await reopenProject(secondJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  })
+  await assertActivityProjection(
+    secondJourney.page,
+    2,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  )
   await ownerCookieFromChrome(secondNetwork)
   await assertNoBrowserErrors(secondJourney)
   await stopDsh(second.host)
@@ -1254,14 +1448,29 @@ async function main() {
   await finalProjection.waitFor({ state: 'visible' })
   assert.equal(await finalProjection.textContent(), message)
   assert.equal(await postRecoveryJourney.page.locator('#workbench-status-editor').inputValue(), message)
-  await assertActivityProjection(postRecoveryJourney.page, 1, message)
+  await reopenProject(postRecoveryJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  })
+  await assertActivityProjection(
+    postRecoveryJourney.page,
+    2,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  )
   await assertNoBrowserErrors(postRecoveryJourney, [expectedHttpError])
   await postRecoveryJourney.context.close()
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS real Workbench setup -> audited command -> redacted Activity -> Client HMR '
-      + '-> logout -> restart -> one-time offline recovery -> session revocation\n',
+    'PASS real Workbench setup -> audited status -> immutable Project snapshot '
+      + '-> redacted Activity -> Client HMR -> logout -> restart '
+      + '-> Project reopen -> one-time offline recovery -> session revocation\n',
   )
 }
 

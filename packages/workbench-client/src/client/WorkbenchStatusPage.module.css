@@ -17,6 +17,8 @@
 }
 
 .secondary {
+  display: grid;
+  gap: 28px;
   margin-top: 28px;
 }
 

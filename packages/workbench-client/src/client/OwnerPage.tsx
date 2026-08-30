@@ -11,6 +11,7 @@ import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { OwnerController, OwnerIssueCode } from './owner-controller.ts'
 import { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 import { ActivityPanel, type ActivityPanelCopy } from './ActivityPanel.tsx'
+import { ProjectsPanel } from './ProjectsPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -220,6 +221,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
   if ((state.phase === 'authenticated' || state.phase === 'logout-pending')
     && state.access?.state === 'signed-in'
     && state.status !== null
+    && state.projects !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -254,6 +256,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
           </div>
         )}
         <WorkbenchStatusPage controller={state.status} t={t}>
+          <ProjectsPanel controller={state.projects} t={t} />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
       </div>
@@ -353,10 +356,12 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectTypeLabel: t('activity.object.type'),
     objectAll: t('activity.object.all'),
     objectStatus: t('activity.object.status'),
+    objectProject: t('activity.object.project'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
     actionStatusUpdated: t('activity.action.statusUpdated'),
+    actionProjectCreated: t('activity.action.projectCreated'),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -377,6 +382,7 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     integrityHead: t('activity.integrity.head'),
     integrityEmptyHead: t('activity.integrity.emptyHead'),
     summaryStatusCommitted: t('activity.summary.statusCommitted'),
+    summaryProjectCreated: t('activity.summary.projectCreated'),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -384,6 +390,7 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     revisionPrefix: t('activity.prefix.revision'),
     reasonPrefix: t('activity.prefix.reason'),
     reasonOwnerStatusEdit: t('activity.reason.ownerEdit'),
+    reasonOwnerProjectCreate: t('activity.reason.ownerProjectCreate'),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),

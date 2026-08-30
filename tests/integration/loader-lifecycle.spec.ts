@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import type {
+  CreateProjectResult,
+  ProjectDetailProjection,
+  ProjectStartProjection,
   SetStatusRequest,
   SetStatusResult,
   WorkbenchStatusSnapshot,
@@ -200,8 +203,31 @@ describe('built Workbench Host through the real DSH Loader', () => {
     await expect(firstService.snapshot(new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })
+    await expect(firstService.projectStart(
+      { limit: 10 },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(first.workbenchAuth.run(() =>
       firstService.snapshot(new AbortController().signal))).resolves.toBeNull()
+    const initialProjects: ProjectStartProjection = await first.workbenchAuth.run(() =>
+      firstService.projectStart({ limit: 10 }, new AbortController().signal))
+    expect(initialProjects).toMatchObject({
+      catalogRevision: 0,
+      projects: [],
+      nextBeforeSequence: null,
+      template: {
+        selection: {
+          templateId: 'knowledge-work',
+          templateVersion: 1,
+          definitionDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        },
+        definition: {
+          snapshotSchemaVersion: 1,
+          kind: 'knowledge-work',
+          rules: { minimumOutcomeCount: 1, primaryGoalRequired: true },
+        },
+      },
+    })
     const initialActivity = await first.workbenchAuth.run(() => firstService.activity(
       { projectId: null, limit: 10 },
       new AbortController().signal,
@@ -266,6 +292,117 @@ describe('built Workbench Host through the real DSH Loader', () => {
       activity.integrity,
     )
 
+    const createdResult: CreateProjectResult = await first.workbenchAuth.run(() =>
+      firstService.createProject({
+        template: initialProjects.template.selection,
+        projectName: 'Loader-created Project',
+        primaryGoal: {
+          name: 'Shorten Loader feedback time',
+          outcomes: [{
+            name: 'Reduce feedback latency',
+            metric: {
+              metricName: 'Feedback latency',
+              initialValue: 10,
+              targetValue: 4,
+              unit: 'days',
+              direction: 'decrease',
+            },
+          }],
+        },
+        supportingGoals: [],
+        expectedCatalogRevision: initialProjects.catalogRevision,
+        expectedRevision: null,
+        idempotencyKey: 'loader-project-idempotency-0001',
+        causationId: 'loader-project-causation-0001',
+        reason: 'owner-project-create',
+      }, new AbortController().signal))
+    expect(createdResult).toMatchObject({
+      ok: true,
+      catalogRevision: 1,
+      value: {
+        project: {
+          name: 'Loader-created Project',
+          revision: 1,
+          catalogSequence: 1,
+          timezone: 'Asia/Shanghai',
+        },
+        primaryGoal: {
+          name: 'Shorten Loader feedback time',
+          revision: 1,
+          outcomes: [{
+            name: 'Reduce feedback latency',
+            revision: 1,
+            metric: {
+              metricName: 'Feedback latency',
+              initialValue: 10,
+              targetValue: 4,
+              unit: 'days',
+              direction: 'decrease',
+            },
+          }],
+        },
+        supportingGoals: [],
+        templateSnapshot: {
+          template: initialProjects.template.selection,
+          snapshotSchemaVersion: 1,
+          definition: initialProjects.template.definition,
+          snapshotDigest: initialProjects.template.selection.definitionDigest,
+        },
+      },
+      receipt: {
+        commandId: expect.stringMatching(/^command-/u),
+        auditEventId: expect.stringMatching(/^audit-/u),
+        outboxId: expect.stringMatching(/^outbox-/u),
+      },
+    })
+    if (!createdResult.ok) throw new Error('expected Loader Project creation to succeed')
+    const createdProject: ProjectDetailProjection = createdResult.value
+    await expect(first.workbenchAuth.run(() => firstService.project(
+      { projectId: createdProject.project.projectId },
+      new AbortController().signal,
+    ))).resolves.toEqual(createdProject)
+    await expect(first.workbenchAuth.run(() => firstService.projectStart(
+      { limit: 10 },
+      new AbortController().signal,
+    ))).resolves.toMatchObject({
+      catalogRevision: 1,
+      projects: [{
+        projectId: createdProject.project.projectId,
+        primaryGoal: { goalId: createdProject.primaryGoal.goalId },
+      }],
+      nextBeforeSequence: null,
+    })
+    const projectActivity = await first.workbenchAuth.run(() => firstService.activity({
+      projectId: createdProject.project.projectId,
+      objectType: 'project',
+      objectId: createdProject.project.projectId,
+      action: 'workbench.project.created',
+      limit: 10,
+    }, new AbortController().signal))
+    expect(projectActivity).toMatchObject({
+      items: [{
+        eventId: createdResult.receipt.auditEventId,
+        projectId: createdProject.project.projectId,
+        action: 'workbench.project.created',
+        reason: 'owner-project-create',
+        causationId: 'loader-project-causation-0001',
+        commandId: createdResult.receipt.commandId,
+        object: {
+          type: 'project',
+          id: createdProject.project.projectId,
+          version: 1,
+        },
+        summaryCode: 'project-created-from-template',
+        outbox: { id: createdResult.receipt.outboxId, state: 'pending' },
+      }],
+      nextBeforeSequence: null,
+      integrity: { valid: true, eventCount: 2, issue: null },
+    })
+    expect(JSON.stringify(projectActivity)).not.toContain('Loader-created Project')
+    expect(JSON.stringify(projectActivity)).not.toContain('Shorten Loader feedback time')
+    expect(JSON.stringify(projectActivity)).not.toContain('Feedback latency')
+    expect(projectActivity.integrity.headHash).toBe(projectActivity.items[0]?.hash)
+
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
     expect(first.get('workbench')).toBeUndefined()
@@ -274,13 +411,28 @@ describe('built Workbench Host through the real DSH Loader', () => {
     const restarted = await load(test.configPath)
     await expect(restarted.workbenchAuth.run(() =>
       restarted.workbench.snapshot(new AbortController().signal))).resolves.toEqual(expected)
-    await expect(restarted.workbenchAuth.run(() => restarted.workbench.activity(
+    const restartWorkspaceActivity = await restarted.workbenchAuth.run(() => restarted.workbench.activity(
       { projectId: null, limit: 10 },
       new AbortController().signal,
-    ))).resolves.toEqual(activity)
+    ))
+    expect(restartWorkspaceActivity.items).toEqual(activity.items)
+    expect(restartWorkspaceActivity.nextBeforeSequence).toBe(activity.nextBeforeSequence)
+    expect(restartWorkspaceActivity.integrity).toEqual(projectActivity.integrity)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.project(
+      { projectId: createdProject.project.projectId },
+      new AbortController().signal,
+    ))).resolves.toEqual(createdProject)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.projectStart(
+      { limit: 10 },
+      new AbortController().signal,
+    ))).resolves.toMatchObject({
+      catalogRevision: 1,
+      projects: [{ projectId: createdProject.project.projectId }],
+      nextBeforeSequence: null,
+    })
     await expect(restarted.workbenchAuth.run(() =>
       restarted.workbench.auditIntegrity(new AbortController().signal))).resolves.toEqual(
-      activity.integrity,
+      projectActivity.integrity,
     )
     await restarted.fiber.dispose()
     contexts.splice(contexts.indexOf(restarted), 1)

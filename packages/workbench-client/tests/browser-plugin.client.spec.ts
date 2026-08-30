@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type {
   OwnerAccessProjection,
   OwnerAuthResponse,
+  ProjectStartProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
@@ -62,6 +63,31 @@ function emptyActivity(): WorkbenchActivityProjection {
   }
 }
 
+function emptyProjectStart(): ProjectStartProjection {
+  const definitionDigest = `sha256:${'a'.repeat(64)}` as const
+  return {
+    template: {
+      selection: { templateId: 'knowledge-work', templateVersion: 1, definitionDigest },
+      definition: {
+        snapshotSchemaVersion: 1,
+        templateId: 'knowledge-work',
+        templateVersion: 1,
+        kind: 'knowledge-work',
+        rules: {
+          minimumOutcomeCount: 1,
+          outcomeMetricRequired: true,
+          primaryGoalRequired: true,
+          supportingGoalsAllowed: true,
+        },
+        defaults: { projectTimezone: 'Asia/Shanghai' },
+      },
+    },
+    catalogRevision: 0,
+    projects: [],
+    nextBeforeSequence: null,
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
@@ -69,6 +95,10 @@ type WorkbenchRemoteSnapshot = (
 type WorkbenchRemoteActivity = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchActivityProjection }>
+
+type WorkbenchRemoteProjectStart = (
+  signal?: AbortSignal,
+) => Promise<{ readonly ok: true; readonly value: ProjectStartProjection }>
 
 type AuthState = (
   signal?: AbortSignal,
@@ -78,6 +108,7 @@ async function bench(options: {
   registrationFailure?: boolean
   snapshot?: WorkbenchRemoteSnapshot
   activity?: WorkbenchRemoteActivity
+  projectStart?: WorkbenchRemoteProjectStart
   authState?: AuthState
 } = {}) {
   const ctx = new Context()
@@ -103,6 +134,14 @@ async function bench(options: {
   const activityGate = vi.fn((_filter: unknown, signal?: AbortSignal) => {
     requestOrder.push('activity')
     return activitySource(signal)
+  })
+  const projectStartSource = options.projectStart ?? (() => Promise.resolve({
+    ok: true as const,
+    value: emptyProjectStart(),
+  }))
+  const projectStartGate = vi.fn((_filter: unknown, signal?: AbortSignal) => {
+    requestOrder.push('projects')
+    return projectStartSource(signal)
   })
   const authStateSource = options.authState ?? (() => Promise.resolve({
     ok: true as const,
@@ -169,6 +208,15 @@ async function bench(options: {
         issue: null,
       },
     })),
+    projectStart: projectStartGate,
+    createProject: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: {
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      },
+    })),
+    project: vi.fn(() => Promise.resolve({ ok: true as const, value: null })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -211,6 +259,7 @@ async function bench(options: {
     requestOrder,
     snapshotGate,
     activityGate,
+    projectStartGate,
     authStateGate,
     auth,
     disposeLayout,
@@ -247,8 +296,9 @@ describe('Project Workbench browser plugin lifecycle', () => {
       const owner = injected.controller.getSnapshot()
       expect(owner).toMatchObject({ phase: 'authenticated', access: signedIn() })
       expect(owner.status?.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
+      expect(owner.projects?.getSnapshot()).toMatchObject({ phase: 'ready', start: emptyProjectStart() })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status', 'activity'])
+    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'activity'])
 
     await b.fiber?.dispose()
     expect(b.ctx.slots.entries('conversation')).toHaveLength(0)
@@ -274,15 +324,21 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
     await vi.waitFor(() => { expect(controller.getSnapshot().phase).toBe('authenticated') })
     const statusController = controller.getSnapshot().status
+    const projectController = controller.getSnapshot().projects
     const activityController = controller.getSnapshot().activity
     expect(statusController).not.toBeNull()
     expect(activityController).not.toBeNull()
+    expect(projectController).not.toBeNull()
 
     b.disconnect()
     expect(statusController?.getSnapshot()).toMatchObject({ phase: 'stale', snapshot: status() })
     expect(activityController?.getSnapshot()).toMatchObject({
       phase: 'stale',
       activity: emptyActivity(),
+    })
+    expect(projectController?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      start: emptyProjectStart(),
     })
     b.requestOrder.length = 0
     b.reconnect()
@@ -293,11 +349,16 @@ describe('Project Workbench browser plugin lifecycle', () => {
         phase: 'ready',
         activity: emptyActivity(),
       })
+      expect(projectController?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        start: emptyProjectStart(),
+      })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status', 'activity'])
+    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'activity'])
     expect(b.authStateGate).toHaveBeenCalledTimes(2)
     expect(b.snapshotGate).toHaveBeenCalledTimes(2)
     expect(b.activityGate).toHaveBeenCalledTimes(2)
+    expect(b.projectStartGate).toHaveBeenCalledTimes(2)
     await b.fiber?.dispose()
   })
 
@@ -372,6 +433,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     expect(order).toEqual(['auth-settled', 'remote'])
     expect(b.snapshotGate).not.toHaveBeenCalled()
     expect(b.activityGate).not.toHaveBeenCalled()
+    expect(b.projectStartGate).not.toHaveBeenCalled()
   })
 
   it('drains an aborted Activity request before withdrawing the Remote namespace', async () => {
@@ -395,6 +457,29 @@ describe('Project Workbench browser plugin lifecycle', () => {
     await b.fiber?.dispose()
 
     expect(order).toEqual(['activity-settled', 'remote'])
+  })
+
+  it('drains an aborted Project catalog request before withdrawing the Remote namespace', async () => {
+    const order: string[] = []
+    let signal: AbortSignal | undefined
+    const b = await bench({
+      projectStart: currentSignal => new Promise((_resolve, reject) => {
+        signal = currentSignal
+        currentSignal?.addEventListener('abort', () => {
+          order.push('projects-settled')
+          reject(currentSignal.reason)
+        }, { once: true })
+      }),
+    })
+    b.remote.disposeMount.mockImplementationOnce(async () => {
+      order.push('remote')
+      expect(signal?.aborted).toBe(true)
+    })
+    await vi.waitFor(() => { expect(signal).toBeInstanceOf(AbortSignal) })
+
+    await b.fiber?.dispose()
+
+    expect(order).toEqual(['projects-settled', 'remote'])
   })
 
   it('removes the styles owned by the disposed Client Fiber', async () => {

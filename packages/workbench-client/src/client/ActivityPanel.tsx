@@ -27,10 +27,12 @@ export interface ActivityPanelCopy {
   readonly objectTypeLabel: string
   readonly objectAll: string
   readonly objectStatus: string
+  readonly objectProject: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
   readonly actionStatusUpdated: string
+  readonly actionProjectCreated: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -51,6 +53,7 @@ export interface ActivityPanelCopy {
   readonly integrityHead: string
   readonly integrityEmptyHead: string
   readonly summaryStatusCommitted: string
+  readonly summaryProjectCreated: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -58,6 +61,7 @@ export interface ActivityPanelCopy {
   readonly revisionPrefix: string
   readonly reasonPrefix: string
   readonly reasonOwnerStatusEdit: string
+  readonly reasonOwnerProjectCreate: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -80,10 +84,12 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectTypeLabel: 'Object type',
   objectAll: 'All object types',
   objectStatus: 'Workbench status',
+  objectProject: 'Project',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
   actionStatusUpdated: 'Status updated',
+  actionProjectCreated: 'Project created',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -104,6 +110,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   integrityHead: 'Chain head',
   integrityEmptyHead: 'No audit head yet',
   summaryStatusCommitted: 'Status revision committed',
+  summaryProjectCreated: 'Project created from template',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -111,6 +118,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   revisionPrefix: 'Revision',
   reasonPrefix: 'Reason',
   reasonOwnerStatusEdit: 'Owner status edit',
+  reasonOwnerProjectCreate: 'Owner Project creation',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -174,12 +182,12 @@ export function ActivityPanel({
         : projectScope === 'project'
           ? { projectId: projectId.trim() }
           : {}),
-      ...(objectType === 'workbench-status'
-        ? { objectType: 'workbench-status' as const }
+      ...(objectType === 'workbench-status' || objectType === 'project'
+        ? { objectType }
         : {}),
       ...(objectId.trim() === '' ? {} : { objectId: objectId.trim() }),
-      ...(action === 'workbench.status.updated'
-        ? { action: 'workbench.status.updated' as const }
+      ...(action === 'workbench.status.updated' || action === 'workbench.project.created'
+        ? { action }
         : {}),
     }
     void controller.setFilter(Object.freeze(next))
@@ -266,6 +274,7 @@ export function ActivityPanel({
               >
                 <option value="">{copy.objectAll}</option>
                 <option value="workbench-status">{copy.objectStatus}</option>
+                <option value="project">{copy.objectProject}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -287,6 +296,7 @@ export function ActivityPanel({
               >
                 <option value="">{copy.actionAll}</option>
                 <option value="workbench.status.updated">{copy.actionStatusUpdated}</option>
+                <option value="workbench.project.created">{copy.actionProjectCreated}</option>
               </select>
             </label>
           </div>
@@ -420,7 +430,7 @@ function ActivityRow({
           </div>
           <div>
             <dt>{copy.reasonPrefix}</dt>
-            <dd>{copy.reasonOwnerStatusEdit}</dd>
+            <dd>{reasonLabel(item, copy)}</dd>
           </div>
           <div>
             <dt>{copy.causationPrefix}</dt>
@@ -453,6 +463,14 @@ function projectIdOf(filter: WorkbenchActivityFilter): string {
 function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
   switch (item.summaryCode) {
     case 'status-revision-committed': return copy.summaryStatusCommitted
+    case 'project-created-from-template': return copy.summaryProjectCreated
+  }
+}
+
+function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
+  switch (item.reason) {
+    case 'owner-status-edit': return copy.reasonOwnerStatusEdit
+    case 'owner-project-create': return copy.reasonOwnerProjectCreate
   }
 }
 

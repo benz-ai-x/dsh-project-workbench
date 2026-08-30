@@ -5,6 +5,18 @@ import { open as openFile, mkdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type {
+  CreateProjectResult,
+  GoalProjection,
+  GoalSummaryProjection,
+  KnowledgeWorkTemplateDefinitionV1,
+  OutcomeMetric,
+  OutcomeMetricDirection,
+  OutcomeProjection,
+  ProjectDetailProjection,
+  ProjectStartProjection,
+  ProjectSummaryProjection,
+  ProjectTemplateSelection,
+  ProjectTemplateSnapshotProjection,
   SetStatusResult,
   WorkbenchActivityItem,
   WorkbenchActivityProjection,
@@ -24,17 +36,27 @@ import {
   type AuditIntegrityFailureCode,
 } from './audit.ts'
 import {
+  KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
+  KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+  KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1,
+  isKnowledgeWorkTemplateSelection,
+  knowledgeWorkTemplateProjection,
+} from './project-template.ts'
+import {
   statusResult,
   statusSnapshot,
   type WorkbenchActivityQuery,
   type WorkbenchOutboxClaim,
   type WorkbenchOutboxClaimRequest,
   type WorkbenchOutboxSettlement,
+  type WorkbenchProjectMutation,
+  type WorkbenchProjectReadQuery,
+  type WorkbenchProjectStartQuery,
   type WorkbenchRepository,
   type WorkbenchStatusMutation,
 } from './repository.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 2
+export const WORKBENCH_SCHEMA_VERSION = 3
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -43,7 +65,20 @@ const STATUS_OBJECT_TYPE = 'workbench-status'
 const STATUS_REASON = 'owner-status-edit'
 const STATUS_SUMMARY = 'status-revision-committed'
 const STATUS_OUTBOX_TOPIC = 'workbench.status.committed.v1'
+const PROJECT_COMMAND_TYPE = 'workbench.project.create'
+const PROJECT_AUDIT_ACTION = 'workbench.project.created'
+const PROJECT_OBJECT_TYPE = 'project'
+const PROJECT_REASON = 'owner-project-create'
+const PROJECT_SUMMARY = 'project-created-from-template'
+const PROJECT_OUTBOX_TOPIC = 'workbench.project.created.v1'
 const MAX_ACTIVITY_LIMIT = 100
+const MAX_PROJECT_PAGE_LIMIT = 100
+const MAX_PROJECT_OUTCOMES = 20
+const MAX_SUPPORTING_GOALS = 20
+const MAX_DOMAIN_NAME_LENGTH = 200
+const MAX_METRIC_NAME_LENGTH = 120
+const MAX_METRIC_UNIT_LENGTH = 64
+const MAX_DOMAIN_ID_LENGTH = 128
 
 export type WorkbenchJournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
@@ -62,6 +97,77 @@ interface StatusRow {
   readonly updated_at: string
 }
 
+interface ProjectCatalogRow {
+  readonly revision: number
+}
+
+interface TemplateVersionRow {
+  readonly template_id: string
+  readonly template_version: number
+  readonly snapshot_schema_version: number
+  readonly kind: string
+  readonly canonical_definition_json: string
+  readonly definition_digest: string
+}
+
+interface GoalRow {
+  readonly id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly name: string
+  readonly revision: number
+  readonly state: string
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface OutcomeRow {
+  readonly id: string
+  readonly goal_id: string
+  readonly ordinal: number
+  readonly name: string
+  readonly metric_name: string
+  readonly initial_value: number
+  readonly target_value: number
+  readonly unit: string
+  readonly direction: string
+  readonly revision: number
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface ProjectSummaryRow {
+  readonly project_id: string
+  readonly project_name: string
+  readonly project_revision: number
+  readonly catalog_sequence: number
+  readonly timezone: string
+  readonly created_at: string
+  readonly primary_goal_id: string
+  readonly primary_goal_name: string
+  readonly primary_goal_revision: number
+}
+
+interface ProjectDetailRow extends ProjectSummaryRow {
+  readonly organization_id: string
+  readonly team_id: string
+  readonly template_id: string
+  readonly template_version: number
+  readonly template_definition_digest: string
+  readonly snapshot_schema_version: number
+  readonly snapshot_digest: string
+  readonly canonical_snapshot_json: string
+  readonly captured_at: string
+}
+
+interface SupportingGoalRow {
+  readonly goal_id: string
+  readonly name: string
+  readonly revision: number
+  readonly ordinal: number
+  readonly linked_goal_revision: number
+}
+
 interface ReceiptRow {
   readonly command_type: string
   readonly request_hash: string
@@ -72,6 +178,8 @@ interface ReceiptRow {
 }
 
 interface ReceiptIntegrityRow extends ReceiptRow {
+  readonly receipt_organization_id: string
+  readonly receipt_actor_id: string
   readonly idempotency_key_hash: string
   readonly committed_at: string
   readonly audit_object_id: string
@@ -80,7 +188,23 @@ interface ReceiptIntegrityRow extends ReceiptRow {
   readonly audit_causation_id: string
   readonly audit_command_id: string
   readonly audit_outbox_id: string | null
+  readonly audit_action: string
+  readonly audit_actor_id: string
+  readonly audit_reason_code: string
+  readonly audit_object_type: string
+  readonly audit_project_id: string | null
+  readonly audit_organization_id: string
+  readonly audit_team_id: string
+  readonly audit_summary_code: string
   readonly outbox_command_id: string
+  readonly outbox_organization_id: string
+  readonly outbox_topic: string
+  readonly outbox_project_id: string | null
+  readonly outbox_object_type: string
+  readonly outbox_object_id: string
+  readonly outbox_object_version: number
+  readonly outbox_causation_id: string
+  readonly outbox_payload_json: string
 }
 
 interface AuditHeadRow {
@@ -130,6 +254,7 @@ interface ActivityRow {
   readonly object_version: number
   readonly causation_id: string
   readonly command_id: string
+  readonly command_type: string
   readonly summary_code: string
   readonly previous_hash: string
   readonly event_hash: string
@@ -153,6 +278,7 @@ const JOURNAL_MODES = new Set<WorkbenchJournalMode>(['wal', 'delete', 'truncate'
 const MAX_BUSY_TIMEOUT_MS = 2_147_483_647
 const SAFE_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u
 const SHA256_HEX = /^[0-9a-f]{64}$/u
+const ASCII_CONTROL = /[\u0000-\u001f\u007f]/u
 const OUTBOX_ERROR_CODES = new Set<WorkbenchOutboxErrorCode>([
   'lease-expired',
   'transport-ambiguous',
@@ -165,6 +291,11 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_outbox_no_delete',
   'workbench_command_receipt_no_update',
   'workbench_command_receipt_no_delete',
+  'workbench_template_version_no_update',
+  'workbench_template_version_no_delete',
+  'workbench_project_template_snapshot_no_update',
+  'workbench_project_template_snapshot_no_delete',
+  'workbench_project_snapshot_columns_no_update',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -340,6 +471,266 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     }
   }
 
+  async readProjectStart(
+    query: WorkbenchProjectStartQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectStartProjection> {
+    throwIfAborted(signal)
+    validateProjectStartQuery(query)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN')
+      began = true
+      const template = readCompiledTemplate(database)
+      const catalogRevision = readProjectCatalog(database).revision
+      const limit = query.filter.limit ?? 20
+      const parameters: Array<string | number> = [query.organizationId, query.teamId]
+      const cursor = query.filter.beforeSequence
+      const cursorClause = cursor === undefined ? '' : 'AND project.catalog_sequence < ?'
+      if (cursor !== undefined) parameters.push(cursor)
+      parameters.push(limit + 1)
+      const rows = database.prepare(`
+        SELECT project.id AS project_id, project.name AS project_name,
+          project.revision AS project_revision, project.catalog_sequence,
+          project.timezone, project.created_at,
+          goal.id AS primary_goal_id, goal.name AS primary_goal_name,
+          goal.revision AS primary_goal_revision
+        FROM workbench_project AS project
+        INNER JOIN workbench_goal AS goal
+          ON goal.organization_id = project.organization_id
+          AND goal.team_id = project.team_id
+          AND goal.id = project.primary_goal_id
+        WHERE project.organization_id = ? AND project.team_id = ?
+          ${cursorClause}
+        ORDER BY project.catalog_sequence DESC
+        LIMIT ?
+      `).all(...parameters) as unknown as ProjectSummaryRow[]
+      const hasMore = rows.length > limit
+      const visible = hasMore ? rows.slice(0, limit) : rows
+      const projects = Object.freeze(visible.map(projectSummaryFromRow))
+      const projection = Object.freeze({
+        template,
+        catalogRevision,
+        projects,
+        nextBeforeSequence: hasMore ? projects.at(-1)?.catalogSequence ?? null : null,
+      })
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return projection
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitProject(
+    mutation: WorkbenchProjectMutation,
+    signal: AbortSignal,
+  ): Promise<CreateProjectResult> {
+    throwIfAborted(signal)
+    validateProjectMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = digest(`project-workbench.idempotency.v1\0${mutation.command.idempotencyKey}`)
+    const requestHash = projectRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = database.prepare(`
+        SELECT command_type, request_hash, command_id, audit_event_id, outbox_id, result_json
+        FROM workbench_command_receipt
+        WHERE organization_id = ? AND actor_id = ? AND idempotency_key_hash = ?
+      `).get(
+        mutation.command.actor.organizationId,
+        mutation.command.actor.id,
+        keyHash,
+      ) as ReceiptRow | undefined
+      if (receipt !== undefined) {
+        if (receipt.command_type !== PROJECT_COMMAND_TYPE || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return idempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeCommittedProjectResult(receipt.result_json, receipt)
+        throwIfAborted(signal)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+
+      assertValidLedger(database)
+      readCompiledTemplate(database)
+      if (!isKnowledgeWorkTemplateSelection(mutation.template)) {
+        database.exec('ROLLBACK')
+        began = false
+        return templateVersionConflict()
+      }
+
+      const catalog = readProjectCatalog(database)
+      if (catalog.revision !== mutation.expectedCatalogRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return catalogRevisionConflict(mutation.expectedCatalogRevision, catalog.revision)
+      }
+      if (catalog.revision >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('Workbench Project catalog revision exhausted')
+      }
+
+      for (const supporting of mutation.supportingGoals) {
+        const row = database.prepare(`
+          SELECT id, organization_id, team_id, name, revision, state, created_at, updated_at
+          FROM workbench_goal
+          WHERE organization_id = ? AND team_id = ? AND id = ?
+        `).get(
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          supporting.goalId,
+        ) as GoalRow | undefined
+        if (row === undefined || row.state !== 'active' || row.revision !== supporting.expectedRevision) {
+          database.exec('ROLLBACK')
+          began = false
+          return supportingGoalConflict(
+            supporting.goalId,
+            supporting.expectedRevision,
+            row === undefined ? null : positiveInteger(row.revision, 'Supporting Goal revision'),
+          )
+        }
+        goalSummaryFromRow(row)
+      }
+
+      const nextCatalogRevision = catalog.revision + 1
+      insertProjectDomain(database, mutation, nextCatalogRevision)
+      const advancedCatalog = database.prepare(`
+        UPDATE workbench_project_catalog SET revision = ?
+        WHERE singleton = 1 AND revision = ?
+      `).run(nextCatalogRevision, catalog.revision)
+      if (advancedCatalog.changes !== 1) {
+        throw new Error('Workbench Project catalog did not advance exactly once')
+      }
+
+      const outboxPayload = canonicalizeJson({
+        schemaVersion: 1,
+        commandId: mutation.command.commandId,
+        auditEventId: mutation.command.auditEventId,
+        projectId: mutation.projectId,
+        projectRevision: 1,
+        primaryGoalId: mutation.primaryGoalId,
+        primaryGoalRevision: 1,
+        templateId: mutation.template.templateId,
+        templateVersion: mutation.template.templateVersion,
+        templateDefinitionDigest: mutation.template.definitionDigest,
+        outcomeCount: mutation.primaryGoal.outcomes.length,
+        supportingGoalCount: mutation.supportingGoals.length,
+        catalogRevision: nextCatalogRevision,
+        causationId: mutation.command.causationId,
+      })
+      insertProjectOutbox(database, mutation, outboxPayload)
+
+      const head = readAuditHead(database)
+      if (head.sequence >= Number.MAX_SAFE_INTEGER) throw new Error('Workbench audit sequence exhausted')
+      const sequence = head.sequence + 1
+      const event = createAuditEvent({
+        sequence: String(sequence),
+        previousHash: auditHash(head.head_hash),
+        auditId: mutation.command.auditEventId,
+        occurredAt: mutation.command.occurredAt,
+        actor: { kind: mutation.command.actor.kind, id: mutation.command.actor.id },
+        action: PROJECT_AUDIT_ACTION,
+        scope: {
+          organizationId: mutation.command.actor.organizationId,
+          teamId: mutation.command.actor.teamId,
+          projectId: mutation.projectId,
+        },
+        reason: { code: mutation.command.reason },
+        object: { type: PROJECT_OBJECT_TYPE, id: mutation.projectId, version: '1' },
+        command: { id: mutation.command.commandId, type: PROJECT_COMMAND_TYPE },
+        causation: { id: mutation.command.causationId },
+        outbox: { id: mutation.command.outboxId, state: 'pending' },
+        outcome: 'committed',
+        summary: {
+          code: PROJECT_SUMMARY,
+          changedFields: ['primaryGoal', 'outcomes', 'supportingGoals', 'templateSnapshot'],
+        },
+      })
+      insertAuditEvent(database, event)
+      const advancedHead = database.prepare(`
+        UPDATE workbench_audit_head
+        SET sequence = ?, head_hash = ?
+        WHERE singleton = 1 AND sequence = ? AND head_hash = ?
+      `).run(sequence, event.eventHash, head.sequence, head.head_hash)
+      if (advancedHead.changes !== 1) throw new Error('Workbench audit head did not advance exactly once')
+
+      const detail = readProjectDetailSync(database, {
+        organizationId: mutation.command.actor.organizationId,
+        teamId: mutation.command.actor.teamId,
+        projectId: mutation.projectId,
+      })
+      if (detail === null) throw new Error('Workbench committed Project cannot be read back')
+      const committed = projectResult({
+        ok: true,
+        value: detail,
+        catalogRevision: nextCatalogRevision,
+        receipt: {
+          commandId: mutation.command.commandId,
+          auditEventId: mutation.command.auditEventId,
+          outboxId: mutation.command.outboxId,
+        },
+      })
+      const resultJson = canonicalizeJson(committed)
+      const saved = database.prepare(`
+        INSERT INTO workbench_command_receipt (
+          organization_id, actor_id, idempotency_key_hash, command_type,
+          request_hash, command_id, audit_event_id, outbox_id, result_json, committed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        mutation.command.actor.organizationId,
+        mutation.command.actor.id,
+        keyHash,
+        PROJECT_COMMAND_TYPE,
+        requestHash,
+        mutation.command.commandId,
+        mutation.command.auditEventId,
+        mutation.command.outboxId,
+        resultJson,
+        mutation.command.occurredAt,
+      )
+      if (saved.changes !== 1) throw new Error('Workbench command receipt was not inserted exactly once')
+
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async readProject(
+    query: WorkbenchProjectReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectDetailProjection | null> {
+    throwIfAborted(signal)
+    validateProjectReadQuery(query)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN')
+      began = true
+      const detail = readProjectDetailSync(database, query)
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return detail
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
   async readActivity(
     query: WorkbenchActivityQuery,
     signal: AbortSignal,
@@ -390,7 +781,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         SELECT audit.sequence, audit.id AS event_id, audit.occurred_at,
           audit.actor_kind, audit.actor_id, audit.project_id, audit.action,
           audit.reason_code, audit.object_type, audit.object_id, audit.object_version,
-          audit.causation_id, audit.command_id, audit.summary_code,
+          audit.causation_id, audit.command_id, audit.command_type, audit.summary_code,
           audit.previous_hash, audit.event_hash, outbox.id AS outbox_id,
           outbox.state AS outbox_state, outbox.attempt_count,
           outbox.updated_at AS outbox_updated_at, outbox.error_code
@@ -748,8 +1139,8 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     `)
     return
   }
-  if (targetVersion !== 2) throw new Error(`missing Workbench migration ${targetVersion}`)
-  database.exec(`
+  if (targetVersion === 2) {
+    database.exec(`
     CREATE TABLE workbench_audit_head (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       sequence INTEGER NOT NULL CHECK (sequence >= 0),
@@ -859,7 +1250,179 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     CREATE TRIGGER workbench_command_receipt_no_delete
       BEFORE DELETE ON workbench_command_receipt
     BEGIN SELECT RAISE(ABORT, 'workbench command receipts cannot be deleted'); END
+    `)
+    return
+  }
+  if (targetVersion !== 3) throw new Error(`missing Workbench migration ${targetVersion}`)
+  database.exec(`
+    CREATE TABLE workbench_template_version (
+      template_id TEXT NOT NULL CHECK (length(template_id) BETWEEN 1 AND 128),
+      template_version INTEGER NOT NULL CHECK (template_version > 0),
+      snapshot_schema_version INTEGER NOT NULL CHECK (snapshot_schema_version > 0),
+      kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 128),
+      canonical_definition_json TEXT NOT NULL CHECK (length(canonical_definition_json) > 0),
+      definition_digest TEXT NOT NULL
+        CHECK (length(definition_digest) = 71 AND substr(definition_digest, 1, 7) = 'sha256:'),
+      PRIMARY KEY (template_id, template_version),
+      UNIQUE (template_id, template_version, definition_digest)
+    ) STRICT;
+
+    CREATE TABLE workbench_project_catalog (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      revision INTEGER NOT NULL CHECK (revision >= 0)
+    ) STRICT;
+    INSERT INTO workbench_project_catalog VALUES (1, 0);
+
+    CREATE TABLE workbench_goal (
+      id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+      organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+      team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+      name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND ${MAX_DOMAIN_NAME_LENGTH}),
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      state TEXT NOT NULL CHECK (state IN ('active', 'inactive')),
+      created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+      updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+      UNIQUE (organization_id, team_id, id)
+    ) STRICT;
+
+    CREATE TABLE workbench_outcome (
+      id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+      organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+      team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+      goal_id TEXT NOT NULL CHECK (length(goal_id) BETWEEN 1 AND 128),
+      ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND ${MAX_PROJECT_OUTCOMES}),
+      name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND ${MAX_DOMAIN_NAME_LENGTH}),
+      metric_name TEXT NOT NULL CHECK (length(metric_name) BETWEEN 1 AND ${MAX_METRIC_NAME_LENGTH}),
+      initial_value REAL NOT NULL CHECK (abs(initial_value) <= 1.7976931348623157e308),
+      target_value REAL NOT NULL CHECK (abs(target_value) <= 1.7976931348623157e308),
+      unit TEXT NOT NULL CHECK (length(unit) BETWEEN 1 AND ${MAX_METRIC_UNIT_LENGTH}),
+      direction TEXT NOT NULL CHECK (direction IN ('increase', 'decrease')),
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+      updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+      UNIQUE (goal_id, ordinal),
+      FOREIGN KEY (organization_id, team_id, goal_id)
+        REFERENCES workbench_goal (organization_id, team_id, id),
+      CHECK (
+        (direction = 'increase' AND target_value > initial_value)
+        OR (direction = 'decrease' AND target_value < initial_value)
+      )
+    ) STRICT;
+
+    CREATE TABLE workbench_project (
+      id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+      organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+      team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+      name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND ${MAX_DOMAIN_NAME_LENGTH}),
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      catalog_sequence INTEGER NOT NULL UNIQUE CHECK (catalog_sequence > 0),
+      primary_goal_id TEXT NOT NULL CHECK (length(primary_goal_id) BETWEEN 1 AND 128),
+      timezone TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
+      template_id TEXT NOT NULL CHECK (length(template_id) BETWEEN 1 AND 128),
+      template_version INTEGER NOT NULL CHECK (template_version > 0),
+      template_definition_digest TEXT NOT NULL
+        CHECK (length(template_definition_digest) = 71
+          AND substr(template_definition_digest, 1, 7) = 'sha256:'),
+      creation_snapshot_schema_version INTEGER NOT NULL
+        CHECK (creation_snapshot_schema_version > 0),
+      creation_snapshot_digest TEXT NOT NULL
+        CHECK (length(creation_snapshot_digest) = 71
+          AND substr(creation_snapshot_digest, 1, 7) = 'sha256:'),
+      created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+      updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+      UNIQUE (id, organization_id, team_id),
+      UNIQUE (id, organization_id, team_id, primary_goal_id),
+      UNIQUE (
+        id, template_id, template_version, template_definition_digest,
+        creation_snapshot_schema_version, creation_snapshot_digest
+      ),
+      FOREIGN KEY (organization_id, team_id, primary_goal_id)
+        REFERENCES workbench_goal (organization_id, team_id, id),
+      FOREIGN KEY (template_id, template_version, template_definition_digest)
+        REFERENCES workbench_template_version (template_id, template_version, definition_digest)
+    ) STRICT;
+
+    CREATE TABLE workbench_project_template_snapshot (
+      project_id TEXT PRIMARY KEY CHECK (length(project_id) BETWEEN 1 AND 128),
+      template_id TEXT NOT NULL CHECK (length(template_id) BETWEEN 1 AND 128),
+      template_version INTEGER NOT NULL CHECK (template_version > 0),
+      template_definition_digest TEXT NOT NULL
+        CHECK (length(template_definition_digest) = 71
+          AND substr(template_definition_digest, 1, 7) = 'sha256:'),
+      snapshot_schema_version INTEGER NOT NULL CHECK (snapshot_schema_version > 0),
+      snapshot_digest TEXT NOT NULL
+        CHECK (length(snapshot_digest) = 71 AND substr(snapshot_digest, 1, 7) = 'sha256:'),
+      canonical_snapshot_json TEXT NOT NULL CHECK (length(canonical_snapshot_json) > 0),
+      captured_at TEXT NOT NULL CHECK (length(captured_at) > 0),
+      FOREIGN KEY (
+        project_id, template_id, template_version, template_definition_digest,
+        snapshot_schema_version, snapshot_digest
+      ) REFERENCES workbench_project (
+        id, template_id, template_version, template_definition_digest,
+        creation_snapshot_schema_version, creation_snapshot_digest
+      )
+    ) STRICT;
+
+    CREATE TABLE workbench_project_supporting_goal (
+      project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+      organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+      team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+      primary_goal_id TEXT NOT NULL CHECK (length(primary_goal_id) BETWEEN 1 AND 128),
+      goal_id TEXT NOT NULL CHECK (length(goal_id) BETWEEN 1 AND 128),
+      ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND ${MAX_SUPPORTING_GOALS}),
+      linked_goal_revision INTEGER NOT NULL CHECK (linked_goal_revision > 0),
+      PRIMARY KEY (project_id, goal_id),
+      UNIQUE (project_id, ordinal),
+      FOREIGN KEY (project_id, organization_id, team_id, primary_goal_id)
+        REFERENCES workbench_project (id, organization_id, team_id, primary_goal_id),
+      FOREIGN KEY (organization_id, team_id, goal_id)
+        REFERENCES workbench_goal (organization_id, team_id, id),
+      CHECK (goal_id <> primary_goal_id)
+    ) STRICT;
+
+    CREATE INDEX workbench_project_scope_sequence
+      ON workbench_project (organization_id, team_id, catalog_sequence DESC);
+    CREATE INDEX workbench_outcome_goal_ordinal
+      ON workbench_outcome (goal_id, ordinal);
+    CREATE INDEX workbench_supporting_goal_project_ordinal
+      ON workbench_project_supporting_goal (project_id, ordinal);
+
+    CREATE TRIGGER workbench_template_version_no_update
+      BEFORE UPDATE ON workbench_template_version
+    BEGIN SELECT RAISE(ABORT, 'workbench Template Versions are immutable'); END;
+    CREATE TRIGGER workbench_template_version_no_delete
+      BEFORE DELETE ON workbench_template_version
+    BEGIN SELECT RAISE(ABORT, 'workbench Template Versions cannot be deleted'); END;
+
+    CREATE TRIGGER workbench_project_template_snapshot_no_update
+      BEFORE UPDATE ON workbench_project_template_snapshot
+    BEGIN SELECT RAISE(ABORT, 'workbench Project creation snapshots are immutable'); END;
+    CREATE TRIGGER workbench_project_template_snapshot_no_delete
+      BEFORE DELETE ON workbench_project_template_snapshot
+    BEGIN SELECT RAISE(ABORT, 'workbench Project creation snapshots cannot be deleted'); END;
+
+    CREATE TRIGGER workbench_project_snapshot_columns_no_update BEFORE UPDATE OF
+      template_id, template_version, template_definition_digest,
+      creation_snapshot_schema_version, creation_snapshot_digest
+      ON workbench_project
+    BEGIN SELECT RAISE(ABORT, 'workbench Project creation snapshot identity is immutable'); END
   `)
+  const seeded = database.prepare(`
+    INSERT INTO workbench_template_version (
+      template_id, template_version, snapshot_schema_version, kind,
+      canonical_definition_json, definition_digest
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateId,
+    KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateVersion,
+    1,
+    'knowledge-work',
+    KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
+    KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+  )
+  if (seeded.changes !== 1) {
+    throw new Error('Workbench Knowledge Work Template V1 was not seeded exactly once')
+  }
 }
 
 function validateSchema(database: DatabaseSync): void {
@@ -868,6 +1431,25 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare('SELECT id, state, payload_json FROM workbench_outbox LIMIT 1')
   database.prepare('SELECT id, event_hash, canonical_envelope FROM workbench_audit_event LIMIT 1')
   database.prepare('SELECT command_id, result_json FROM workbench_command_receipt LIMIT 1')
+  database.prepare(`
+    SELECT template_id, template_version, snapshot_schema_version, kind,
+      canonical_definition_json, definition_digest
+    FROM workbench_template_version LIMIT 1
+  `)
+  database.prepare('SELECT revision FROM workbench_project_catalog WHERE singleton = 1')
+  database.prepare('SELECT id, organization_id, team_id, revision FROM workbench_goal LIMIT 1')
+  database.prepare('SELECT id, goal_id, ordinal, revision FROM workbench_outcome LIMIT 1')
+  database.prepare(`
+    SELECT id, catalog_sequence, primary_goal_id, template_id, template_version
+    FROM workbench_project LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, canonical_snapshot_json, snapshot_digest
+    FROM workbench_project_template_snapshot LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, goal_id, ordinal FROM workbench_project_supporting_goal LIMIT 1
+  `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
   `).all() as Array<{ readonly name: string }>).map(row => row.name))
@@ -877,6 +1459,14 @@ function validateSchema(database: DatabaseSync): void {
   if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) {
     throw new Error('Workbench database contains broken foreign-key references')
   }
+  const integrityRows = database.prepare('PRAGMA integrity_check').all() as Array<{
+    readonly integrity_check: string
+  }>
+  if (integrityRows.length !== 1 || integrityRows[0]?.integrity_check !== 'ok') {
+    throw new Error('Workbench database failed SQLite integrity validation')
+  }
+  readCompiledTemplate(database)
+  assertValidProjectDomain(database)
 }
 
 function readStatus(database: DatabaseSync): WorkbenchStatusSnapshot | null {
@@ -907,6 +1497,424 @@ function writeStatus(
     ? statement.run(value.id, value.message, value.revision, value.updatedAt)
     : statement.run(value.message, value.revision, value.updatedAt)
   if (result.changes !== 1) throw new Error('Workbench status mutation did not affect exactly one row')
+}
+
+function readCompiledTemplate(database: DatabaseSync) {
+  const rows = database.prepare(`
+    SELECT template_id, template_version, snapshot_schema_version, kind,
+      canonical_definition_json, definition_digest
+    FROM workbench_template_version
+    ORDER BY template_id, template_version
+  `).all() as unknown as TemplateVersionRow[]
+  if (rows.length !== 1) {
+    throw new Error('Workbench database must contain exactly the compiled Template Version')
+  }
+  const row = rows[0]
+  if (row === undefined
+    || row.template_id !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateId
+    || row.template_version !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateVersion
+    || row.snapshot_schema_version !== 1
+    || row.kind !== 'knowledge-work'
+    || row.canonical_definition_json !== KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1
+    || row.definition_digest !== KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1
+    || contentDigest(row.canonical_definition_json) !== row.definition_digest) {
+    throw new Error('Workbench database Template Version drifted from the compiled definition')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.canonical_definition_json)
+  } catch {
+    throw new Error('Workbench database Template Version contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== row.canonical_definition_json) {
+    throw new Error('Workbench database Template Version is not canonical JSON')
+  }
+  return knowledgeWorkTemplateProjection()
+}
+
+function readProjectCatalog(database: DatabaseSync): ProjectCatalogRow {
+  const row = database.prepare(`
+    SELECT revision FROM workbench_project_catalog WHERE singleton = 1
+  `).get() as ProjectCatalogRow | undefined
+  if (row === undefined) throw new Error('Workbench database is missing its Project catalog')
+  positiveInteger(row.revision, 'Project catalog revision', true)
+  return row
+}
+
+function insertProjectDomain(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectMutation,
+  catalogSequence: number,
+): void {
+  const organizationId = mutation.command.actor.organizationId
+  const teamId = mutation.command.actor.teamId
+  const insertedGoal = database.prepare(`
+    INSERT INTO workbench_goal (
+      id, organization_id, team_id, name, revision, state, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 1, 'active', ?, ?)
+  `).run(
+    mutation.primaryGoalId,
+    organizationId,
+    teamId,
+    mutation.primaryGoal.name,
+    mutation.createdAt,
+    mutation.createdAt,
+  )
+  if (insertedGoal.changes !== 1) throw new Error('Workbench Primary Goal was not inserted exactly once')
+
+  const insertOutcome = database.prepare(`
+    INSERT INTO workbench_outcome (
+      id, organization_id, team_id, goal_id, ordinal, name, metric_name,
+      initial_value, target_value, unit, direction, revision, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+  `)
+  for (let index = 0; index < mutation.primaryGoal.outcomes.length; index += 1) {
+    const outcome = mutation.primaryGoal.outcomes[index]
+    if (outcome === undefined) throw new Error('Workbench Outcome order is sparse')
+    const inserted = insertOutcome.run(
+      outcome.outcomeId,
+      organizationId,
+      teamId,
+      mutation.primaryGoalId,
+      index + 1,
+      outcome.name,
+      outcome.metric.metricName,
+      outcome.metric.initialValue,
+      outcome.metric.targetValue,
+      outcome.metric.unit,
+      outcome.metric.direction,
+      mutation.createdAt,
+      mutation.createdAt,
+    )
+    if (inserted.changes !== 1) throw new Error('Workbench Outcome was not inserted exactly once')
+  }
+
+  const insertedProject = database.prepare(`
+    INSERT INTO workbench_project (
+      id, organization_id, team_id, name, revision, catalog_sequence,
+      primary_goal_id, timezone, template_id, template_version,
+      template_definition_digest, creation_snapshot_schema_version,
+      creation_snapshot_digest, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+  `).run(
+    mutation.projectId,
+    organizationId,
+    teamId,
+    mutation.projectName,
+    catalogSequence,
+    mutation.primaryGoalId,
+    'Asia/Shanghai',
+    mutation.template.templateId,
+    mutation.template.templateVersion,
+    mutation.template.definitionDigest,
+    KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+    mutation.createdAt,
+    mutation.createdAt,
+  )
+  if (insertedProject.changes !== 1) throw new Error('Workbench Project was not inserted exactly once')
+
+  const insertedSnapshot = database.prepare(`
+    INSERT INTO workbench_project_template_snapshot (
+      project_id, template_id, template_version, template_definition_digest,
+      snapshot_schema_version, snapshot_digest, canonical_snapshot_json, captured_at
+    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+  `).run(
+    mutation.projectId,
+    mutation.template.templateId,
+    mutation.template.templateVersion,
+    mutation.template.definitionDigest,
+    KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+    KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
+    mutation.createdAt,
+  )
+  if (insertedSnapshot.changes !== 1) {
+    throw new Error('Workbench Project creation snapshot was not inserted exactly once')
+  }
+
+  const insertSupportingGoal = database.prepare(`
+    INSERT INTO workbench_project_supporting_goal (
+      project_id, organization_id, team_id, primary_goal_id, goal_id,
+      ordinal, linked_goal_revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `)
+  for (let index = 0; index < mutation.supportingGoals.length; index += 1) {
+    const supporting = mutation.supportingGoals[index]
+    if (supporting === undefined) throw new Error('Workbench Supporting Goal order is sparse')
+    const inserted = insertSupportingGoal.run(
+      mutation.projectId,
+      organizationId,
+      teamId,
+      mutation.primaryGoalId,
+      supporting.goalId,
+      index + 1,
+      supporting.expectedRevision,
+    )
+    if (inserted.changes !== 1) {
+      throw new Error('Workbench Supporting Goal relation was not inserted exactly once')
+    }
+  }
+}
+
+function insertProjectOutbox(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectMutation,
+  payload: string,
+): void {
+  const result = database.prepare(`
+    INSERT INTO workbench_outbox (
+      id, command_id, organization_id, topic, effect_key, project_id,
+      object_type, object_id, object_version, causation_id, payload_json,
+      state, attempt_count, created_at, updated_at, error_code
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'pending', 0, ?, ?, NULL)
+  `).run(
+    mutation.command.outboxId,
+    mutation.command.commandId,
+    mutation.command.actor.organizationId,
+    PROJECT_OUTBOX_TOPIC,
+    `workbench:${mutation.command.outboxId}`,
+    mutation.projectId,
+    PROJECT_OBJECT_TYPE,
+    mutation.projectId,
+    mutation.command.causationId,
+    payload,
+    mutation.command.occurredAt,
+    mutation.command.occurredAt,
+  )
+  if (result.changes !== 1) throw new Error('Workbench Project Outbox intent was not inserted exactly once')
+}
+
+function readProjectDetailSync(
+  database: DatabaseSync,
+  query: WorkbenchProjectReadQuery,
+): ProjectDetailProjection | null {
+  const row = database.prepare(`
+    SELECT project.id AS project_id, project.organization_id, project.team_id,
+      project.name AS project_name, project.revision AS project_revision,
+      project.catalog_sequence, project.timezone, project.created_at,
+      project.primary_goal_id, goal.name AS primary_goal_name,
+      goal.revision AS primary_goal_revision,
+      project.template_id, project.template_version,
+      project.template_definition_digest,
+      snapshot.snapshot_schema_version, snapshot.snapshot_digest,
+      snapshot.canonical_snapshot_json, snapshot.captured_at
+    FROM workbench_project AS project
+    INNER JOIN workbench_goal AS goal
+      ON goal.organization_id = project.organization_id
+      AND goal.team_id = project.team_id
+      AND goal.id = project.primary_goal_id
+    INNER JOIN workbench_project_template_snapshot AS snapshot
+      ON snapshot.project_id = project.id
+    WHERE project.organization_id = ? AND project.team_id = ? AND project.id = ?
+  `).get(query.organizationId, query.teamId, query.projectId) as ProjectDetailRow | undefined
+  if (row === undefined) return null
+  const project = projectSummaryFromRow(row)
+  const outcomes = readGoalOutcomes(database, row.primary_goal_id)
+  const primaryGoal: GoalProjection = Object.freeze({
+    ...project.primaryGoal,
+    outcomes,
+  })
+  const supportingRows = database.prepare(`
+    SELECT goal.id AS goal_id, goal.name, goal.revision, relation.ordinal,
+      relation.linked_goal_revision
+    FROM workbench_project_supporting_goal AS relation
+    INNER JOIN workbench_goal AS goal
+      ON goal.organization_id = relation.organization_id
+      AND goal.team_id = relation.team_id
+      AND goal.id = relation.goal_id
+    WHERE relation.project_id = ?
+    ORDER BY relation.ordinal
+  `).all(row.project_id) as unknown as SupportingGoalRow[]
+  if (supportingRows.length > MAX_SUPPORTING_GOALS) {
+    throw new Error('Workbench Project contains too many Supporting Goals')
+  }
+  const supportingGoalValues: GoalSummaryProjection[] = []
+  for (let index = 0; index < supportingRows.length; index += 1) {
+    const supportingRow = supportingRows[index]
+    if (supportingRow === undefined || supportingRow.ordinal !== index + 1) {
+      throw new Error('Workbench Project contains invalid Supporting Goal ordinals')
+    }
+    if (supportingRow.linked_goal_revision !== supportingRow.revision) {
+      throw new Error('Workbench Supporting Goal relation has a mismatched linked revision')
+    }
+    if (supportingRow.goal_id === row.primary_goal_id) {
+      throw new Error('Workbench Project repeats its Primary Goal as a Supporting Goal')
+    }
+    supportingGoalValues.push(supportingGoalFromRow(supportingRow))
+  }
+  const supportingGoals = Object.freeze(supportingGoalValues)
+  const templateSnapshot = templateSnapshotFromRow(row)
+  if (row.organization_id !== query.organizationId || row.team_id !== query.teamId) {
+    throw new Error('Workbench database returned a Project outside its requested scope')
+  }
+  if (row.captured_at !== row.created_at) {
+    throw new Error('Workbench Project creation snapshot has a mismatched capture instant')
+  }
+  return Object.freeze({ project, primaryGoal, supportingGoals, templateSnapshot })
+}
+
+function readGoalOutcomes(database: DatabaseSync, goalId: string): readonly OutcomeProjection[] {
+  const rows = database.prepare(`
+    SELECT id, goal_id, ordinal, name, metric_name, initial_value, target_value,
+      unit, direction, revision, created_at, updated_at
+    FROM workbench_outcome WHERE goal_id = ? ORDER BY ordinal
+  `).all(goalId) as unknown as OutcomeRow[]
+  if (rows.length < 1 || rows.length > MAX_PROJECT_OUTCOMES) {
+    throw new Error('Workbench Goal must contain from 1 to 20 Outcomes')
+  }
+  const outcomes: OutcomeProjection[] = []
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    if (row === undefined || row.goal_id !== goalId || row.ordinal !== index + 1) {
+      throw new Error('Workbench Goal contains invalid Outcome ordinals')
+    }
+    outcomes.push(outcomeFromRow(row))
+  }
+  return Object.freeze(outcomes)
+}
+
+function projectSummaryFromRow(row: ProjectSummaryRow): ProjectSummaryProjection {
+  const projectId = boundedReference(row.project_id, 'Project id')
+  const primaryGoalId = boundedReference(row.primary_goal_id, 'Primary Goal id')
+  const primaryGoal = Object.freeze({
+    goalId: primaryGoalId,
+    name: storedText(row.primary_goal_name, 'Primary Goal name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(row.primary_goal_revision, 'Primary Goal revision'),
+  })
+  return Object.freeze({
+    projectId,
+    name: storedText(row.project_name, 'Project name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(row.project_revision, 'Project revision'),
+    catalogSequence: positiveInteger(row.catalog_sequence, 'Project catalog sequence'),
+    timezone: storedText(row.timezone, 'Project timezone', 128),
+    createdAt: canonicalInstant(row.created_at, 'Project createdAt'),
+    primaryGoal,
+  })
+}
+
+function goalSummaryFromRow(row: GoalRow): GoalSummaryProjection {
+  if (row.state !== 'active' && row.state !== 'inactive') {
+    throw new Error('Workbench database contains an invalid Goal state')
+  }
+  canonicalInstant(row.created_at, 'Goal createdAt')
+  canonicalInstant(row.updated_at, 'Goal updatedAt')
+  return Object.freeze({
+    goalId: boundedReference(row.id, 'Goal id'),
+    name: storedText(row.name, 'Goal name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(row.revision, 'Goal revision'),
+  })
+}
+
+function supportingGoalFromRow(row: SupportingGoalRow): GoalSummaryProjection {
+  positiveInteger(row.ordinal, 'Supporting Goal ordinal')
+  return Object.freeze({
+    goalId: boundedReference(row.goal_id, 'Supporting Goal id'),
+    name: storedText(row.name, 'Supporting Goal name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(row.revision, 'Supporting Goal revision'),
+  })
+}
+
+function outcomeFromRow(row: OutcomeRow): OutcomeProjection {
+  const direction = metricDirection(row.direction)
+  const metric: OutcomeMetric = Object.freeze({
+    metricName: storedText(row.metric_name, 'Outcome metric name', MAX_METRIC_NAME_LENGTH),
+    initialValue: finiteNumber(row.initial_value, 'Outcome initial value'),
+    targetValue: finiteNumber(row.target_value, 'Outcome target value'),
+    unit: storedText(row.unit, 'Outcome metric unit', MAX_METRIC_UNIT_LENGTH),
+    direction,
+  })
+  assertMetricDirection(metric, 'Stored Outcome metric')
+  canonicalInstant(row.created_at, 'Outcome createdAt')
+  canonicalInstant(row.updated_at, 'Outcome updatedAt')
+  return Object.freeze({
+    outcomeId: boundedReference(row.id, 'Outcome id'),
+    name: storedText(row.name, 'Outcome name', MAX_DOMAIN_NAME_LENGTH),
+    metric,
+    revision: positiveInteger(row.revision, 'Outcome revision'),
+  })
+}
+
+function templateSnapshotFromRow(row: ProjectDetailRow): ProjectTemplateSnapshotProjection {
+  if (row.template_id !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateId
+    || row.template_version !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateVersion
+    || row.template_definition_digest !== KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1
+    || row.snapshot_schema_version !== 1
+    || row.snapshot_digest !== KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1
+    || row.canonical_snapshot_json !== KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1
+    || contentDigest(row.canonical_snapshot_json) !== row.snapshot_digest) {
+    throw new Error('Workbench Project creation snapshot failed identity validation')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.canonical_snapshot_json)
+  } catch {
+    throw new Error('Workbench Project creation snapshot contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== row.canonical_snapshot_json) {
+    throw new Error('Workbench Project creation snapshot is not canonical JSON')
+  }
+  const template = knowledgeWorkTemplateProjection()
+  return Object.freeze({
+    template: template.selection,
+    snapshotSchemaVersion: 1,
+    definition: template.definition,
+    snapshotDigest: KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+    capturedAt: canonicalInstant(row.captured_at, 'Project snapshot capturedAt'),
+  })
+}
+
+function assertValidProjectDomain(database: DatabaseSync): void {
+  readCompiledTemplate(database)
+  const catalog = readProjectCatalog(database)
+  const counts = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM workbench_project) AS project_count,
+      (SELECT COUNT(*) FROM workbench_goal) AS goal_count,
+      (SELECT COUNT(*) FROM workbench_project_template_snapshot) AS snapshot_count,
+      COALESCE((SELECT MAX(catalog_sequence) FROM workbench_project), 0) AS max_sequence
+  `).get()
+  const projectCount = integerField(counts, 'project_count')
+  const goalCount = integerField(counts, 'goal_count')
+  const snapshotCount = integerField(counts, 'snapshot_count')
+  const maxSequence = integerField(counts, 'max_sequence')
+  if (catalog.revision !== projectCount || catalog.revision !== maxSequence
+    || goalCount !== projectCount || snapshotCount !== projectCount) {
+    throw new Error('Workbench Project catalog contains incomplete domain artifacts')
+  }
+  const projects = database.prepare(`
+    SELECT id, organization_id, team_id, updated_at FROM workbench_project
+    ORDER BY catalog_sequence
+  `).all() as Array<{
+    readonly id: string
+    readonly organization_id: string
+    readonly team_id: string
+    readonly updated_at: string
+  }>
+  for (const project of projects) {
+    const organizationId = boundedReference(project.organization_id, 'Project organization id')
+    const teamId = boundedReference(project.team_id, 'Project team id')
+    const projectId = boundedReference(project.id, 'Project id')
+    canonicalInstant(project.updated_at, 'Project updatedAt')
+    if (readProjectDetailSync(database, { organizationId, teamId, projectId }) === null) {
+      throw new Error('Workbench Project is missing a reachable Goal or creation snapshot')
+    }
+  }
+  const goals = database.prepare(`
+    SELECT id, organization_id, team_id, name, revision, state, created_at, updated_at
+    FROM workbench_goal ORDER BY id
+  `).all() as unknown as GoalRow[]
+  for (const goal of goals) {
+    goalSummaryFromRow(goal)
+    readGoalOutcomes(database, goal.id)
+  }
+  const duplicatePrimary = integerField(database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM workbench_project_supporting_goal AS relation
+    INNER JOIN workbench_project AS project ON project.id = relation.project_id
+    WHERE relation.goal_id = project.primary_goal_id
+  `).get(), 'count')
+  if (duplicatePrimary !== 0) {
+    throw new Error('Workbench Project repeats a Primary Goal as Supporting')
+  }
 }
 
 function insertOutbox(
@@ -944,7 +1952,7 @@ function insertAuditEvent(database: DatabaseSync, event: AuditEvent): void {
     Number(event.sequence), event.auditId, event.occurredAt, event.actor.kind,
     event.actor.id, event.scope.organizationId, event.scope.teamId,
     event.scope.projectId, event.action, event.reason.code,
-    event.reason.detail ?? null, event.object.type, event.object.id,
+    null, event.object.type, event.object.id,
     Number(event.object.version), event.command.id, event.command.type,
     event.causation.id, event.outbox?.id ?? null, event.outbox?.state ?? null,
     event.outcome, event.summary.code, canonicalizeJson(event.summary.changedFields),
@@ -989,59 +1997,67 @@ function readAuditEvents(database: DatabaseSync): readonly AuditEvent[] {
 
 function auditEventFromRow(row: AuditRow): AuditEvent {
   const changedFields = JSON.parse(stringValue(row.summary_fields_json, 'Audit summary fields')) as unknown
-  if (!Array.isArray(changedFields)
-    || changedFields.length !== 1
-    || changedFields[0] !== 'message') {
-    throw new Error('Workbench database contains invalid audit summary fields')
-  }
+  if (!Array.isArray(changedFields)) throw new Error('Workbench database contains invalid audit summary fields')
   const reasonDetail = nullableString(row.reason_detail, 'Audit reason detail')
   const outboxId = nullableString(row.outbox_id, 'Audit Outbox id')
   const outboxStateValue = nullableString(row.outbox_state, 'Audit Outbox state')
-  if (row.actor_kind !== 'owner'
-    || row.action !== STATUS_AUDIT_ACTION
-    || row.reason_code !== STATUS_REASON
-    || reasonDetail !== null
-    || row.object_type !== STATUS_OBJECT_TYPE
-    || row.command_type !== STATUS_COMMAND_TYPE
-    || row.outcome !== 'committed'
-    || row.summary_code !== STATUS_SUMMARY
-    || outboxStateValue !== 'pending') {
-    throw new Error('Workbench database contains unsupported T03 audit fields')
+  if (row.actor_kind !== 'owner' || reasonDetail !== null
+    || row.outcome !== 'committed' || outboxId === null || outboxStateValue !== 'pending') {
+    throw new Error('Workbench database contains unsupported audit fields')
   }
-  return {
+  const common = {
     sequence: String(positiveInteger(row.sequence, 'Audit sequence')),
     previousHash: auditHash(stringValue(row.previous_hash, 'Audit previous hash')),
-    auditId: stringValue(row.id, 'Audit id'),
-    occurredAt: stringValue(row.occurred_at, 'Audit occurredAt'),
-    actor: { kind: 'owner', id: stringValue(row.actor_id, 'Audit actor id') },
-    action: STATUS_AUDIT_ACTION,
-    scope: {
-      organizationId: stringValue(row.organization_id, 'Audit organization id'),
-      teamId: stringValue(row.team_id, 'Audit team id'),
-      projectId: nullableString(row.project_id, 'Audit project id'),
-    },
-    reason: { code: STATUS_REASON },
-    object: {
-      type: STATUS_OBJECT_TYPE,
-      id: stringValue(row.object_id, 'Audit object id'),
-      version: String(positiveInteger(row.object_version, 'Audit object version')),
-    },
-    command: {
-      id: stringValue(row.command_id, 'Audit command id'),
-      type: STATUS_COMMAND_TYPE,
-    },
-    causation: { id: stringValue(row.causation_id, 'Audit causation id') },
-    outbox: outboxId === null
-      ? null
-      : { id: outboxId, state: outboxState(outboxStateValue) },
-    outcome: 'committed',
-    summary: {
-      code: STATUS_SUMMARY,
-      changedFields: Object.freeze(['message']),
-    },
+    auditId: boundedReference(row.id, 'Audit id'),
+    occurredAt: canonicalInstant(row.occurred_at, 'Audit occurredAt'),
+    actor: { kind: 'owner' as const, id: boundedReference(row.actor_id, 'Audit actor id') },
+    causation: { id: boundedReference(row.causation_id, 'Audit causation id') },
+    outbox: { id: boundedReference(outboxId, 'Audit Outbox id'), state: outboxState(outboxStateValue) },
+    outcome: 'committed' as const,
     eventHash: auditHash(stringValue(row.event_hash, 'Audit event hash')),
     canonicalEnvelope: stringValue(row.canonical_envelope, 'Audit canonical envelope'),
   }
+  const organizationId = boundedReference(row.organization_id, 'Audit organization id')
+  const teamId = boundedReference(row.team_id, 'Audit team id')
+  const objectId = boundedReference(row.object_id, 'Audit object id')
+  const objectVersion = String(positiveInteger(row.object_version, 'Audit object version'))
+  const commandId = boundedReference(row.command_id, 'Audit command id')
+  if (row.command_type === STATUS_COMMAND_TYPE) {
+    if (row.action !== STATUS_AUDIT_ACTION || row.reason_code !== STATUS_REASON
+      || row.object_type !== STATUS_OBJECT_TYPE || row.summary_code !== STATUS_SUMMARY
+      || row.project_id !== null || changedFields.length !== 1 || changedFields[0] !== 'message') {
+      throw new Error('Workbench database contains unsupported status audit fields')
+    }
+    return {
+      ...common,
+      action: STATUS_AUDIT_ACTION,
+      scope: { organizationId, teamId, projectId: null },
+      reason: { code: STATUS_REASON },
+      object: { type: STATUS_OBJECT_TYPE, id: objectId, version: objectVersion },
+      command: { id: commandId, type: STATUS_COMMAND_TYPE },
+      summary: { code: STATUS_SUMMARY, changedFields: Object.freeze(['message']) },
+    }
+  }
+  if (row.command_type === PROJECT_COMMAND_TYPE) {
+    const projectId = nullableString(row.project_id, 'Audit Project id')
+    const expectedFields = ['primaryGoal', 'outcomes', 'supportingGoals', 'templateSnapshot']
+    if (row.action !== PROJECT_AUDIT_ACTION || row.reason_code !== PROJECT_REASON
+      || row.object_type !== PROJECT_OBJECT_TYPE || row.summary_code !== PROJECT_SUMMARY
+      || projectId === null || projectId !== objectId || changedFields.length !== expectedFields.length
+      || changedFields.some((field, index) => field !== expectedFields[index])) {
+      throw new Error('Workbench database contains unsupported Project audit fields')
+    }
+    return {
+      ...common,
+      action: PROJECT_AUDIT_ACTION,
+      scope: { organizationId, teamId, projectId },
+      reason: { code: PROJECT_REASON },
+      object: { type: PROJECT_OBJECT_TYPE, id: objectId, version: objectVersion },
+      command: { id: commandId, type: PROJECT_COMMAND_TYPE },
+      summary: { code: PROJECT_SUMMARY, changedFields: Object.freeze(expectedFields) },
+    }
+  }
+  throw new Error('Workbench database contains an unsupported audit command type')
 }
 
 function verifyAuditChainSync(database: DatabaseSync): WorkbenchAuditIntegrityProjection {
@@ -1074,6 +2090,7 @@ function assertValidAudit(database: DatabaseSync): void {
 }
 
 function assertValidLedger(database: DatabaseSync): void {
+  assertValidProjectDomain(database)
   assertValidAudit(database)
   const counts = database.prepare(`
     SELECT
@@ -1091,6 +2108,8 @@ function assertValidLedger(database: DatabaseSync): void {
   const rows = database.prepare(`
     SELECT receipt.command_type, receipt.request_hash, receipt.command_id,
       receipt.audit_event_id, receipt.outbox_id, receipt.result_json,
+      receipt.organization_id AS receipt_organization_id,
+      receipt.actor_id AS receipt_actor_id,
       receipt.idempotency_key_hash, receipt.committed_at,
       audit.object_id AS audit_object_id,
       audit.object_version AS audit_object_version,
@@ -1098,7 +2117,23 @@ function assertValidLedger(database: DatabaseSync): void {
       audit.causation_id AS audit_causation_id,
       audit.command_id AS audit_command_id,
       audit.outbox_id AS audit_outbox_id,
-      outbox.command_id AS outbox_command_id
+      audit.action AS audit_action,
+      audit.actor_id AS audit_actor_id,
+      audit.reason_code AS audit_reason_code,
+      audit.object_type AS audit_object_type,
+      audit.project_id AS audit_project_id,
+      audit.organization_id AS audit_organization_id,
+      audit.team_id AS audit_team_id,
+      audit.summary_code AS audit_summary_code,
+      outbox.command_id AS outbox_command_id,
+      outbox.organization_id AS outbox_organization_id,
+      outbox.topic AS outbox_topic,
+      outbox.project_id AS outbox_project_id,
+      outbox.object_type AS outbox_object_type,
+      outbox.object_id AS outbox_object_id,
+      outbox.object_version AS outbox_object_version,
+      outbox.causation_id AS outbox_causation_id,
+      outbox.payload_json AS outbox_payload_json
     FROM workbench_command_receipt AS receipt
     INNER JOIN workbench_audit_event AS audit ON audit.id = receipt.audit_event_id
     INNER JOIN workbench_outbox AS outbox ON outbox.id = receipt.outbox_id
@@ -1110,21 +2145,44 @@ function assertValidLedger(database: DatabaseSync): void {
 }
 
 function assertValidCommandReceipt(row: ReceiptIntegrityRow): void {
-  if (row.command_type !== STATUS_COMMAND_TYPE
-    || !SHA256_HEX.test(row.request_hash)
+  if (!SHA256_HEX.test(row.request_hash)
     || !SHA256_HEX.test(row.idempotency_key_hash)
     || row.command_id !== row.audit_command_id
     || row.command_id !== row.outbox_command_id
     || row.outbox_id !== row.audit_outbox_id
-    || row.committed_at !== row.audit_occurred_at) {
+    || row.committed_at !== row.audit_occurred_at
+    || row.outbox_causation_id !== row.audit_causation_id
+    || row.outbox_object_id !== row.audit_object_id
+    || row.outbox_object_version !== row.audit_object_version
+    || row.receipt_organization_id !== row.audit_organization_id
+    || row.receipt_organization_id !== row.outbox_organization_id
+    || row.receipt_actor_id !== row.audit_actor_id) {
     throw new Error('Workbench command receipt does not match its audit and Outbox facts')
   }
+  if (row.command_type === STATUS_COMMAND_TYPE) {
+    assertValidStatusReceipt(row)
+    return
+  }
+  if (row.command_type === PROJECT_COMMAND_TYPE) {
+    assertValidProjectReceipt(row)
+    return
+  }
+  throw new Error('Workbench command receipt has an unsupported command type')
+}
+
+function assertValidStatusReceipt(row: ReceiptIntegrityRow): void {
+  if (row.audit_action !== STATUS_AUDIT_ACTION || row.audit_reason_code !== STATUS_REASON
+    || row.audit_object_type !== STATUS_OBJECT_TYPE || row.audit_project_id !== null
+    || row.audit_summary_code !== STATUS_SUMMARY || row.outbox_topic !== STATUS_OUTBOX_TOPIC
+    || row.outbox_project_id !== null || row.outbox_object_type !== STATUS_OBJECT_TYPE) {
+    throw new Error('Workbench status receipt has mismatched audit or Outbox vocabulary')
+  }
   const decoded = decodeCommittedResult(row.result_json, row)
-  if (!decoded.ok) throw new Error('Workbench command receipt is not committed')
+  if (!decoded.ok) throw new Error('Workbench status command receipt is not committed')
   if (decoded.value.id !== row.audit_object_id
     || decoded.value.revision !== row.audit_object_version
     || decoded.value.updatedAt !== row.audit_occurred_at) {
-    throw new Error('Workbench command receipt projection does not match its audit object')
+    throw new Error('Workbench status command receipt projection does not match its audit object')
   }
   const expectedRequestHash = digest(canonicalizeJson({
     commandType: STATUS_COMMAND_TYPE,
@@ -1134,8 +2192,67 @@ function assertValidCommandReceipt(row: ReceiptIntegrityRow): void {
     reason: STATUS_REASON,
     causationId: row.audit_causation_id,
   }))
-  if (row.request_hash !== expectedRequestHash) {
-    throw new Error('Workbench command receipt projection does not match its request hash')
+  const expectedPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    statusId: decoded.value.id,
+    statusRevision: decoded.value.revision,
+    causationId: row.audit_causation_id,
+  })
+  if (row.request_hash !== expectedRequestHash || row.outbox_payload_json !== expectedPayload) {
+    throw new Error('Workbench status command receipt does not match its request hash or Outbox intent')
+  }
+}
+
+function assertValidProjectReceipt(row: ReceiptIntegrityRow): void {
+  if (row.audit_action !== PROJECT_AUDIT_ACTION || row.audit_reason_code !== PROJECT_REASON
+    || row.audit_object_type !== PROJECT_OBJECT_TYPE || row.audit_summary_code !== PROJECT_SUMMARY
+    || row.audit_project_id === null || row.audit_project_id !== row.audit_object_id
+    || row.outbox_topic !== PROJECT_OUTBOX_TOPIC
+    || row.outbox_project_id !== row.audit_project_id
+    || row.outbox_object_type !== PROJECT_OBJECT_TYPE) {
+    throw new Error('Workbench Project receipt has mismatched audit or Outbox vocabulary')
+  }
+  const decoded = decodeCommittedProjectResult(row.result_json, row)
+  if (!decoded.ok) throw new Error('Workbench Project command receipt is not committed')
+  const detail = decoded.value
+  if (detail.project.projectId !== row.audit_object_id
+    || detail.project.revision !== row.audit_object_version
+    || detail.project.revision !== 1
+    || detail.project.createdAt !== row.audit_occurred_at
+    || detail.project.catalogSequence !== decoded.catalogRevision
+    || detail.primaryGoal.revision !== 1
+    || detail.primaryGoal.outcomes.some(outcome => outcome.revision !== 1)
+    || detail.templateSnapshot.capturedAt !== row.audit_occurred_at
+    || detail.templateSnapshot.snapshotDigest !== KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1
+    || !isKnowledgeWorkTemplateSelection(detail.templateSnapshot.template)) {
+    throw new Error('Workbench Project receipt projection does not match its audit object')
+  }
+  const expectedRequestHash = projectRequestHashFromResult(
+    decoded,
+    row.audit_organization_id,
+    row.audit_team_id,
+    row.audit_causation_id,
+  )
+  const expectedPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    projectId: detail.project.projectId,
+    projectRevision: detail.project.revision,
+    primaryGoalId: detail.primaryGoal.goalId,
+    primaryGoalRevision: detail.primaryGoal.revision,
+    templateId: detail.templateSnapshot.template.templateId,
+    templateVersion: detail.templateSnapshot.template.templateVersion,
+    templateDefinitionDigest: detail.templateSnapshot.template.definitionDigest,
+    outcomeCount: detail.primaryGoal.outcomes.length,
+    supportingGoalCount: detail.supportingGoals.length,
+    catalogRevision: decoded.catalogRevision,
+    causationId: row.audit_causation_id,
+  })
+  if (row.request_hash !== expectedRequestHash || row.outbox_payload_json !== expectedPayload) {
+    throw new Error('Workbench Project command receipt does not match its request hash or Outbox intent')
   }
 }
 
@@ -1152,11 +2269,7 @@ function publicIntegrityIssue(code: AuditIntegrityFailureCode): WorkbenchAuditIn
 }
 
 function activityItem(row: ActivityRow): WorkbenchActivityItem {
-  if (row.actor_kind !== 'owner' || row.action !== STATUS_AUDIT_ACTION
-    || row.reason_code !== STATUS_REASON || row.object_type !== STATUS_OBJECT_TYPE
-    || row.summary_code !== STATUS_SUMMARY) {
-    throw new Error('Workbench database contains an unsupported Activity row')
-  }
+  if (row.actor_kind !== 'owner') throw new Error('Workbench database contains an unsupported Activity actor')
   const errorCode = nullableString(row.error_code, 'Activity error code')
   if (errorCode !== null && !isOutboxErrorCode(errorCode)) {
     throw new Error('Workbench database contains an unsafe Outbox error code')
@@ -1169,26 +2282,56 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
     || (state === 'failed' && errorCode !== 'definitive-rejection')) {
     throw new Error('Workbench database contains an inconsistent Outbox outcome')
   }
+  const projectId = nullableString(row.project_id, 'Activity project id')
+  let vocabulary: Pick<WorkbenchActivityItem, 'action' | 'reason' | 'summaryCode'>
+    & { readonly objectType: WorkbenchActivityItem['object']['type'] }
+  if (row.command_type === STATUS_COMMAND_TYPE) {
+    if (row.action !== STATUS_AUDIT_ACTION || row.reason_code !== STATUS_REASON
+      || row.object_type !== STATUS_OBJECT_TYPE || row.summary_code !== STATUS_SUMMARY
+      || projectId !== null) {
+      throw new Error('Workbench database contains an unsupported status Activity row')
+    }
+    vocabulary = {
+      action: STATUS_AUDIT_ACTION,
+      reason: STATUS_REASON,
+      summaryCode: STATUS_SUMMARY,
+      objectType: STATUS_OBJECT_TYPE,
+    }
+  } else if (row.command_type === PROJECT_COMMAND_TYPE) {
+    if (row.action !== PROJECT_AUDIT_ACTION || row.reason_code !== PROJECT_REASON
+      || row.object_type !== PROJECT_OBJECT_TYPE || row.summary_code !== PROJECT_SUMMARY
+      || projectId === null || projectId !== row.object_id) {
+      throw new Error('Workbench database contains an unsupported Project Activity row')
+    }
+    vocabulary = {
+      action: PROJECT_AUDIT_ACTION,
+      reason: PROJECT_REASON,
+      summaryCode: PROJECT_SUMMARY,
+      objectType: PROJECT_OBJECT_TYPE,
+    }
+  } else {
+    throw new Error('Workbench database contains an unsupported Activity command type')
+  }
   return Object.freeze({
     sequence: positiveInteger(row.sequence, 'Activity sequence'),
-    eventId: stringValue(row.event_id, 'Activity event id'),
+    eventId: boundedReference(row.event_id, 'Activity event id'),
     occurredAt: canonicalInstant(row.occurred_at, 'Activity occurredAt'),
-    actor: Object.freeze({ kind: 'owner', id: stringValue(row.actor_id, 'Activity actor id') }),
-    projectId: nullableString(row.project_id, 'Activity project id'),
-    action: STATUS_AUDIT_ACTION,
-    reason: STATUS_REASON,
+    actor: Object.freeze({ kind: 'owner', id: boundedReference(row.actor_id, 'Activity actor id') }),
+    projectId,
+    action: vocabulary.action,
+    reason: vocabulary.reason,
     object: Object.freeze({
-      type: STATUS_OBJECT_TYPE,
-      id: stringValue(row.object_id, 'Activity object id'),
+      type: vocabulary.objectType,
+      id: boundedReference(row.object_id, 'Activity object id'),
       version: positiveInteger(row.object_version, 'Activity object version'),
     }),
-    causationId: stringValue(row.causation_id, 'Activity causation id'),
-    commandId: stringValue(row.command_id, 'Activity command id'),
-    summaryCode: STATUS_SUMMARY,
+    causationId: boundedReference(row.causation_id, 'Activity causation id'),
+    commandId: boundedReference(row.command_id, 'Activity command id'),
+    summaryCode: vocabulary.summaryCode,
     hash: auditHash(stringValue(row.event_hash, 'Activity event hash')),
     previousHash: auditHash(stringValue(row.previous_hash, 'Activity previous hash')),
     outbox: Object.freeze({
-      id: stringValue(row.outbox_id, 'Activity Outbox id'),
+      id: boundedReference(row.outbox_id, 'Activity Outbox id'),
       state,
       attemptCount: positiveInteger(row.attempt_count, 'Activity attempt count', true),
       updatedAt: canonicalInstant(row.outbox_updated_at, 'Activity Outbox updatedAt'),
@@ -1210,6 +2353,64 @@ function statusRequestHash(mutation: WorkbenchStatusMutation): string {
     expectedRevision: mutation.expectedRevision,
     reason: mutation.command.reason,
     causationId: mutation.command.causationId,
+  }))
+}
+
+function projectRequestHash(mutation: WorkbenchProjectMutation): string {
+  return digest(canonicalizeJson({
+    commandType: PROJECT_COMMAND_TYPE,
+    target: PROJECT_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+    },
+    template: mutation.template,
+    projectName: mutation.projectName,
+    primaryGoal: {
+      name: mutation.primaryGoal.name,
+      outcomes: mutation.primaryGoal.outcomes.map(outcome => ({
+        name: outcome.name,
+        metric: outcome.metric,
+      })),
+    },
+    supportingGoals: mutation.supportingGoals.map(goal => ({
+      goalId: goal.goalId,
+      expectedRevision: goal.expectedRevision,
+    })),
+    expectedCatalogRevision: mutation.expectedCatalogRevision,
+    expectedRevision: mutation.expectedRevision,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+function projectRequestHashFromResult(
+  result: Extract<CreateProjectResult, { readonly ok: true }>,
+  organizationId: string,
+  teamId: string,
+  causationId: string,
+): string {
+  return digest(canonicalizeJson({
+    commandType: PROJECT_COMMAND_TYPE,
+    target: PROJECT_OBJECT_TYPE,
+    scope: { organizationId, teamId },
+    template: result.value.templateSnapshot.template,
+    projectName: result.value.project.name,
+    primaryGoal: {
+      name: result.value.primaryGoal.name,
+      outcomes: result.value.primaryGoal.outcomes.map(outcome => ({
+        name: outcome.name,
+        metric: outcome.metric,
+      })),
+    },
+    supportingGoals: result.value.supportingGoals.map(goal => ({
+      goalId: goal.goalId,
+      expectedRevision: goal.revision,
+    })),
+    expectedCatalogRevision: result.catalogRevision - 1,
+    expectedRevision: null,
+    reason: PROJECT_REASON,
+    causationId,
   }))
 }
 
@@ -1238,6 +2439,111 @@ function validateMutation(mutation: WorkbenchStatusMutation): void {
   validateInstant(mutation.command.occurredAt, 'Command occurredAt')
   if (mutation.command.occurredAt !== mutation.updatedAt) {
     throw new TypeError('Status and command instants must match')
+  }
+}
+
+function validateProjectStartQuery(query: WorkbenchProjectStartQuery): void {
+  validateBoundedReference(query.organizationId, 'Project organization id')
+  validateBoundedReference(query.teamId, 'Project team id')
+  const limit = query.filter.limit ?? 20
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PROJECT_PAGE_LIMIT) {
+    throw new TypeError(`Project limit must be an integer from 1 to ${MAX_PROJECT_PAGE_LIMIT}`)
+  }
+  if (query.filter.beforeSequence !== undefined
+    && (!Number.isSafeInteger(query.filter.beforeSequence)
+      || query.filter.beforeSequence < 1)) {
+    throw new TypeError('Project beforeSequence must be a positive safe integer')
+  }
+}
+
+function validateProjectReadQuery(query: WorkbenchProjectReadQuery): void {
+  validateBoundedReference(query.organizationId, 'Project organization id')
+  validateBoundedReference(query.teamId, 'Project team id')
+  validateBoundedReference(query.projectId, 'Project id')
+}
+
+function validateProjectMutation(mutation: WorkbenchProjectMutation): void {
+  validateBoundedReference(mutation.projectId, 'Project id')
+  validateBoundedReference(mutation.primaryGoalId, 'Primary Goal id')
+  validateDomainText(mutation.projectName, 'Project name', MAX_DOMAIN_NAME_LENGTH)
+  validateDomainText(mutation.primaryGoal.name, 'Primary Goal name', MAX_DOMAIN_NAME_LENGTH)
+  if (!Array.isArray(mutation.primaryGoal.outcomes)
+    || mutation.primaryGoal.outcomes.length < 1
+    || mutation.primaryGoal.outcomes.length > MAX_PROJECT_OUTCOMES) {
+    throw new TypeError(`Project must create from 1 to ${MAX_PROJECT_OUTCOMES} Outcomes`)
+  }
+  const outcomeIds = new Set<string>()
+  for (let index = 0; index < mutation.primaryGoal.outcomes.length; index += 1) {
+    const outcome = mutation.primaryGoal.outcomes[index]
+    if (outcome === undefined) throw new TypeError('Project Outcomes must be a dense array')
+    validateBoundedReference(outcome.outcomeId, `Outcome ${String(index + 1)} id`)
+    if (outcomeIds.has(outcome.outcomeId)) throw new TypeError('Project Outcome ids must be unique')
+    outcomeIds.add(outcome.outcomeId)
+    validateDomainText(outcome.name, `Outcome ${String(index + 1)} name`, MAX_DOMAIN_NAME_LENGTH)
+    validateDomainText(
+      outcome.metric.metricName,
+      `Outcome ${String(index + 1)} metric name`,
+      MAX_METRIC_NAME_LENGTH,
+    )
+    validateDomainText(
+      outcome.metric.unit,
+      `Outcome ${String(index + 1)} metric unit`,
+      MAX_METRIC_UNIT_LENGTH,
+    )
+    finiteMutationNumber(outcome.metric.initialValue, `Outcome ${String(index + 1)} initial value`)
+    finiteMutationNumber(outcome.metric.targetValue, `Outcome ${String(index + 1)} target value`)
+    assertMetricDirection(outcome.metric, `Outcome ${String(index + 1)} metric`)
+  }
+  if (!Array.isArray(mutation.supportingGoals)
+    || mutation.supportingGoals.length > MAX_SUPPORTING_GOALS) {
+    throw new TypeError(`Project may contain at most ${MAX_SUPPORTING_GOALS} Supporting Goals`)
+  }
+  const supportingIds = new Set<string>()
+  for (const supporting of mutation.supportingGoals) {
+    validateBoundedReference(supporting.goalId, 'Supporting Goal id')
+    if (supporting.goalId === mutation.primaryGoalId) {
+      throw new TypeError('Project cannot repeat its Primary Goal as Supporting')
+    }
+    if (supportingIds.has(supporting.goalId)) {
+      throw new TypeError('Project Supporting Goal ids must be unique')
+    }
+    supportingIds.add(supporting.goalId)
+    if (!Number.isSafeInteger(supporting.expectedRevision) || supporting.expectedRevision < 1) {
+      throw new TypeError('Supporting Goal expected revision must be a positive safe integer')
+    }
+  }
+  validateBoundedReference(mutation.template.templateId, 'Template id')
+  if (!Number.isSafeInteger(mutation.template.templateVersion)
+    || mutation.template.templateVersion < 1) {
+    throw new TypeError('Template version must be a positive safe integer')
+  }
+  if (typeof mutation.template.definitionDigest !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/u.test(mutation.template.definitionDigest)) {
+    throw new TypeError('Template definition digest must be a SHA-256 digest')
+  }
+  if (!Number.isSafeInteger(mutation.expectedCatalogRevision)
+    || mutation.expectedCatalogRevision < 0) {
+    throw new TypeError('Project catalog expected revision must be a non-negative safe integer')
+  }
+  if (mutation.expectedRevision !== null) {
+    throw new TypeError('New Project expected revision must be null')
+  }
+  validateInstant(mutation.createdAt, 'Project createdAt')
+  if (mutation.command.reason !== PROJECT_REASON) throw new TypeError('Project reason is unsupported')
+  for (const [label, value] of [
+    ['Command id', mutation.command.commandId],
+    ['Audit event id', mutation.command.auditEventId],
+    ['Outbox id', mutation.command.outboxId],
+    ['Actor id', mutation.command.actor.id],
+    ['Organization id', mutation.command.actor.organizationId],
+    ['Team id', mutation.command.actor.teamId],
+  ] as const) validateBoundedReference(value, label)
+  validateProjectCommandKey(mutation.command.idempotencyKey, 'Idempotency key')
+  validateProjectCommandKey(mutation.command.causationId, 'Causation id')
+  if (mutation.command.actor.kind !== 'owner') throw new TypeError('Project actor must be owner')
+  validateInstant(mutation.command.occurredAt, 'Command occurredAt')
+  if (mutation.command.occurredAt !== mutation.createdAt) {
+    throw new TypeError('Project and command instants must match')
   }
 }
 
@@ -1285,6 +2591,212 @@ ReceiptRow,
   return result
 }
 
+function decodeCommittedProjectResult(
+  value: string,
+  stored?: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): Extract<CreateProjectResult, { readonly ok: true }> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('Workbench Project command receipt contains invalid JSON')
+  }
+  const record = objectValue(parsed, 'Project command receipt')
+  if (record.ok !== true) throw new Error('Workbench Project command receipt is not committed')
+  const detail = projectDetailFromValue(record.value)
+  const catalogRevision = positiveInteger(
+    record.catalogRevision,
+    'Receipt Project catalog revision',
+  )
+  if (catalogRevision !== detail.project.catalogSequence) {
+    throw new Error('Workbench Project receipt catalog revision does not match its Project sequence')
+  }
+  const receiptRecord = objectValue(record.receipt, 'Project command receipt identities')
+  const result = projectResult({
+    ok: true,
+    value: detail,
+    catalogRevision,
+    receipt: {
+      commandId: boundedReference(receiptRecord.commandId, 'Receipt command id'),
+      auditEventId: boundedReference(receiptRecord.auditEventId, 'Receipt audit event id'),
+      outboxId: boundedReference(receiptRecord.outboxId, 'Receipt Outbox id'),
+    },
+  })
+  if (stored !== undefined
+    && (result.receipt.commandId !== stored.command_id
+      || result.receipt.auditEventId !== stored.audit_event_id
+      || result.receipt.outboxId !== stored.outbox_id)) {
+    throw new Error('Workbench Project receipt identities do not match their durable references')
+  }
+  return result
+}
+
+function projectDetailFromValue(value: unknown): ProjectDetailProjection {
+  const record = objectValue(value, 'Receipt Project detail')
+  const project = projectSummaryFromValue(record.project)
+  const primaryGoal = goalFromValue(record.primaryGoal)
+  if (primaryGoal.goalId !== project.primaryGoal.goalId
+    || primaryGoal.name !== project.primaryGoal.name
+    || primaryGoal.revision !== project.primaryGoal.revision) {
+    throw new Error('Receipt Project and Primary Goal projections disagree')
+  }
+  const supportingValues = arrayValue(record.supportingGoals, 'Receipt Supporting Goals')
+  if (supportingValues.length > MAX_SUPPORTING_GOALS) {
+    throw new Error('Receipt Project contains too many Supporting Goals')
+  }
+  const supportingGoals = Object.freeze(supportingValues.map(goalSummaryFromValue))
+  const supportingIds = new Set(supportingGoals.map(goal => goal.goalId))
+  if (supportingIds.size !== supportingGoals.length || supportingIds.has(primaryGoal.goalId)) {
+    throw new Error('Receipt Project contains invalid Supporting Goal identities')
+  }
+  const templateSnapshot = templateSnapshotFromValue(record.templateSnapshot)
+  if (templateSnapshot.capturedAt !== project.createdAt) {
+    throw new Error('Receipt Project creation snapshot has a mismatched capture instant')
+  }
+  return Object.freeze({ project, primaryGoal, supportingGoals, templateSnapshot })
+}
+
+function projectSummaryFromValue(value: unknown): ProjectSummaryProjection {
+  const record = objectValue(value, 'Receipt Project summary')
+  const timezone = storedText(record.timezone, 'Receipt Project timezone', 128)
+  if (timezone !== 'Asia/Shanghai') throw new Error('Receipt Project timezone is unsupported')
+  return Object.freeze({
+    projectId: boundedReference(record.projectId, 'Receipt Project id'),
+    name: storedText(record.name, 'Receipt Project name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(record.revision, 'Receipt Project revision'),
+    catalogSequence: positiveInteger(record.catalogSequence, 'Receipt Project catalog sequence'),
+    timezone,
+    createdAt: canonicalInstant(record.createdAt, 'Receipt Project createdAt'),
+    primaryGoal: goalSummaryFromValue(record.primaryGoal),
+  })
+}
+
+function goalFromValue(value: unknown): GoalProjection {
+  const record = objectValue(value, 'Receipt Primary Goal')
+  const outcomes = arrayValue(record.outcomes, 'Receipt Outcomes')
+  if (outcomes.length < 1 || outcomes.length > MAX_PROJECT_OUTCOMES) {
+    throw new Error('Receipt Primary Goal has an invalid Outcome count')
+  }
+  const decoded = Object.freeze(outcomes.map(outcomeFromValue))
+  const outcomeIds = new Set(decoded.map(outcome => outcome.outcomeId))
+  if (outcomeIds.size !== decoded.length) throw new Error('Receipt Outcome ids are not unique')
+  return Object.freeze({
+    goalId: boundedReference(record.goalId, 'Receipt Primary Goal id'),
+    name: storedText(record.name, 'Receipt Primary Goal name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(record.revision, 'Receipt Primary Goal revision'),
+    outcomes: decoded,
+  })
+}
+
+function goalSummaryFromValue(value: unknown): GoalSummaryProjection {
+  const record = objectValue(value, 'Receipt Goal summary')
+  return Object.freeze({
+    goalId: boundedReference(record.goalId, 'Receipt Goal id'),
+    name: storedText(record.name, 'Receipt Goal name', MAX_DOMAIN_NAME_LENGTH),
+    revision: positiveInteger(record.revision, 'Receipt Goal revision'),
+  })
+}
+
+function outcomeFromValue(value: unknown): OutcomeProjection {
+  const record = objectValue(value, 'Receipt Outcome')
+  const metricRecord = objectValue(record.metric, 'Receipt Outcome metric')
+  const metric: OutcomeMetric = Object.freeze({
+    metricName: storedText(
+      metricRecord.metricName,
+      'Receipt Outcome metric name',
+      MAX_METRIC_NAME_LENGTH,
+    ),
+    initialValue: finiteNumber(metricRecord.initialValue, 'Receipt Outcome initial value'),
+    targetValue: finiteNumber(metricRecord.targetValue, 'Receipt Outcome target value'),
+    unit: storedText(metricRecord.unit, 'Receipt Outcome metric unit', MAX_METRIC_UNIT_LENGTH),
+    direction: metricDirection(metricRecord.direction),
+  })
+  assertMetricDirection(metric, 'Receipt Outcome metric')
+  return Object.freeze({
+    outcomeId: boundedReference(record.outcomeId, 'Receipt Outcome id'),
+    name: storedText(record.name, 'Receipt Outcome name', MAX_DOMAIN_NAME_LENGTH),
+    metric,
+    revision: positiveInteger(record.revision, 'Receipt Outcome revision'),
+  })
+}
+
+function templateSnapshotFromValue(value: unknown): ProjectTemplateSnapshotProjection {
+  const record = objectValue(value, 'Receipt Project template snapshot')
+  const template = templateSelectionFromValue(record.template)
+  if (record.snapshotSchemaVersion !== 1
+    || record.snapshotDigest !== KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1) {
+    throw new Error('Receipt Project template snapshot identity is unsupported')
+  }
+  const definition = templateDefinitionFromValue(record.definition)
+  return Object.freeze({
+    template,
+    snapshotSchemaVersion: 1,
+    definition,
+    snapshotDigest: KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+    capturedAt: canonicalInstant(record.capturedAt, 'Receipt Project snapshot capturedAt'),
+  })
+}
+
+function templateSelectionFromValue(value: unknown): ProjectTemplateSelection {
+  const record = objectValue(value, 'Receipt Template selection')
+  if (record.templateId !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateId
+    || record.templateVersion !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.templateVersion
+    || record.definitionDigest !== KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1.definitionDigest) {
+    throw new Error('Receipt Template selection does not match the compiled Template Version')
+  }
+  return Object.freeze({ ...KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1 })
+}
+
+function templateDefinitionFromValue(value: unknown): KnowledgeWorkTemplateDefinitionV1 {
+  let canonical: string
+  try {
+    canonical = canonicalizeJson(value)
+  } catch {
+    throw new Error('Receipt Project template definition is invalid')
+  }
+  if (canonical !== KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1) {
+    throw new Error('Receipt Project template definition drifted from the compiled version')
+  }
+  return knowledgeWorkTemplateProjection().definition
+}
+
+function projectResult(
+  value: Extract<CreateProjectResult, { readonly ok: true }>,
+): Extract<CreateProjectResult, { readonly ok: true }> {
+  return Object.freeze({
+    ok: true,
+    value: projectDetailCopy(value.value),
+    catalogRevision: value.catalogRevision,
+    receipt: Object.freeze({ ...value.receipt }),
+  })
+}
+
+function projectDetailCopy(value: ProjectDetailProjection): ProjectDetailProjection {
+  const primarySummary = Object.freeze({ ...value.project.primaryGoal })
+  const project = Object.freeze({ ...value.project, primaryGoal: primarySummary })
+  const primaryGoal = Object.freeze({
+    goalId: value.primaryGoal.goalId,
+    name: value.primaryGoal.name,
+    revision: value.primaryGoal.revision,
+    outcomes: Object.freeze(value.primaryGoal.outcomes.map(outcome => Object.freeze({
+      outcomeId: outcome.outcomeId,
+      name: outcome.name,
+      metric: Object.freeze({ ...outcome.metric }),
+      revision: outcome.revision,
+    }))),
+  })
+  const supportingGoals = Object.freeze(value.supportingGoals.map(goal => Object.freeze({ ...goal })))
+  const templateProjection = knowledgeWorkTemplateProjection()
+  const templateSnapshot = Object.freeze({
+    template: templateProjection.selection,
+    snapshotSchemaVersion: 1 as const,
+    definition: templateProjection.definition,
+    snapshotDigest: value.templateSnapshot.snapshotDigest,
+    capturedAt: value.templateSnapshot.capturedAt,
+  })
+  return Object.freeze({ project, primaryGoal, supportingGoals, templateSnapshot })
+}
+
 function revisionConflict(
   expected: number | null,
   current: WorkbenchStatusSnapshot | null,
@@ -1300,18 +2812,77 @@ function revisionConflict(
   })
 }
 
-function idempotencyConflict(): SetStatusResult {
-  return statusResult({
+function idempotencyConflict(): Extract<
+CreateProjectResult,
+{ readonly ok: false; readonly error: { readonly code: 'idempotency-conflict' } }
+> {
+  return Object.freeze({
     ok: false,
-    error: {
+    error: Object.freeze({
       code: 'idempotency-conflict',
       message: 'Workbench idempotency key was already used for different intent',
-    },
+    }),
+  })
+}
+
+function catalogRevisionConflict(
+  expectedCatalogRevision: number,
+  currentCatalogRevision: number,
+): Extract<
+CreateProjectResult,
+{ readonly ok: false; readonly error: { readonly code: 'catalog-revision-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'catalog-revision-conflict',
+      message: `Workbench Project catalog revision changed (expected ${String(expectedCatalogRevision)}, current ${String(currentCatalogRevision)})`,
+      expectedCatalogRevision,
+      currentCatalogRevision,
+    }),
+  })
+}
+
+function supportingGoalConflict(
+  goalId: string,
+  expectedRevision: number,
+  currentRevision: number | null,
+): Extract<
+CreateProjectResult,
+{ readonly ok: false; readonly error: { readonly code: 'supporting-goal-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'supporting-goal-conflict',
+      message: `Workbench Supporting Goal revision changed for ${goalId}`,
+      goalId,
+      expectedRevision,
+      currentRevision,
+    }),
+  })
+}
+
+function templateVersionConflict(): Extract<
+CreateProjectResult,
+{ readonly ok: false; readonly error: { readonly code: 'template-version-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'template-version-conflict',
+      message: 'Workbench Template Version does not match the compiled Project template',
+      current: Object.freeze({ ...KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1 }),
+    }),
   })
 }
 
 function digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function contentDigest(value: string): `sha256:${string}` {
+  return `sha256:${digest(value)}`
 }
 
 function auditHash(value: string): AuditHash {
@@ -1376,6 +2947,89 @@ function validateReference(value: string, label: string): void {
   if (typeof value !== 'string' || !SAFE_REFERENCE.test(value)) {
     throw new TypeError(`${label} must be a bounded safe identifier`)
   }
+}
+
+function validateBoundedReference(value: string, label: string): void {
+  validateReference(value, label)
+  if (value.length > MAX_DOMAIN_ID_LENGTH) {
+    throw new TypeError(`${label} must contain at most ${MAX_DOMAIN_ID_LENGTH} characters`)
+  }
+}
+
+function validateProjectCommandKey(value: string, label: string): void {
+  validateBoundedReference(value, label)
+  if (value.length < 16) throw new TypeError(`${label} must contain from 16 to 128 characters`)
+}
+
+function boundedReference(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`${label} is not a string`)
+  try {
+    validateBoundedReference(value, label)
+  } catch {
+    throw new Error(`${label} is not a bounded safe identifier`)
+  }
+  return value
+}
+
+function validateDomainText(value: string, label: string, maximumCodePoints: number): void {
+  if (typeof value !== 'string' || value.trim() !== value || value.length === 0
+    || ASCII_CONTROL.test(value) || [...value].length > maximumCodePoints) {
+    throw new TypeError(`${label} must be trimmed text from 1 to ${maximumCodePoints} characters`)
+  }
+  try {
+    canonicalizeJson(value)
+  } catch {
+    throw new TypeError(`${label} must contain valid Unicode`)
+  }
+}
+
+function storedText(value: unknown, label: string, maximumCodePoints: number): string {
+  if (typeof value !== 'string') throw new Error(`${label} is not a string`)
+  try {
+    validateDomainText(value, label, maximumCodePoints)
+  } catch {
+    throw new Error(`${label} is invalid stored text`)
+  }
+  return value
+}
+
+function finiteMutationNumber(value: number, label: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Object.is(value, -0)) {
+    throw new TypeError(`${label} must be a finite number other than negative zero`)
+  }
+}
+
+function finiteNumber(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Object.is(value, -0)) {
+    throw new Error(`${label} is not a finite number other than negative zero`)
+  }
+  return value
+}
+
+function metricDirection(value: unknown): OutcomeMetricDirection {
+  if (value !== 'increase' && value !== 'decrease') {
+    throw new Error('Outcome metric direction is invalid')
+  }
+  return value
+}
+
+function assertMetricDirection(metric: OutcomeMetric, label: string): void {
+  if ((metric.direction === 'increase' && metric.targetValue <= metric.initialValue)
+    || (metric.direction === 'decrease' && metric.targetValue >= metric.initialValue)) {
+    throw new TypeError(`${label} target does not improve in its declared direction`)
+  }
+}
+
+function objectValue(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${label} is not an object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function arrayValue(value: unknown, label: string): readonly unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${label} is not an array`)
+  return value
 }
 
 function validateInstant(value: string, label: string): void {

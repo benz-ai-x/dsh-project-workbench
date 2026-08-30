@@ -4,6 +4,12 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  CreateProjectRequest,
+  CreateProjectResult,
+  ProjectDetailProjection,
+  ProjectQuery,
+  ProjectStartFilter,
+  ProjectStartProjection,
   SetStatusRequest,
   SetStatusResult,
   WorkbenchActivityFilter,
@@ -29,6 +35,16 @@ import {
 
 export type * from './client.ts'
 export type * from './repository.ts'
+export {
+  KNOWLEDGE_WORK_TEMPLATE_CANONICAL_BYTES_V1,
+  KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
+  KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,
+  KNOWLEDGE_WORK_TEMPLATE_DEFINITION_V1,
+  KNOWLEDGE_WORK_TEMPLATE_PROJECTION_V1,
+  KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1,
+  isKnowledgeWorkTemplateSelection,
+  knowledgeWorkTemplateProjection,
+} from './project-template.ts'
 export {
   V1OwnerAuthorizationPolicy,
   WorkbenchAuthorizationContext,
@@ -230,6 +246,33 @@ export class WorkbenchService extends TypertRemoteService {
   @Remote
   auditIntegrity(signal: AbortSignal): Promise<WorkbenchAuditIntegrityProjection> {
     return this.scenario.auditIntegrity(signal)
+  }
+
+  /** Read the immutable template and a stable descending Project catalog page. */
+  @Remote
+  projectStart(
+    filter: ProjectStartFilter,
+    signal: AbortSignal,
+  ): Promise<ProjectStartProjection> {
+    return this.scenario.projectStart(filter, signal)
+  }
+
+  /** Atomically create a Project from one exact Template Version. */
+  @Remote
+  createProject(
+    request: CreateProjectRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectResult> {
+    return this.scenario.createProject(request, signal)
+  }
+
+  /** Reopen one visible Project from Host-owned truth. */
+  @Remote
+  project(
+    query: ProjectQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectDetailProjection | null> {
+    return this.scenario.project(query, signal)
   }
 }
 

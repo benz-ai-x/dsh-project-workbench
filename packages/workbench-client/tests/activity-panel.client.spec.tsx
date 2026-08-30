@@ -55,6 +55,17 @@ function item(
   }
 }
 
+function projectItem(): WorkbenchActivityItem {
+  return {
+    ...item(5, 'pending'),
+    projectId: 'project-5',
+    action: 'workbench.project.created',
+    reason: 'owner-project-create',
+    object: { type: 'project', id: 'project-5', version: 1 },
+    summaryCode: 'project-created-from-template',
+  }
+}
+
 function ready(
   items: readonly WorkbenchActivityItem[] = [],
   integrity: WorkbenchAuditIntegrityProjection = {
@@ -218,6 +229,24 @@ describe('ActivityPanel', () => {
     fireEvent.change(screen.getByLabelText('Action'), { target: { value: '' } })
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }))
     expect(controller.setFilter).toHaveBeenLastCalledWith({ projectId: null })
+  })
+
+  it('renders and filters the allowlisted Project-created Activity vocabulary', () => {
+    const controller = new PanelController(ready([projectItem()]))
+    render(<ActivityPanel controller={controller} copy={DEFAULT_ACTIVITY_PANEL_COPY} />)
+
+    expect(screen.getByText('Project created from template')).toBeTruthy()
+    expect(screen.getByText('Owner Project creation')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Object type'), { target: { value: 'project' } })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: 'workbench.project.created' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }))
+
+    expect(controller.setFilter).toHaveBeenCalledWith({
+      objectType: 'project',
+      action: 'workbench.project.created',
+    })
   })
 
   it('loads the next cursor page once and exposes its pending state accessibly', () => {

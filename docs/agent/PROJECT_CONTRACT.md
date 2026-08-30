@@ -55,9 +55,19 @@ Before runtime changes:
 - Outbox states are facts: `pending`, `delivered`, `unknown`, and `failed`. A transport outcome that may have taken effect is `unknown`, never blindly retried with a fresh effect key or aged into `failed`.
 - Activity and audit-integrity reads authorize before storage, constrain organization from the Host principal, apply Project/object/action filters in the repository, and return only detached browser-safe projections.
 
+## T04 Project Template, Goal, Outcome, and Project invariants
+
+- The canonical domain vocabulary is recorded in `CONTEXT.md`. A Project has exactly one Primary Goal and zero or more distinct Supporting Goals; a Goal owns at least one Outcome, and an Outcome is a measurable result rather than a task or output.
+- The built-in Knowledge Work Template is one immutable Template Version with a closed runtime schema, canonical bytes, and a SHA-256 digest. A changed definition must be a new Template Version; no caller may select a mutable `latest` alias.
+- Every Project records Template Version provenance and owns a complete immutable Project Template Snapshot. The creation snapshot is copied, digest-verified, and never rewritten by a future Template Version or upgrade.
+- Project creation is one formal command: catalog CAS, Supporting Goal revision/scope checks, Primary Goal, ordered Outcomes, Project, snapshot, links, pending Outbox, one Project-scoped audit event/hash-head advance, and replay receipt either commit together or do not exist.
+- Outcome metrics carry bounded names, a finite baseline and target, a bounded unit, and an increase/decrease direction consistent with those values. Execution completion and Outcome attainment remain separate concepts.
+- The browser supplies exact Template Version/digest, expected revisions, idempotency key, causation ID, and bounded domain input. Actor, organization/team scope, generated IDs, time, audit vocabulary, and Outbox facts remain Host-derived.
+- Project names, Goal/Outcome text, metric values, Template Snapshot content, request bodies, and raw failures never enter audit or Activity. The Project detail projection may return authorized business values as detached whole objects.
+
 ## Ticket boundary
 
-T03 deepens only the existing protected status command into the reusable transaction/receipt/Outbox/audit seam and renders its safe Activity. It does not invent Project rows merely to populate a filter and does not implement Goal, members, Feishu, calendar, risks, topics, deliverables, files, AI analysis, agents, automation, backup, TLS/VPN, or production operations. The Outbox dispatcher contract may prove all four states, but T03 does not simulate a third-party delivery adapter.
+T04 is complete at the built-in Knowledge Work Template Version and the end-to-end creation/read path for Project, Primary Goal, measurable Outcomes, optional Supporting Goals, and the independent creation snapshot. The next implementation boundary is T05 (#6): a unified human/agent ProjectMember roster and responsibility rules. T05 must not pull in Review Center, Template Studio, template upgrade/apply, Feishu synchronization beyond member identity metadata, calendar, risks, topics, deliverables, files, AI analysis, automation, backup, TLS/VPN, or production operations.
 
 ## Required evidence
 
@@ -69,3 +79,4 @@ T03 deepens only the existing protected status command into the reusable transac
 - Built-entry, lazy-CJS bundle, generated Typert, and real tarball checks.
 - T02 additionally requires real carrier-level 401/403 evidence, server-observed Cookie attributes/round trips, one-time recovery behavior, and proof that an unauthenticated browser never renders or mutates the Workbench projection.
 - T03 additionally requires rollback fault evidence, response-loss replay without duplicate rows, hash-chain mutation/deletion/reorder detection, Activity filtering/redaction, all four observable Outbox states, generated four-method Typert faces, and a real-browser Activity journey that never renders protected data before authentication.
+- T04 additionally requires immutable Template Version and Project Template Snapshot evidence, Goal/Outcome/Project relationship and metric validation, catalog/Supporting Goal conflict and rollback matrices, response-loss replay, Project-scoped Activity redaction, migration/restart, generated seven-method Typert faces, and a real-browser create/reopen journey.

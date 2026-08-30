@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T03 npm archives without touching publication.
+ * Create and inspect the real T04 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -71,6 +71,7 @@ const packageSpecs = [
       'lib/types/owner-auth-service.d.ts',
       'lib/types/owner-credential-store.d.ts',
       'lib/types/password.d.ts',
+      'lib/types/project-template.d.ts',
       'lib/types/recover-cli.d.ts',
       'lib/types/recovery.d.ts',
       'lib/types/repository.d.ts',
@@ -87,6 +88,7 @@ const packageSpecs = [
     expectedDeclarations: [
       'lib/types/client/ActivityPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
+      'lib/types/client/ProjectsPanel.d.ts',
       'lib/types/client/WorkbenchStatusPage.d.ts',
       'lib/types/client/activity-controller.d.ts',
       'lib/types/client/auth-http.d.ts',
@@ -95,6 +97,7 @@ const packageSpecs = [
       'lib/types/client/locales.d.ts',
       'lib/types/client/mount.d.ts',
       'lib/types/client/owner-controller.d.ts',
+      'lib/types/client/project-controller.d.ts',
       'lib/types/client/style-lifecycle.d.ts',
       'lib/types/index.d.ts',
     ],
@@ -498,6 +501,16 @@ export default class PackedAuthFixture extends Service {
   check(result?.loadedInstanceMatchesPublicImport === true, 'clean consumer: Loader instance comes from the tgz-installed public Host import')
   check(result?.unauthorizedCode === 'unauthorized', 'clean consumer: installed Host direct invocation fails closed without a principal')
   check(result?.initialSnapshot === null, 'clean consumer: installed Host starts with an empty projection')
+  check(
+    result?.initialProjectStart?.catalogRevision === 0
+      && result?.initialProjectStart?.projects?.length === 0
+      && result?.initialProjectStart?.template?.selection?.templateId === 'knowledge-work'
+      && result?.initialProjectStart?.template?.selection?.templateVersion === 1
+      && /^sha256:[0-9a-f]{64}$/u.test(
+        result?.initialProjectStart?.template?.selection?.definitionDigest ?? '',
+      ),
+    'clean consumer: installed Host exposes the exact immutable Knowledge Work Template Version',
+  )
   check(result?.committed?.message === 'packed consumer status' && result?.committed?.revision === 1, 'clean consumer: installed Host commits setStatus revision 1')
   check(
     typeof result?.receipt?.commandId === 'string'
@@ -530,9 +543,50 @@ export default class PackedAuthFixture extends Service {
     'clean consumer: installed Host returns rows and one-event integrity from the Activity snapshot',
   )
   check(
-    JSON.stringify(result?.restartActivity) === JSON.stringify(result?.committedActivity)
-      && JSON.stringify(result?.restartIntegrity) === JSON.stringify(result?.restartActivity?.integrity),
-    'clean consumer: installed Host recovers Activity and audit integrity after restart',
+    result?.createdProject?.project?.name === 'Packed consumer Project'
+      && result?.createdProject?.project?.revision === 1
+      && result?.createdProject?.primaryGoal?.outcomes?.length === 1
+      && result?.createdProject?.primaryGoal?.outcomes?.[0]?.metric?.targetValue === 4
+      && result?.createdProject?.templateSnapshot?.snapshotDigest
+        === result?.initialProjectStart?.template?.selection?.definitionDigest,
+    'clean consumer: installed Host atomically creates Project, Primary Goal, Outcome, and snapshot',
+  )
+  check(
+    typeof result?.projectReceipt?.commandId === 'string'
+      && typeof result?.projectReceipt?.auditEventId === 'string'
+      && typeof result?.projectReceipt?.outboxId === 'string',
+    'clean consumer: Project creation returns the three durable receipt identities',
+  )
+  check(
+    JSON.stringify(result?.projectedProject) === JSON.stringify(result?.createdProject)
+      && result?.createdProjectStart?.catalogRevision === 1
+      && result?.createdProjectStart?.projects?.[0]?.projectId
+        === result?.createdProject?.project?.projectId,
+    'clean consumer: Project detail and creation catalog reopen the committed aggregate',
+  )
+  check(
+    result?.createdProjectActivity?.items?.length === 1
+      && result?.createdProjectActivity?.items?.[0]?.eventId
+        === result?.projectReceipt?.auditEventId
+      && result?.createdProjectActivity?.items?.[0]?.projectId
+        === result?.createdProject?.project?.projectId
+      && result?.createdProjectActivity?.items?.[0]?.outbox?.state === 'pending'
+      && result?.createdProjectActivity?.integrity?.valid === true
+      && result?.createdProjectActivity?.integrity?.eventCount === 2
+      && JSON.stringify(result?.finalIntegrity)
+        === JSON.stringify(result?.createdProjectActivity?.integrity),
+    'clean consumer: Project audit and pending Outbox extend the verified ledger without business text',
+  )
+  check(
+    JSON.stringify(result?.restartActivity?.items)
+        === JSON.stringify(result?.committedActivity?.items)
+      && JSON.stringify(result?.restartIntegrity) === JSON.stringify(result?.finalIntegrity)
+      && JSON.stringify(result?.restartProjectStart)
+        === JSON.stringify(result?.createdProjectStart)
+      && JSON.stringify(result?.restartProject) === JSON.stringify(result?.createdProject)
+      && JSON.stringify(result?.restartProjectActivity)
+        === JSON.stringify(result?.createdProjectActivity),
+    'clean consumer: installed Host recovers status, Project, snapshot, Activity, and integrity after restart',
   )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
@@ -599,7 +653,15 @@ assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
 assert.ok(!('default' in hostContract))
 assert.equal(typeof client.apply, 'function')
 assert.ok(!('default' in client))
-const remoteMethods = ['activity', 'auditIntegrity', 'setStatus', 'snapshot']
+const remoteMethods = [
+  'activity',
+  'auditIntegrity',
+  'createProject',
+  'project',
+  'projectStart',
+  'setStatus',
+  'snapshot',
+]
 assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), remoteMethods)
 assert.deepEqual(remoteTypert.TYPERT_REMOTE.descriptors.map(value => value.method).sort(), remoteMethods)
 assert.equal(typeof recovery.recoverOwnerOffline, 'function')
@@ -612,12 +674,19 @@ assert.ok(bundlePatch.includes(CLIENT))
 
 const bareModuleBaseUrl = pathToFileURL(join(CONSUMER_ROOT, 'consumer-anchor.mjs')).href
 let initialSnapshot
+let initialProjectStart
 let initialActivity
 let initialIntegrity
 let committed
 let receipt
 let committedActivity
 let committedIntegrity
+let createdProject
+let projectReceipt
+let projectedProject
+let createdProjectStart
+let createdProjectActivity
+let finalIntegrity
 let firstContext
 let firstService
 let loaderEntryName
@@ -643,6 +712,18 @@ try {
   )
   initialSnapshot = await firstAuth.run(() => firstService.snapshot(new AbortController().signal))
   assert.equal(initialSnapshot, null)
+  initialProjectStart = await firstAuth.run(() => firstService.projectStart(
+    { limit: 10 },
+    new AbortController().signal,
+  ))
+  assert.equal(initialProjectStart.catalogRevision, 0)
+  assert.deepEqual(initialProjectStart.projects, [])
+  assert.equal(initialProjectStart.nextBeforeSequence, null)
+  assert.equal(initialProjectStart.template.selection.templateId, 'knowledge-work')
+  assert.equal(initialProjectStart.template.selection.templateVersion, 1)
+  assert.match(initialProjectStart.template.selection.definitionDigest, /^sha256:[0-9a-f]{64}$/u)
+  assert.equal(initialProjectStart.template.definition.snapshotSchemaVersion, 1)
+  assert.equal(initialProjectStart.template.definition.kind, 'knowledge-work')
   initialActivity = await firstAuth.run(() => firstService.activity(
     { projectId: null, limit: 10 },
     new AbortController().signal,
@@ -698,6 +779,116 @@ try {
     new AbortController().signal,
   ))
   assert.deepEqual(committedIntegrity, committedActivity.integrity)
+
+  const projectRequest = {
+    template: initialProjectStart.template.selection,
+    projectName: 'Packed consumer Project',
+    primaryGoal: {
+      name: 'Shorten packed feedback time',
+      outcomes: [{
+        name: 'Reduce packed feedback latency',
+        metric: {
+          metricName: 'Feedback latency',
+          initialValue: 10,
+          targetValue: 4,
+          unit: 'days',
+          direction: 'decrease',
+        },
+      }],
+    },
+    supportingGoals: [],
+    expectedCatalogRevision: initialProjectStart.catalogRevision,
+    expectedRevision: null,
+    idempotencyKey: 'packed-project-idempotency-0001',
+    causationId: 'packed-project-causation-0001',
+    reason: 'owner-project-create',
+  }
+  const createdOutcome = await firstAuth.run(() => firstService.createProject(
+    projectRequest,
+    new AbortController().signal,
+  ))
+  assert.equal(createdOutcome.ok, true)
+  assert.equal(createdOutcome.catalogRevision, 1)
+  createdProject = createdOutcome.value
+  projectReceipt = createdOutcome.receipt
+  assert.equal(createdProject.project.name, 'Packed consumer Project')
+  assert.equal(createdProject.project.revision, 1)
+  assert.equal(createdProject.project.catalogSequence, 1)
+  assert.equal(createdProject.project.timezone, 'Asia/Shanghai')
+  assert.equal(createdProject.primaryGoal.name, 'Shorten packed feedback time')
+  assert.equal(createdProject.primaryGoal.revision, 1)
+  assert.equal(createdProject.primaryGoal.outcomes.length, 1)
+  assert.equal(createdProject.primaryGoal.outcomes[0].name, 'Reduce packed feedback latency')
+  assert.deepEqual(createdProject.primaryGoal.outcomes[0].metric, {
+    metricName: 'Feedback latency',
+    initialValue: 10,
+    targetValue: 4,
+    unit: 'days',
+    direction: 'decrease',
+  })
+  assert.deepEqual(createdProject.supportingGoals, [])
+  assert.deepEqual(createdProject.templateSnapshot.template, initialProjectStart.template.selection)
+  assert.equal(createdProject.templateSnapshot.snapshotSchemaVersion, 1)
+  assert.deepEqual(createdProject.templateSnapshot.definition, initialProjectStart.template.definition)
+  assert.equal(
+    createdProject.templateSnapshot.snapshotDigest,
+    initialProjectStart.template.selection.definitionDigest,
+  )
+  assert.match(projectReceipt.commandId, /^command-/u)
+  assert.match(projectReceipt.auditEventId, /^audit-/u)
+  assert.match(projectReceipt.outboxId, /^outbox-/u)
+  const replayedProject = await firstAuth.run(() => firstService.createProject(
+    projectRequest,
+    new AbortController().signal,
+  ))
+  assert.deepEqual(replayedProject, createdOutcome)
+  projectedProject = await firstAuth.run(() => firstService.project(
+    { projectId: createdProject.project.projectId },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(projectedProject, createdProject)
+  createdProjectStart = await firstAuth.run(() => firstService.projectStart(
+    { limit: 10 },
+    new AbortController().signal,
+  ))
+  assert.equal(createdProjectStart.catalogRevision, 1)
+  assert.equal(createdProjectStart.projects.length, 1)
+  assert.equal(createdProjectStart.projects[0].projectId, createdProject.project.projectId)
+  assert.equal(
+    createdProjectStart.projects[0].primaryGoal.goalId,
+    createdProject.primaryGoal.goalId,
+  )
+  createdProjectActivity = await firstAuth.run(() => firstService.activity({
+    projectId: createdProject.project.projectId,
+    objectType: 'project',
+    objectId: createdProject.project.projectId,
+    action: 'workbench.project.created',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(createdProjectActivity.items.length, 1)
+  const projectItem = createdProjectActivity.items[0]
+  assert.equal(projectItem.eventId, projectReceipt.auditEventId)
+  assert.equal(projectItem.commandId, projectReceipt.commandId)
+  assert.equal(projectItem.projectId, createdProject.project.projectId)
+  assert.equal(projectItem.action, 'workbench.project.created')
+  assert.equal(projectItem.reason, 'owner-project-create')
+  assert.equal(projectItem.object.type, 'project')
+  assert.equal(projectItem.object.id, createdProject.project.projectId)
+  assert.equal(projectItem.object.version, 1)
+  assert.equal(projectItem.outbox.id, projectReceipt.outboxId)
+  assert.equal(projectItem.outbox.state, 'pending')
+  const projectActivityJson = JSON.stringify(createdProjectActivity)
+  assert.equal(projectActivityJson.includes('Packed consumer Project'), false)
+  assert.equal(projectActivityJson.includes('Shorten packed feedback time'), false)
+  assert.equal(projectActivityJson.includes('Feedback latency'), false)
+  assert.equal(createdProjectActivity.integrity.valid, true)
+  assert.equal(createdProjectActivity.integrity.eventCount, 2)
+  assert.equal(createdProjectActivity.integrity.issue, null)
+  assert.equal(createdProjectActivity.integrity.headHash, projectItem.hash)
+  finalIntegrity = await firstAuth.run(() => firstService.auditIntegrity(
+    new AbortController().signal,
+  ))
+  assert.deepEqual(finalIntegrity, createdProjectActivity.integrity)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -708,6 +899,9 @@ await assert.rejects(() => firstService.snapshot(), error => error?.failure?.cod
 let restartSnapshot
 let restartActivity
 let restartIntegrity
+let restartProjectStart
+let restartProject
+let restartProjectActivity
 let secondContext
 let secondService
 try {
@@ -724,8 +918,28 @@ try {
   restartIntegrity = await secondAuth.run(() => secondService.auditIntegrity(
     new AbortController().signal,
   ))
-  assert.deepEqual(restartActivity, committedActivity)
-  assert.deepEqual(restartIntegrity, restartActivity.integrity)
+  assert.deepEqual(restartActivity.items, committedActivity.items)
+  assert.equal(restartActivity.nextBeforeSequence, committedActivity.nextBeforeSequence)
+  assert.deepEqual(restartActivity.integrity, finalIntegrity)
+  assert.deepEqual(restartIntegrity, finalIntegrity)
+  restartProjectStart = await secondAuth.run(() => secondService.projectStart(
+    { limit: 10 },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(restartProjectStart, createdProjectStart)
+  restartProject = await secondAuth.run(() => secondService.project(
+    { projectId: createdProject.project.projectId },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(restartProject, createdProject)
+  restartProjectActivity = await secondAuth.run(() => secondService.activity({
+    projectId: createdProject.project.projectId,
+    objectType: 'project',
+    objectId: createdProject.project.projectId,
+    action: 'workbench.project.created',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.deepEqual(restartProjectActivity, createdProjectActivity)
 } finally {
   await secondContext?.fiber.dispose()
 }
@@ -742,15 +956,25 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   loadedInstanceMatchesPublicImport,
   unauthorizedCode,
   initialSnapshot,
+  initialProjectStart,
   initialActivity,
   initialIntegrity,
   committed,
   receipt,
   committedActivity,
   committedIntegrity,
+  createdProject,
+  projectReceipt,
+  projectedProject,
+  createdProjectStart,
+  createdProjectActivity,
+  finalIntegrity,
   restartSnapshot,
   restartActivity,
   restartIntegrity,
+  restartProjectStart,
+  restartProject,
+  restartProjectActivity,
   firstLifecycle: firstService.scenario.lifecycle,
   secondLifecycle: secondService.scenario.lifecycle,
   firstRepositoryClosed: firstService.scenario.options.repository.closed,

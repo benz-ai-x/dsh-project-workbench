@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T03 actually loads.
+ * Verify the executable artifacts that T04 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -239,10 +239,18 @@ function verifyTypertFace(face, packageName, label) {
   check(Array.isArray(invocations), `${packageName}: ${label} Typert face contains invocation descriptors`)
   if (!Array.isArray(invocations)) return
   const methods = invocations.map(invocation => invocation?.method).sort()
-  const expectedMethods = ['activity', 'auditIntegrity', 'setStatus', 'snapshot']
+  const expectedMethods = [
+    'activity',
+    'auditIntegrity',
+    'createProject',
+    'project',
+    'projectStart',
+    'setStatus',
+    'snapshot',
+  ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly activity, auditIntegrity, setStatus, and snapshot`,
+    `${packageName}: ${label} Typert face contains exactly the seven T04 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -250,9 +258,20 @@ function verifyTypertFace(face, packageName, label) {
   }
   const activity = invocations.find(invocation => invocation?.method === 'activity')
   const auditIntegrity = invocations.find(invocation => invocation?.method === 'auditIntegrity')
+  const createProject = invocations.find(invocation => invocation?.method === 'createProject')
+  const project = invocations.find(invocation => invocation?.method === 'project')
+  const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
   const setStatus = invocations.find(invocation => invocation?.method === 'setStatus')
   const snapshot = invocations.find(invocation => invocation?.method === 'snapshot')
-  for (const invocation of [activity, auditIntegrity, setStatus, snapshot]) {
+  for (const invocation of [
+    activity,
+    auditIntegrity,
+    createProject,
+    project,
+    projectStart,
+    setStatus,
+    snapshot,
+  ]) {
     check(
       invocation?.cancellation?.parameter === 'signal',
       `${packageName}: ${label} ${String(invocation?.method)} carries caller cancellation`,
@@ -310,6 +329,128 @@ function verifyTypertFace(face, packageName, label) {
     ]),
     `${packageName}: ${label} auditIntegrity result exposes the safe verification projection`,
   )
+
+  const projectStartFilter = projectStart?.parameters?.find(
+    parameter => parameter?.name === 'filter',
+  )
+  check(
+    sameStrings(schemaObjectKeys(projectStartFilter?.codec?.schema), [
+      'beforeSequence',
+      'limit',
+    ]),
+    `${packageName}: ${label} ProjectStartFilter contains only the stable paging cursor and limit`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(projectStart?.result?.schema), [
+      'catalogRevision',
+      'nextBeforeSequence',
+      'projects',
+      'template',
+    ]),
+    `${packageName}: ${label} projectStart returns the one-round-trip T04 creation projection`,
+  )
+
+  const createRequest = createProject?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const createRequestShape = unwrapSchema(createRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(createRequest?.codec?.schema), [
+      'causationId',
+      'expectedCatalogRevision',
+      'expectedRevision',
+      'idempotencyKey',
+      'primaryGoal',
+      'projectName',
+      'reason',
+      'supportingGoals',
+      'template',
+    ]),
+    `${packageName}: ${label} CreateProjectRequest contains the exact T04 command fields`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(createRequestShape?.template), [
+      'definitionDigest',
+      'templateId',
+      'templateVersion',
+    ]),
+    `${packageName}: ${label} project creation selects one exact immutable Template Version`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(createRequestShape?.primaryGoal), ['name', 'outcomes']),
+    `${packageName}: ${label} project creation nests one Primary Goal and its Outcomes`,
+  )
+  const outcomeSchema = arrayElementSchema(
+    unwrapSchema(createRequestShape?.primaryGoal)?.def?.shape?.outcomes,
+  )
+  check(
+    sameStrings(schemaObjectKeys(outcomeSchema), ['metric', 'name']),
+    `${packageName}: ${label} each new Outcome has a name and measurable metric`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(unwrapSchema(outcomeSchema)?.def?.shape?.metric), [
+      'direction',
+      'initialValue',
+      'metricName',
+      'targetValue',
+      'unit',
+    ]),
+    `${packageName}: ${label} each Outcome metric carries baseline, target, unit, and direction`,
+  )
+  const createResultOptions = unwrapSchema(createProject?.result?.schema)?.def?.options
+  const successfulCreate = Array.isArray(createResultOptions)
+    ? createResultOptions.find(option => schemaObjectKeys(option).includes('receipt'))
+    : undefined
+  check(
+    sameStrings(schemaObjectKeys(successfulCreate), [
+      'catalogRevision',
+      'ok',
+      'receipt',
+      'value',
+    ]),
+    `${packageName}: ${label} successful project creation returns aggregate, catalog CAS, and receipt`,
+  )
+  const successfulCreateShape = unwrapSchema(successfulCreate)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(successfulCreateShape?.value), [
+      'primaryGoal',
+      'project',
+      'supportingGoals',
+      'templateSnapshot',
+    ]),
+    `${packageName}: ${label} project creation returns the complete Project detail projection`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(
+      unwrapSchema(successfulCreateShape?.value)?.def?.shape?.templateSnapshot,
+    ), [
+      'capturedAt',
+      'definition',
+      'snapshotDigest',
+      'snapshotSchemaVersion',
+      'template',
+    ]),
+    `${packageName}: ${label} Project detail carries an independent versioned Template Snapshot`,
+  )
+
+  const projectQuery = project?.parameters?.find(parameter => parameter?.name === 'query')
+  check(
+    sameStrings(schemaObjectKeys(projectQuery?.codec?.schema), ['projectId']),
+    `${packageName}: ${label} project lookup accepts only a scoped Project identity`,
+  )
+  const projectResult = unwrapSchema(project?.result?.schema)
+  const projectDetail = Array.isArray(projectResult?.def?.options)
+    ? projectResult.def.options.find(option => schemaObjectKeys(option).includes('templateSnapshot'))
+    : projectResult
+  check(
+    sameStrings(schemaObjectKeys(projectDetail), [
+      'primaryGoal',
+      'project',
+      'supportingGoals',
+      'templateSnapshot',
+    ]),
+    `${packageName}: ${label} project lookup reopens the complete durable T04 projection`,
+  )
 }
 
 function unwrapSchema(value) {
@@ -317,7 +458,9 @@ function unwrapSchema(value) {
   const seen = new Set()
   while (current !== null && typeof current === 'object' && !seen.has(current)) {
     seen.add(current)
-    if (current.def?.type !== 'readonly' && current.def?.type !== 'optional') break
+    if (current.def?.type !== 'readonly'
+      && current.def?.type !== 'optional'
+      && current.def?.type !== 'nullable') break
     current = current.def.innerType
   }
   return current
@@ -328,6 +471,12 @@ function schemaObjectKeys(value) {
   return shape !== null && typeof shape === 'object' && !Array.isArray(shape)
     ? Object.keys(shape).sort()
     : []
+}
+
+function arrayElementSchema(value) {
+  const unwrapped = unwrapSchema(value)
+  if (unwrapped?.def?.type !== 'array') return undefined
+  return unwrapped.def.element
 }
 
 function sameStrings(actual, expected) {

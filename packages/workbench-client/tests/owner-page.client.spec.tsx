@@ -5,6 +5,7 @@ import type {
   LoginOwnerResult,
   OwnerAccessProjection,
   OwnerAuthResponse,
+  ProjectStartProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
@@ -13,6 +14,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
 import type { WorkbenchRemote } from '../src/client/controller.ts'
+import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 import { OwnerPage } from '../src/client/OwnerPage.tsx'
 import { zh, type WorkbenchKey } from '../src/client/locales.ts'
@@ -71,6 +73,31 @@ function activityProjection(): WorkbenchActivityProjection {
   }
 }
 
+function projectStartProjection(): ProjectStartProjection {
+  const definitionDigest = `sha256:${'a'.repeat(64)}` as const
+  return {
+    template: {
+      selection: { templateId: 'knowledge-work', templateVersion: 1, definitionDigest },
+      definition: {
+        snapshotSchemaVersion: 1,
+        templateId: 'knowledge-work',
+        templateVersion: 1,
+        kind: 'knowledge-work',
+        rules: {
+          minimumOutcomeCount: 1,
+          outcomeMetricRequired: true,
+          primaryGoalRequired: true,
+          supportingGoalsAllowed: true,
+        },
+        defaults: { projectTimezone: 'Asia/Shanghai' },
+      },
+    },
+    catalogRevision: 0,
+    projects: [],
+    nextBeforeSequence: null,
+  }
+}
+
 function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
   return {
     state: overrides.state ?? vi.fn(() => Promise.resolve(authOk({ state: 'signed-out' }))),
@@ -86,7 +113,9 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
   }
 }
 
-function remote(overrides: Partial<WorkbenchRemote> = {}): WorkbenchRemote {
+type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote
+
+function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
     snapshot: overrides.snapshot ?? vi.fn(() => Promise.resolve(remoteOk(status()))),
     setStatus: overrides.setStatus ?? vi.fn(() => Promise.resolve(remoteOk({
@@ -105,10 +134,17 @@ function remote(overrides: Partial<WorkbenchRemote> = {}): WorkbenchRemote {
       headHash: '',
       issue: null,
     }))),
+    projectStart: overrides.projectStart
+      ?? vi.fn(() => Promise.resolve(remoteOk(projectStartProjection()))),
+    createProject: overrides.createProject ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    project: overrides.project ?? vi.fn(() => Promise.resolve(remoteOk(null))),
   }
 }
 
-function renderOwner(ownerAuth: OwnerAuthHttp, workbenchRemote: WorkbenchRemote, copyText?: (value: string) => Promise<void>) {
+function renderOwner(ownerAuth: OwnerAuthHttp, workbenchRemote: OwnerRemote, copyText?: (value: string) => Promise<void>) {
   const controller = new OwnerController(ownerAuth, workbenchRemote)
   controllers.push(controller)
   const view = render(<OwnerPage controller={controller} t={t} copyText={copyText} />)
@@ -119,6 +155,12 @@ describe('OwnerPage', () => {
   it('renders an explicit probe before any protected Workbench request', async () => {
     const snapshotRemote = vi.fn(() => Promise.resolve(remoteOk(status())))
     const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const projectStartRemote = vi.fn(() => Promise.resolve(remoteOk(projectStartProjection())))
+    const createProjectRemote = vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    })))
+    const projectRemote = vi.fn(() => Promise.resolve(remoteOk(null)))
     const auditIntegrity = vi.fn(() => Promise.resolve(remoteOk({
       valid: true,
       eventCount: 0,
@@ -130,6 +172,9 @@ describe('OwnerPage', () => {
       snapshot: snapshotRemote,
       activity: activityRemote,
       auditIntegrity,
+      projectStart: projectStartRemote,
+      createProject: createProjectRemote,
+      project: projectRemote,
     }))
 
     expect(screen.getByRole('main', { name: '正在确认访问状态' })).toBeTruthy()
@@ -138,12 +183,19 @@ describe('OwnerPage', () => {
     expect(snapshotRemote).not.toHaveBeenCalled()
     expect(activityRemote).not.toHaveBeenCalled()
     expect(auditIntegrity).not.toHaveBeenCalled()
+    expect(projectStartRemote).not.toHaveBeenCalled()
+    expect(createProjectRemote).not.toHaveBeenCalled()
+    expect(projectRemote).not.toHaveBeenCalled()
     state.resolve(authOk({ state: 'signed-out' }))
     await act(async () => { await starting })
     expect(screen.getByRole('heading', { name: 'Owner 登录' })).toBeTruthy()
     expect(snapshotRemote).not.toHaveBeenCalled()
     expect(activityRemote).not.toHaveBeenCalled()
     expect(auditIntegrity).not.toHaveBeenCalled()
+    expect(projectStartRemote).not.toHaveBeenCalled()
+    expect(createProjectRemote).not.toHaveBeenCalled()
+    expect(projectRemote).not.toHaveBeenCalled()
+    expect(screen.queryByRole('heading', { name: '从知识工作模板创建项目' })).toBeNull()
   })
 
   it('supports setup confirmation, pending lock, one-time copy/CLI guidance, and acknowledgement', async () => {
@@ -197,6 +249,7 @@ describe('OwnerPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '我已安全保存，进入工作台' }))
 
     expect(await screen.findByRole('main', { name: '让项目状态始终清晰可见' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '从知识工作模板创建项目' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     expect(screen.getByText('审计链验证通过')).toBeTruthy()
     expect(screen.queryByText(recoveryCode)).toBeNull()
@@ -234,7 +287,9 @@ describe('OwnerPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '登录' }))
     expect(await screen.findByRole('main', { name: '让项目状态始终清晰可见' })).toBeTruthy()
     const statusController = controller.getSnapshot().status
+    const projectController = controller.getSnapshot().projects
     const activityController = controller.getSnapshot().activity
+    expect(screen.getByRole('heading', { name: '从知识工作模板创建项目' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     fireEvent.change(screen.getByRole('textbox', { name: '项目状态' }), {
       target: { value: '退出后必须清除的草稿' },
@@ -248,12 +303,18 @@ describe('OwnerPage', () => {
 
     expect(screen.getByRole('heading', { name: 'Owner 登录' })).toBeTruthy()
     expect(screen.queryByText('Host 保护的状态')).toBeNull()
+    expect(screen.queryByRole('heading', { name: '从知识工作模板创建项目' })).toBeNull()
     expect(screen.queryByRole('heading', { name: '活动记录' })).toBeNull()
     expect(statusController?.getSnapshot()).toMatchObject({ snapshot: null, draft: '' })
     expect(activityController?.getSnapshot()).toMatchObject({
       phase: 'loading',
       activity: null,
       integrity: null,
+    })
+    expect(projectController?.getSnapshot()).toMatchObject({
+      start: null,
+      detail: null,
+      draft: { projectName: '', primaryGoalName: '' },
     })
   })
 })

@@ -5,8 +5,8 @@ import type {
   WorkbenchActivitySummaryCode,
   WorkbenchAuditAction,
   WorkbenchAuditObjectType,
+  WorkbenchCommandReason,
   WorkbenchOutboxState,
-  WorkbenchStatusChangeReason,
 } from './client.ts'
 
 export const AUDIT_CHAIN_NAME = 'project-workbench.audit' as const
@@ -21,8 +21,6 @@ const SAFE_FIELD_PATTERN = /^[A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+)*$/u
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u
 const MAX_REFERENCE_CODE_POINTS = 256
 const MAX_REFERENCE_BYTES = 1_024
-const MAX_REASON_DETAIL_CODE_POINTS = 512
-const MAX_REASON_DETAIL_BYTES = 2_048
 const MAX_CHANGED_FIELDS = 64
 
 export type AuditActorKind = 'anonymous' | 'owner' | 'system'
@@ -33,8 +31,7 @@ export interface AuditActor {
 }
 
 export interface AuditReason {
-  readonly code: WorkbenchStatusChangeReason
-  readonly detail?: string
+  readonly code: WorkbenchCommandReason
 }
 
 /** Indexed authority scope protected by the same event hash. */
@@ -53,7 +50,7 @@ export interface AuditObjectReference {
 
 export interface AuditCommandReference {
   readonly id: string
-  readonly type: 'workbench.status.set'
+  readonly type: 'workbench.status.set' | 'workbench.project.create'
 }
 
 export interface AuditCausationReference {
@@ -233,7 +230,16 @@ export function verifyAuditChain(
     let rebuilt: AuditEvent
     try {
       rebuilt = createAuditEvent(fields.input)
-    } catch {
+    } catch (error) {
+      if (error instanceof AuditVocabularyCorrelationError) {
+        try {
+          if (canonicalizeJson(auditEnvelope(fields.input)) !== fields.canonicalEnvelope) {
+            return integrityFailure('canonical-envelope-mismatch', index, events.length, headHash)
+          }
+        } catch {
+          // Fall through to the stable malformed-event result below.
+        }
+      }
       return integrityFailure('malformed-event', index, events.length, headHash)
     }
     if (rebuilt.canonicalEnvelope !== fields.canonicalEnvelope) {
@@ -357,9 +363,11 @@ function normalizeAuditEventInput(value: unknown): AuditEventInput {
   const previousHash = auditHash(record.previousHash, 'Audit previousHash')
   const action = auditAction(record.action)
   const reason = normalizeReason(record.reason)
-  if (action === 'workbench.status.updated' && reason.detail !== undefined) {
-    throw new TypeError('Status audit events admit a reason code but no arbitrary detail')
-  }
+  const scope = normalizeScope(record.scope)
+  const object = normalizeObjectReference(record.object)
+  const command = normalizeCommandReference(record.command)
+  const summary = normalizeSummary(record.summary)
+  assertCorrelatedVocabulary(action, reason, scope, object, command, summary)
   return Object.freeze({
     sequence,
     previousHash,
@@ -367,14 +375,14 @@ function normalizeAuditEventInput(value: unknown): AuditEventInput {
     occurredAt: canonicalInstant(record.occurredAt),
     actor: normalizeActor(record.actor),
     action,
-    scope: normalizeScope(record.scope),
+    scope,
     reason,
-    object: normalizeObjectReference(record.object),
-    command: normalizeCommandReference(record.command),
+    object,
+    command,
     causation: normalizeCausationReference(record.causation),
     outbox: record.outbox === null ? null : normalizeOutboxReference(record.outbox),
     outcome: auditOutcome(record.outcome),
-    summary: normalizeSummary(record.summary),
+    summary,
   })
 }
 
@@ -390,13 +398,14 @@ function normalizeActor(value: unknown): AuditActor {
 
 function normalizeReason(value: unknown): AuditReason {
   const record = dataRecord(value, 'Audit reason')
-  assertFields(record, ['code'], ['detail'], 'Audit reason')
-  if (record.code !== 'owner-status-edit') {
+  if (Object.hasOwn(record, 'detail')) {
+    throw new TypeError('Audit events admit a reason code but no arbitrary detail')
+  }
+  assertFields(record, ['code'], [], 'Audit reason')
+  if (record.code !== 'owner-status-edit' && record.code !== 'owner-project-create') {
     throw new TypeError('Audit reason code is unsupported')
   }
-  const code: WorkbenchStatusChangeReason = record.code
-  if (!Object.hasOwn(record, 'detail')) return Object.freeze({ code })
-  return Object.freeze({ code, detail: safeDetail(record.detail) })
+  return Object.freeze({ code: record.code })
 }
 
 function normalizeScope(value: unknown): AuditScope {
@@ -477,26 +486,65 @@ function auditOutcome(value: unknown): AuditOutcome {
 }
 
 function auditAction(value: unknown): WorkbenchAuditAction {
-  if (value !== 'workbench.status.updated') throw new TypeError('Audit action is unsupported')
+  if (value !== 'workbench.status.updated' && value !== 'workbench.project.created') {
+    throw new TypeError('Audit action is unsupported')
+  }
   return value
 }
 
 function auditObjectType(value: unknown): WorkbenchAuditObjectType {
-  if (value !== 'workbench-status') throw new TypeError('Audit object type is unsupported')
+  if (value !== 'workbench-status' && value !== 'project') {
+    throw new TypeError('Audit object type is unsupported')
+  }
   return value
 }
 
-function auditCommandType(value: unknown): 'workbench.status.set' {
-  if (value !== 'workbench.status.set') throw new TypeError('Audit command type is unsupported')
+function auditCommandType(value: unknown): AuditCommandReference['type'] {
+  if (value !== 'workbench.status.set' && value !== 'workbench.project.create') {
+    throw new TypeError('Audit command type is unsupported')
+  }
   return value
 }
 
 function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
-  if (value !== 'status-revision-committed') {
+  if (value !== 'status-revision-committed' && value !== 'project-created-from-template') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
 }
+
+function assertCorrelatedVocabulary(
+  action: WorkbenchAuditAction,
+  reason: AuditReason,
+  scope: AuditScope,
+  object: AuditObjectReference,
+  command: AuditCommandReference,
+  summary: AuditSafeSummary,
+): void {
+  if (action === 'workbench.status.updated') {
+    if (reason.code !== 'owner-status-edit'
+      || object.type !== 'workbench-status'
+      || command.type !== 'workbench.status.set'
+      || summary.code !== 'status-revision-committed'
+      || scope.projectId !== null) {
+      throw new AuditVocabularyCorrelationError(
+        'Status audit vocabulary is not a valid correlated combination',
+      )
+    }
+    return
+  }
+  if (reason.code !== 'owner-project-create'
+    || object.type !== 'project'
+    || command.type !== 'workbench.project.create'
+    || summary.code !== 'project-created-from-template'
+    || scope.projectId !== object.id) {
+    throw new AuditVocabularyCorrelationError(
+      'Project audit vocabulary is not a valid correlated combination',
+    )
+  }
+}
+
+class AuditVocabularyCorrelationError extends TypeError {}
 
 function safeReference(value: unknown, label: string): string {
   if (typeof value !== 'string') throw new TypeError(`${label} must be a string`)
@@ -507,19 +555,6 @@ function safeReference(value: unknown, label: string): string {
     || [...value].length > MAX_REFERENCE_CODE_POINTS
     || Buffer.byteLength(value, 'utf8') > MAX_REFERENCE_BYTES) {
     throw new TypeError(`${label} must be a bounded safe reference`)
-  }
-  return value
-}
-
-function safeDetail(value: unknown): string {
-  if (typeof value !== 'string') throw new TypeError('Audit reason detail must be a string')
-  assertUnicode(value)
-  if (value.length === 0
-    || value.trim() !== value
-    || CONTROL_CHARACTER_PATTERN.test(value)
-    || [...value].length > MAX_REASON_DETAIL_CODE_POINTS
-    || Buffer.byteLength(value, 'utf8') > MAX_REASON_DETAIL_BYTES) {
-    throw new TypeError('Audit reason detail must be bounded safe text')
   }
   return value
 }

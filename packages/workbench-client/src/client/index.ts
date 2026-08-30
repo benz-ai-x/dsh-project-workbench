@@ -19,6 +19,30 @@ export {
   INITIAL_WORKBENCH_ACTIVITY_STATE,
   WorkbenchActivityController,
 } from './activity-controller.ts'
+export {
+  INITIAL_WORKBENCH_PROJECT_STATE,
+  MAX_PROJECT_METRIC_NAME_LENGTH,
+  MAX_PROJECT_OUTCOME_COUNT,
+  MAX_PROJECT_SUPPORTING_GOAL_COUNT,
+  MAX_PROJECT_TEXT_LENGTH,
+  MAX_PROJECT_UNIT_LENGTH,
+  WorkbenchProjectController,
+} from './project-controller.ts'
+export type {
+  WorkbenchOutcomeDraft,
+  WorkbenchProjectClientState,
+  WorkbenchProjectConflictCode,
+  WorkbenchProjectConflictIssue,
+  WorkbenchProjectControllerOptions,
+  WorkbenchProjectDraft,
+  WorkbenchProjectInputIssue,
+  WorkbenchProjectIssue,
+  WorkbenchProjectPhase,
+  WorkbenchProjectRemote,
+  WorkbenchProjectTransportCode,
+  WorkbenchProjectTransportIssue,
+  WorkbenchSupportingGoalDraft,
+} from './project-controller.ts'
 export type {
   WorkbenchActivityClientState,
   WorkbenchActivityControllerFace,
@@ -42,6 +66,8 @@ export { OwnerPage } from './OwnerPage.tsx'
 export type { OwnerPageProps } from './OwnerPage.tsx'
 export { ActivityPanel, DEFAULT_ACTIVITY_PANEL_COPY } from './ActivityPanel.tsx'
 export type { ActivityPanelCopy, ActivityPanelProps } from './ActivityPanel.tsx'
+export { ProjectsPanel } from './ProjectsPanel.tsx'
+export type { ProjectsPanelProps } from './ProjectsPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'
