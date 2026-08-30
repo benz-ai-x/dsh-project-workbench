@@ -1,7 +1,16 @@
 # Project Workbench's ordered layer over dsh-base and dsh-web-app.
-# Stable row ids let a later profile or DSH_HOME patch replace either face.
+# Stable row ids let a later profile or DSH_HOME patch replace any Workbench row.
 
 - insert:
+    - id: workbench-auth
+      name: '@benz-ai-x/dsh-project-workbench/auth'
+      config:
+        sessionLifetimeMinutes: 720
+        maxSessions: 16
+        maxConcurrentPasswordJobs: 2
+        maxQueuedPasswordJobs: 8
+        maxRequestBodyBytes: 8192
+
     - id: workbench-host
       name: '@benz-ai-x/dsh-project-workbench'
       config:

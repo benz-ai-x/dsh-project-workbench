@@ -10,6 +10,10 @@ const repositoryRoot = resolve(sourceDir, '../..')
 const dshHome = resolve(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
 const targetDir = join(dshHome, 'profiles', 'workbench-test')
 const managedFiles = ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml']
+const workspaceDependencies = {
+  '@benz-ai-x/dsh-project-workbench': join(repositoryRoot, 'packages', 'workbench-host'),
+  '@benz-ai-x/dsh-project-workbench-bundle': join(repositoryRoot, 'packages', 'workbench-bundle'),
+}
 const force = process.argv.includes('--force')
 
 const existing = managedFiles.filter(file => existsSync(join(targetDir, file)))
@@ -21,8 +25,9 @@ if (existing.length > 0 && !force) {
 
 mkdirSync(targetDir, { recursive: true })
 const manifest = JSON.parse(readFileSync(join(sourceDir, 'package.json'), 'utf8'))
-manifest.dependencies['@benz-ai-x/dsh-project-workbench-bundle'] =
-  `link:${join(repositoryRoot, 'packages', 'workbench-bundle')}`
+for (const [packageName, packagePath] of Object.entries(workspaceDependencies)) {
+  manifest.dependencies[packageName] = `link:${packagePath}`
+}
 writeFileSync(join(targetDir, 'package.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)
 
 for (const file of managedFiles.slice(1)) {

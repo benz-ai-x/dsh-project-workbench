@@ -7,8 +7,15 @@ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/src/client/index.t
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/src/client/registry.ts'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import { describe, expect, it, vi } from 'vitest'
-import type { WorkbenchStatusSnapshot } from '@benz-ai-x/dsh-project-workbench/client'
-import { WorkbenchStatusPage } from '../src/client/WorkbenchStatusPage.tsx'
+import type {
+  OwnerAccessProjection,
+  OwnerAuthResponse,
+  WorkbenchStatusSnapshot,
+} from '@benz-ai-x/dsh-project-workbench/client'
+import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
+import { OwnerController } from '../src/client/owner-controller.ts'
+import { OwnerPage } from '../src/client/OwnerPage.tsx'
+import { registerWorkbenchStyle } from '../src/client/style-lifecycle.ts'
 import {
   mountWorkbenchClient,
   uiInject,
@@ -31,25 +38,68 @@ function status(): WorkbenchStatusSnapshot {
   }
 }
 
+function signedIn(): Extract<OwnerAccessProjection, { readonly state: 'signed-in' }> {
+  return {
+    state: 'signed-in',
+    ownerId: 'owner-1',
+    organizationId: 'organization-1',
+    teamId: 'team-1',
+    sessionExpiresAt: '2099-09-01T00:00:00.000Z',
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
 
+type AuthState = (
+  signal?: AbortSignal,
+) => Promise<OwnerAuthResponse<OwnerAccessProjection>>
+
 async function bench(options: {
   registrationFailure?: boolean
   snapshot?: WorkbenchRemoteSnapshot
+  authState?: AuthState
 } = {}) {
   const ctx = new Context()
   const order: string[] = []
+  const requestOrder: string[] = []
   let generation: { id: number; host: { home: string } } | undefined = {
     id: 1,
     host: { home: '/tmp' },
   }
   const generationListeners = new Set<() => void>()
-  const snapshotGate = vi.fn(options.snapshot ?? (() => Promise.resolve({
+  const snapshotSource = options.snapshot ?? (() => Promise.resolve({
     ok: true as const,
     value: status(),
-  })))
+  }))
+  const snapshotGate = vi.fn((signal?: AbortSignal) => {
+    requestOrder.push('status')
+    return snapshotSource(signal)
+  })
+  const authStateSource = options.authState ?? (() => Promise.resolve({
+    ok: true as const,
+    value: signedIn(),
+  }))
+  const authStateGate = vi.fn((signal?: AbortSignal) => {
+    requestOrder.push('auth')
+    return authStateSource(signal)
+  })
+  const auth: OwnerAuthHttp = {
+    state: authStateGate,
+    initialize: vi.fn(() => Promise.resolve({
+      ok: false as const,
+      error: { code: 'unavailable' as const },
+    })),
+    login: vi.fn(() => Promise.resolve({
+      ok: false as const,
+      error: { code: 'invalid-credentials' as const },
+    })),
+    logout: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { state: 'signed-out' as const },
+    })),
+  }
 
   class RemoteService extends Service {
     readonly disposeMount = vi.fn(async () => {
@@ -104,7 +154,7 @@ async function bench(options: {
     ? undefined
     : ctx.plugin({
       inject: [...browserInject],
-      apply: clientContext => mountWorkbenchClient(clientContext, REMOTE),
+      apply: clientContext => mountWorkbenchClient(clientContext, REMOTE, auth),
     })
   if (fiber !== undefined) await fiber.await()
 
@@ -113,7 +163,10 @@ async function bench(options: {
     fiber,
     remote,
     order,
+    requestOrder,
     snapshotGate,
+    authStateGate,
+    auth,
     disposeLayout,
     disconnect() {
       generation = undefined
@@ -138,15 +191,18 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const entries = b.ctx.slots.entries('conversation')
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({
-      component: WorkbenchStatusPage,
+      component: OwnerPage,
       options: { priority: WORKBENCH_SLOT_PRIORITY },
       locale: 'workbench',
     })
     expect(b.ctx.slots.entries('root')).toHaveLength(1)
-    const injected = (entries[0]?.inject as (() => { controller: { getSnapshot(): unknown } }))()
+    const injected = (entries[0]?.inject as (() => { controller: OwnerController }))()
     await vi.waitFor(() => {
-      expect(injected.controller.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
+      const owner = injected.controller.getSnapshot()
+      expect(owner).toMatchObject({ phase: 'authenticated', access: signedIn() })
+      expect(owner.status?.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
     })
+    expect(b.requestOrder).toEqual(['auth', 'status'])
 
     await b.fiber?.dispose()
     expect(b.ctx.slots.entries('conversation')).toHaveLength(0)
@@ -155,7 +211,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
 
     const replacement = b.ctx.plugin({
       inject: [...browserInject],
-      apply: clientContext => mountWorkbenchClient(clientContext, REMOTE),
+      apply: clientContext => mountWorkbenchClient(clientContext, REMOTE, b.auth),
     })
     await replacement.await()
     expect(b.ctx.slots.entries('conversation')).toHaveLength(1)
@@ -169,24 +225,43 @@ describe('Project Workbench browser plugin lifecycle', () => {
   it('marks the last projection stale on disconnect and refreshes on connection/reset', async () => {
     const b = await bench()
     const entry = b.ctx.slots.entries('conversation')[0]
-    const controller = (entry?.inject as (() => { controller: {
-      getSnapshot(): { phase: string; snapshot: WorkbenchStatusSnapshot | null }
-    } }))().controller
-    await vi.waitFor(() => { expect(controller.getSnapshot().phase).toBe('value') })
+    const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
+    await vi.waitFor(() => { expect(controller.getSnapshot().phase).toBe('authenticated') })
+    const statusController = controller.getSnapshot().status
+    expect(statusController).not.toBeNull()
 
     b.disconnect()
-    expect(controller.getSnapshot()).toMatchObject({ phase: 'stale', snapshot: status() })
+    expect(statusController?.getSnapshot()).toMatchObject({ phase: 'stale', snapshot: status() })
+    b.requestOrder.length = 0
     b.reconnect()
     await vi.waitFor(() => {
-      expect(controller.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
+      expect(controller.getSnapshot()).toMatchObject({ phase: 'authenticated' })
+      expect(statusController?.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
     })
+    expect(b.requestOrder).toEqual(['auth', 'status'])
+    expect(b.authStateGate).toHaveBeenCalledTimes(2)
     expect(b.snapshotGate).toHaveBeenCalledTimes(2)
     await b.fiber?.dispose()
   })
 
+  it('rechecks projected expiry on focus and removes the browser listener on disposal', async () => {
+    const check = vi.spyOn(OwnerController.prototype, 'checkSessionExpiry')
+    const b = await bench()
+    await vi.waitFor(() => { expect(b.snapshotGate).toHaveBeenCalledOnce() })
+    const beforeFocus = check.mock.calls.length
+
+    window.dispatchEvent(new Event('focus'))
+    expect(check.mock.calls.length).toBe(beforeFocus + 1)
+
+    await b.fiber?.dispose()
+    window.dispatchEvent(new Event('focus'))
+    expect(check.mock.calls.length).toBe(beforeFocus + 1)
+    check.mockRestore()
+  })
+
   it('rolls back the mounted Remote when later Slot setup fails', async () => {
     const b = await bench({ registrationFailure: true })
-    await expect(mountWorkbenchClient(b.ctx, REMOTE)).rejects.toThrow('Workbench slot registration failed')
+    await expect(mountWorkbenchClient(b.ctx, REMOTE, b.auth)).rejects.toThrow('Workbench slot registration failed')
     expect(b.remote.mount).toHaveBeenCalledOnce()
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
     expect(b.ctx.slots.entries('conversation')).toHaveLength(0)
@@ -209,9 +284,46 @@ describe('Project Workbench browser plugin lifecycle', () => {
       expect(signal?.aborted).toBe(true)
     })
 
+    await vi.waitFor(() => { expect(signal).toBeInstanceOf(AbortSignal) })
+
     await b.fiber?.dispose()
 
     expect(order).toEqual(['snapshot-settled', 'remote'])
+  })
+
+  it('drains an aborted auth probe before withdrawing the Remote namespace', async () => {
+    const order: string[] = []
+    let signal: AbortSignal | undefined
+    const b = await bench({
+      authState: currentSignal => new Promise((_resolve, reject) => {
+        signal = currentSignal
+        currentSignal?.addEventListener('abort', () => {
+          order.push('auth-settled')
+          reject(currentSignal.reason)
+        }, { once: true })
+      }),
+    })
+    b.remote.disposeMount.mockImplementationOnce(async () => {
+      order.push('remote')
+      expect(signal?.aborted).toBe(true)
+    })
+    await vi.waitFor(() => { expect(signal).toBeInstanceOf(AbortSignal) })
+
+    await b.fiber?.dispose()
+
+    expect(order).toEqual(['auth-settled', 'remote'])
+    expect(b.snapshotGate).not.toHaveBeenCalled()
+  })
+
+  it('removes the styles owned by the disposed Client Fiber', async () => {
+    const tagId = '@benz-ai-x/dsh-project-workbench-client/FiberFixture.module.css'
+    registerWorkbenchStyle(tagId, '.fixture{display:block}')
+    const b = await bench()
+    expect(document.querySelector(`style[data-plugin-css="${tagId}"]`)).not.toBeNull()
+
+    await b.fiber?.dispose()
+
+    expect(document.querySelector(`style[data-plugin-css="${tagId}"]`)).toBeNull()
   })
 
   it('keeps the Node half named-only and the manifest discoverable as a web Client package', async () => {
@@ -240,6 +352,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const config = await readFile(resolve(packageRoot, 'tsdown.client.config.ts'), 'utf8')
     expect(config).toContain('window.__ModuleLoader__.load')
     expect(config).toContain('factory: (require) =>')
+    expect(config).toContain('registerWorkbenchStyle(tagId, css)')
     expect(config).not.toContain("from '../deepseek-harness")
   })
 })

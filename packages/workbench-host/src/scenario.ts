@@ -12,6 +12,7 @@ import {
   statusSnapshot,
   type WorkbenchRepository,
 } from './repository.ts'
+import type { WorkbenchAuthorization } from './authorization.ts'
 
 /** Injectable wall clock; production returns a fresh Date for every command. */
 export interface WorkbenchClock {
@@ -45,6 +46,7 @@ export interface WorkbenchScenarioOptions {
   readonly ids: WorkbenchIdGenerator
   readonly repository: WorkbenchRepository
   readonly adapters: WorkbenchExternalAdapters
+  readonly authorization: WorkbenchAuthorization
   readonly maxStatusLength: number
 }
 
@@ -104,6 +106,8 @@ export class WorkbenchScenario {
       }
       const operationSignal = AbortSignal.any([callerSignal, lifetimeSignal])
       throwIfCancelled(operationSignal)
+      await this.options.authorization.require('workbench.status.read', operationSignal)
+      throwIfCancelled(operationSignal)
       try {
         const value = await this.options.repository.snapshot(operationSignal)
         return value === null ? null : statusSnapshot(value)
@@ -121,6 +125,8 @@ export class WorkbenchScenario {
         throw badRequest('setStatus requires an AbortSignal', { field: 'signal' })
       }
       const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      await this.options.authorization.require('workbench.status.write', operationSignal)
       throwIfCancelled(operationSignal)
       const normalized = validateRequest(request, this.options.maxStatusLength)
       const candidateId = this.options.ids.nextStatusId()

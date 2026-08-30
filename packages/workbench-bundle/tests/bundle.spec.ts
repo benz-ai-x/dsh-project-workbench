@@ -36,7 +36,7 @@ describe('Project Workbench bundle', () => {
     expect(manifest.private).toBe(true)
   })
 
-  it('parses to stable Host and Client rows with explicit T01 defaults', () => {
+  it('parses to stable auth, Host, and Client rows with explicit defaults', () => {
     const root = fileURLToPath(new URL('..', import.meta.url))
     const manifest = JSON.parse(
       readFileSync(resolve(root, 'package.json'), 'utf8'),
@@ -50,6 +50,17 @@ describe('Project Workbench bundle', () => {
     const rows = (parsed as { insert?: PatchRow[] }[])
       .flatMap(patch => patch.insert ?? [])
     expect(rows).toEqual([
+      {
+        id: 'workbench-auth',
+        name: '@benz-ai-x/dsh-project-workbench/auth',
+        config: {
+          sessionLifetimeMinutes: 720,
+          maxSessions: 16,
+          maxConcurrentPasswordJobs: 2,
+          maxQueuedPasswordJobs: 8,
+          maxRequestBodyBytes: 8192,
+        },
+      },
       {
         id: 'workbench-host',
         name: '@benz-ai-x/dsh-project-workbench',

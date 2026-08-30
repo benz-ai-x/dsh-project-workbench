@@ -1,6 +1,8 @@
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   applyEntryPatches,
@@ -37,8 +39,40 @@ describe('Workbench test profile', () => {
       patchReload: 'live',
     })
     expect(manifest.dependencies).toEqual({
+      '@benz-ai-x/dsh-project-workbench': 'workspace:*',
       '@benz-ai-x/dsh-project-workbench-bundle': 'workspace:*',
     })
+  })
+
+  it('materializes the Host as a direct dependency for the recovery CLI', () => {
+    const root = fileURLToPath(new URL('..', import.meta.url))
+    const repositoryRoot = resolve(root, '../..')
+    const dshHome = mkdtempSync(join(tmpdir(), 'dsh-workbench-profile-'))
+
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        [resolve(root, 'materialize.mjs')],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, DSH_HOME: dshHome },
+        },
+      )
+      const profileDir = resolve(dshHome, 'profiles/workbench-test')
+      const manifest = JSON.parse(
+        readFileSync(resolve(profileDir, 'package.json'), 'utf8'),
+      ) as { dependencies?: Record<string, string> }
+
+      expect(stdout).toBe(`${profileDir}\n`)
+      expect(manifest.dependencies).toEqual({
+        '@benz-ai-x/dsh-project-workbench':
+          `link:${resolve(repositoryRoot, 'packages/workbench-host')}`,
+        '@benz-ai-x/dsh-project-workbench-bundle':
+          `link:${resolve(repositoryRoot, 'packages/workbench-bundle')}`,
+      })
+    } finally {
+      rmSync(dshHome, { recursive: true, force: true })
+    }
   })
 
   it('ships a parseable empty user patch layer', () => {
@@ -49,7 +83,7 @@ describe('Workbench test profile', () => {
     expect(parsed).toEqual([])
   })
 
-  it('resolves and composes both Workbench rows after the stock Web layers', () => {
+  it('resolves and composes the Owner gate, Host, and Client after the stock Web layers', () => {
     const root = fileURLToPath(new URL('..', import.meta.url))
     const manifest = JSON.parse(
       readFileSync(resolve(root, 'package.json'), 'utf8'),
@@ -73,6 +107,16 @@ describe('Workbench test profile', () => {
     const composed = applyEntryPatches([], patches, message => warnings.push(message))
 
     expect(warnings).toEqual([])
+    expect(composed.find(row => row.id === 'workbench-auth')).toMatchObject({
+      name: '@benz-ai-x/dsh-project-workbench/auth',
+      config: {
+        sessionLifetimeMinutes: 720,
+        maxSessions: 16,
+        maxConcurrentPasswordJobs: 2,
+        maxQueuedPasswordJobs: 8,
+        maxRequestBodyBytes: 8192,
+      },
+    })
     expect(composed.find(row => row.id === 'workbench-host')).toMatchObject({
       name: '@benz-ai-x/dsh-project-workbench',
       config: {

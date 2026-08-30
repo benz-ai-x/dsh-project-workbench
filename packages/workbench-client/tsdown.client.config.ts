@@ -8,6 +8,7 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename, dirname, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
@@ -15,6 +16,8 @@ const PACKAGE_ID = '@benz-ai-x/dsh-project-workbench-client'
 const TYPES_MARKER = `${sep}lib${sep}types${sep}`
 const CSS_PREFIX = '\0workbench-css:'
 const CSS_SUFFIX = '.mjs'
+const PACKAGE_ROOT = dirname(fileURLToPath(import.meta.url))
+const STYLE_LIFECYCLE_MODULE = resolve(PACKAGE_ROOT, 'lib/types/client/style-lifecycle.js')
 
 /** Runtime identities supplied by the DSH Client module table. */
 const CLIENT_EXTERNALS = new Set([
@@ -39,15 +42,10 @@ function cssInjectionModule(
 ): string {
   const tagId = `${PACKAGE_ID}/${basename(file)}`
   return [
+    `import { registerWorkbenchStyle } from ${JSON.stringify(STYLE_LIFECYCLE_MODULE)};`,
     `const css = ${JSON.stringify(css)};`,
     `const tagId = ${JSON.stringify(tagId)};`,
-    'if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {',
-    '  const tag = document.createElement("style");',
-    `  tag.dataset.plugin = ${JSON.stringify(PACKAGE_ID)};`,
-    '  tag.dataset.pluginCss = tagId;',
-    '  tag.textContent = css;',
-    '  document.head.appendChild(tag);',
-    '}',
+    'registerWorkbenchStyle(tagId, css);',
     `export default ${JSON.stringify(classes)};`,
   ].join('\n')
 }

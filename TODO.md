@@ -11,9 +11,19 @@
 - [x] Prove Host/Client HMR disposal removes Remote/Slot resources and closes SQLite after draining work.
 - [x] Verify built entries and real packed archives; record any source-linked publication limitation.
 
+## T02 — Owner initialization, login, and authorization gate (#3)
+
+- [x] Persist exactly one versioned Owner credential record through DSH Credentials; never put a password, recovery code, or session token in the business database.
+- [x] Hash the Owner password with Argon2id and issue a high-entropy recovery code exactly once at initialization.
+- [x] Establish bounded, revocable server-side sessions through a `Secure; HttpOnly; SameSite=Strict; Path=/` cookie.
+- [x] Route every Workbench Remote command/query through the same Owner authorization context; direct in-process calls without a principal must fail closed.
+- [x] Protect both the browser projection and its generated `/api/workbench/*` Remote carrier behind the Owner session gate.
+- [x] Provide a local, secret-safe recovery CLI that consumes the prior code, resets the password, invalidates every session, and prints one replacement code once.
+- [x] Prove setup races, password verification, cookie attributes, immediate logout, unauthenticated denial, recovery replay denial, HMR/disposal, restart, packed CLI, and real-browser behavior.
+
 ## Later tickets
 
-- [ ] T02+ authorization, transactional outbox/audit, Project domain, collaboration, files, AI-native analysis, automation, and production hardening remain intentionally outside T01.
+- [ ] T03+ transactional outbox/audit, Project domain, collaboration, files, AI-native analysis, automation, and production hardening remain intentionally outside T02.
 
 ## Definition of done
 

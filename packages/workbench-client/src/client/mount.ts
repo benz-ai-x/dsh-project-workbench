@@ -7,9 +7,12 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import { WorkbenchStatusController, type WorkbenchRemote } from './controller.ts'
-import { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
+import { OwnerAuthHttpAdapter, type OwnerAuthHttp } from './auth-http.ts'
+import { type WorkbenchRemote } from './controller.ts'
+import { OwnerController } from './owner-controller.ts'
+import { OwnerPage } from './OwnerPage.tsx'
 import { en, NS, zh, type WorkbenchKey } from './locales.ts'
+import { mountWorkbenchStyles } from './style-lifecycle.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -25,10 +28,13 @@ export const WORKBENCH_SLOT_PRIORITY = -100
 export const uiInject = ['remote.workbench', 'slots', 'locale', 'connection']
 
 /** Register the React-free model and pure page inside the UI child Fiber. */
-export function registerWorkbenchUi(ctx: ClientContext): void {
+export function registerWorkbenchUi(
+  ctx: ClientContext,
+  auth: OwnerAuthHttp = new OwnerAuthHttpAdapter(),
+): void {
   const workbench = ctx.get('remote.workbench') as WorkbenchRemote
   const connection = ctx.get('connection') as ConnectionHandle
-  const controller = new WorkbenchStatusController(workbench)
+  const controller = new OwnerController(auth, workbench)
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'project-workbench: dictionaries')
   ctx.effect(() => {
@@ -39,13 +45,25 @@ export function registerWorkbenchUi(ctx: ClientContext): void {
       hadGeneration = connected
     })
     const offReset = ctx.on('connection/reset', () => { void controller.connectionReset() })
-    void controller.refresh()
+    const checkExpiry = () => { controller.checkSessionExpiry() }
+    const checkVisibleExpiry = () => {
+      if (document.visibilityState === 'visible') checkExpiry()
+    }
+    if (typeof window !== 'undefined') window.addEventListener('focus', checkExpiry)
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', checkVisibleExpiry)
+    }
+    void controller.start()
     return async () => {
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', checkVisibleExpiry)
+      }
+      if (typeof window !== 'undefined') window.removeEventListener('focus', checkExpiry)
       offReset()
       offGeneration()
       await controller.dispose()
     }
-  }, 'project-workbench: status controller')
+  }, 'project-workbench: Owner controller')
 
   ctx.slots.inject('conversation', () => ctx.slots.register({
     name: 'conversation',
@@ -53,7 +71,7 @@ export function registerWorkbenchUi(ctx: ClientContext): void {
     locale: NS,
     registrant: '@benz-ai-x/dsh-project-workbench-client',
     inject: () => ({ controller }),
-  }, WorkbenchStatusPage))
+  }, OwnerPage))
 }
 
 /**
@@ -63,18 +81,34 @@ export function registerWorkbenchUi(ctx: ClientContext): void {
 export async function mountWorkbenchClient(
   ctx: ClientContext,
   contribution: TypertRemoteContribution,
+  auth: OwnerAuthHttp = new OwnerAuthHttpAdapter(),
 ): Promise<() => Promise<void>> {
-  const disposeRemote = await ctx.remote.$mount(contribution)
-  const ui = ctx.inject([...uiInject], registerWorkbenchUi)
+  const disposeStyles = mountWorkbenchStyles()
+  let disposeRemote: () => Promise<void>
+  try {
+    disposeRemote = await ctx.remote.$mount(contribution)
+  } catch (error) {
+    disposeStyles()
+    throw error
+  }
+  const ui = ctx.inject([...uiInject], uiContext => { registerWorkbenchUi(uiContext, auth) })
   try {
     await ui
   } catch (error) {
-    await ui.dispose()
-    await disposeRemote()
+    try {
+      await ui.dispose()
+    } finally {
+      disposeStyles()
+      await disposeRemote()
+    }
     throw error
   }
   return async () => {
-    await ui.dispose()
-    await disposeRemote()
+    try {
+      await ui.dispose()
+    } finally {
+      disposeStyles()
+      await disposeRemote()
+    }
   }
 }

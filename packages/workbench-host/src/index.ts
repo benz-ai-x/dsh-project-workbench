@@ -18,6 +18,7 @@ import {
   type WorkbenchExternalAdapters,
   type WorkbenchIdGenerator,
 } from './scenario.ts'
+import type { WorkbenchAuthorization } from './authorization.ts'
 import {
   SqliteWorkbenchRepository,
   type WorkbenchJournalMode,
@@ -25,6 +26,73 @@ import {
 
 export type * from './client.ts'
 export type * from './repository.ts'
+export {
+  V1OwnerAuthorizationPolicy,
+  WorkbenchAuthorizationContext,
+  ownerPrincipal,
+} from './authorization.ts'
+export type {
+  AuthorizationDecision,
+  AuthorizationPolicy,
+  AuthorizationRequest,
+  AuthorizedScope,
+  OwnerPrincipal,
+  OwnerPrincipalValidator,
+  WorkbenchAction,
+  WorkbenchAuthorization,
+} from './authorization.ts'
+export {
+  Config as OwnerAuthConfigSchema,
+  DEFAULT_OWNER_AUTH_MAX_REQUEST_BODY_BYTES,
+  LoginFailureThrottle,
+  MAX_OWNER_AUTH_REQUEST_BODY_BYTES,
+  OWNER_AUTH_API_PATH,
+  OWNER_AUTH_INITIALIZE_PATH,
+  OWNER_AUTH_LOGIN_PATH,
+  OWNER_AUTH_LOGOUT_PATH,
+  OWNER_AUTH_STATE_PATH,
+  OWNER_SESSION_COOKIE_NAME,
+  OwnerAuthService,
+  WORKBENCH_API_PATH,
+  ownerSessionClearCookie,
+  ownerSessionSetCookie,
+  ownerSessionToken,
+} from './owner-auth-service.ts'
+export type {
+  Config as OwnerAuthConfig,
+  OwnerAuthServiceInternals,
+} from './owner-auth-service.ts'
+export {
+  DEFAULT_OWNER_MAX_CONCURRENT_PASSWORD_JOBS,
+  DEFAULT_OWNER_MAX_QUEUED_PASSWORD_JOBS,
+  DEFAULT_OWNER_MAX_SESSIONS,
+  DEFAULT_OWNER_SESSION_LIFETIME_MINUTES,
+  OwnerAccess,
+  OwnerAuthFailure,
+  normalizeRecoveryCode,
+  secretDigest,
+} from './owner-access.ts'
+export type {
+  OwnerAccessClock,
+  OwnerAccessOptions,
+  OwnerAccessRandom,
+  OwnerRecoveryResult,
+  OwnerSessionGrant,
+} from './owner-access.ts'
+export {
+  DshOwnerCredentialStore,
+  OWNER_AUTH_CREDENTIAL_KEY,
+  OWNER_AUTH_RECORD_VERSION,
+  OwnerCredentialStateError,
+  decodeOwnerAuthRecord,
+} from './owner-credential-store.ts'
+export type {
+  OwnerAuthRecord,
+  OwnerCredentialStore,
+  OwnerIdentityRecord,
+  OwnerRecoveryRecord,
+  OwnerSessionRecord,
+} from './owner-credential-store.ts'
 export {
   noWorkbenchExternalAdapters,
   randomWorkbenchIds,
@@ -92,6 +160,7 @@ export interface WorkbenchServiceInternals {
   readonly ids?: WorkbenchIdGenerator
   readonly repository?: WorkbenchRepository
   readonly adapters?: WorkbenchExternalAdapters
+  readonly authorization?: WorkbenchAuthorization
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -103,7 +172,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Cordis class plugin owning the singleton status command/query path. */
 export class WorkbenchService extends TypertRemoteService {
-  static inject = []
+  static inject = ['workbenchAuth']
   static Config = Config
 
   /** Highest-level seam shared with all future feature scenarios. */
@@ -122,6 +191,7 @@ export class WorkbenchService extends TypertRemoteService {
       ids: internals.ids ?? randomWorkbenchIds,
       repository,
       adapters: internals.adapters ?? noWorkbenchExternalAdapters,
+      authorization: internals.authorization ?? ctx.workbenchAuth.authorization,
       maxStatusLength: resolved.maxStatusLength,
     })
   }

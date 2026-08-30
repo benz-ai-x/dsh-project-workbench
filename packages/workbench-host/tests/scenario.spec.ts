@@ -7,11 +7,22 @@ import type {
   WorkbenchStatusSnapshot,
 } from '../src/index.ts'
 import { WorkbenchScenario } from '../src/index.ts'
+import { WorkbenchAuthorizationContext, type WorkbenchAuthorization } from '../src/authorization.ts'
+
+const authorization = Object.freeze({
+  require: () => Promise.resolve(Object.freeze({
+    ownerId: 'owner-test',
+    organizationId: 'organization-test',
+    teamId: 'team-test',
+  })),
+  filterProjection: <T>(_action: string, projection: T) => Promise.resolve(projection),
+})
 
 class MemoryRepository implements WorkbenchRepository {
   state: WorkbenchStatusSnapshot | null = null
   openCalls = 0
   closeCalls = 0
+  readCalls = 0
   writeCalls = 0
   onSnapshot: ((signal: AbortSignal) => Promise<void>) | undefined
   onSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
@@ -22,6 +33,7 @@ class MemoryRepository implements WorkbenchRepository {
   }
 
   async snapshot(signal: AbortSignal): Promise<WorkbenchStatusSnapshot | null> {
+    this.readCalls += 1
     await this.onSnapshot?.(signal)
     return this.state === null ? null : { ...this.state }
   }
@@ -65,7 +77,10 @@ class MemoryRepository implements WorkbenchRepository {
   }
 }
 
-function createScenario(repository = new MemoryRepository()): {
+function createScenario(
+  repository = new MemoryRepository(),
+  access: WorkbenchAuthorization = authorization,
+): {
   readonly repository: MemoryRepository
   readonly scenario: WorkbenchScenario
 } {
@@ -82,6 +97,7 @@ function createScenario(repository = new MemoryRepository()): {
       clock: { now: () => instants.shift() ?? new Date('2026-08-31T03:04:05.000Z') },
       ids: { nextStatusId: () => ids.shift() ?? 'status-fallback' },
       adapters,
+      authorization: access,
       maxStatusLength: 12,
     }),
   }
@@ -168,6 +184,24 @@ describe('WorkbenchScenario', () => {
       expectedRevision: null,
     }, cancelled.signal).catch((reason: unknown) => reason)
     expect(failureCode(error)).toBe('cancelled')
+    expect(repository.writeCalls).toBe(0)
+
+    await scenario.close()
+  })
+
+  it('fails closed at the shared authorization seam before reading or writing persistence', async () => {
+    const repository = new MemoryRepository()
+    const { scenario } = createScenario(repository, new WorkbenchAuthorizationContext())
+    await scenario.open()
+
+    const readError = await scenario.snapshot().catch((reason: unknown) => reason)
+    expect(failureCode(readError)).toBe('unauthorized')
+    const writeError = await scenario.setStatus({
+      message: 'Must not pass',
+      expectedRevision: null,
+    }, new AbortController().signal).catch((reason: unknown) => reason)
+    expect(failureCode(writeError)).toBe('unauthorized')
+    expect(repository.readCalls).toBe(0)
     expect(repository.writeCalls).toBe(0)
 
     await scenario.close()

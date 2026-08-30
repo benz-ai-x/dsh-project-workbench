@@ -59,6 +59,14 @@ export interface WorkbenchRemote {
   ): Promise<RemoteResult<SetStatusResult>>
 }
 
+/** Optional lifecycle hooks owned by the authenticated Owner shell. */
+export interface WorkbenchStatusControllerOptions {
+  /** Fail-closed admission check run before every protected local/Remote operation. */
+  readonly onBeforeProtectedOperation?: () => boolean
+  /** Revalidate the Owner session after a protected carrier failure. */
+  readonly onTransportFailure?: () => void
+}
+
 const INITIAL_STATE: WorkbenchClientState = Object.freeze({
   phase: 'loading',
   snapshot: null,
@@ -107,7 +115,10 @@ export class WorkbenchStatusController {
   private disposed = false
   private disposal: Promise<void> | null = null
 
-  constructor(private readonly remote: WorkbenchRemote) {}
+  constructor(
+    private readonly remote: WorkbenchRemote,
+    private readonly options: WorkbenchStatusControllerOptions = {},
+  ) {}
 
   /** Stable useSyncExternalStore getter. */
   readonly getSnapshot = (): WorkbenchClientState => this.state
@@ -121,13 +132,13 @@ export class WorkbenchStatusController {
 
   /** Replace the local editor draft without changing authoritative state. */
   setDraft(value: string): void {
-    if (this.disposed || value === this.state.draft) return
+    if (!this.admitProtectedOperation() || value === this.state.draft) return
     this.publish({ ...this.state, draft: value, draftDirty: true })
   }
 
   /** Restore the editor from the latest authoritative snapshot. */
   resetDraft(): void {
-    if (this.disposed) return
+    if (!this.admitProtectedOperation()) return
     const draft = this.state.snapshot?.message ?? ''
     const clearsConflict = this.state.phase === 'conflict'
     if (draft === this.state.draft && !this.state.draftDirty && !clearsConflict) return
@@ -145,6 +156,7 @@ export class WorkbenchStatusController {
    * disposed controller is ignored.
    */
   refresh(): Promise<void> {
+    if (!this.admitProtectedOperation()) return Promise.resolve()
     return this.track(this.doRefresh())
   }
 
@@ -172,6 +184,7 @@ export class WorkbenchStatusController {
           phase: 'error',
           issue: transportIssue(result.error),
         })
+        this.notifyTransportFailure()
         return
       }
       this.adoptSnapshot(detachSnapshot(result.value))
@@ -182,6 +195,7 @@ export class WorkbenchStatusController {
         phase: 'error',
         issue: transportIssue(error),
       })
+      this.notifyTransportFailure()
     } finally {
       if (this.refreshAbort === abort) this.refreshAbort = null
     }
@@ -203,7 +217,7 @@ export class WorkbenchStatusController {
 
   /** Preserve the last value across a connection generation and repull it. */
   async connectionReset(): Promise<void> {
-    if (this.disposed) return
+    if (!this.admitProtectedOperation()) return
     ++this.refreshEpoch
     this.cancelRefresh()
     this.cancelMutation()
@@ -221,6 +235,7 @@ export class WorkbenchStatusController {
    * conflicts remain distinct; both preserve the recoverable draft.
    */
   save(): Promise<void> {
+    if (!this.admitProtectedOperation()) return Promise.resolve()
     return this.track(this.doSave())
   }
 
@@ -258,6 +273,7 @@ export class WorkbenchStatusController {
           pending: false,
           issue: transportIssue(result.error),
         })
+        this.notifyTransportFailure()
         return
       }
       this.adoptMutation(result.value)
@@ -270,6 +286,7 @@ export class WorkbenchStatusController {
         pending: false,
         issue: transportIssue(error),
       })
+      this.notifyTransportFailure()
     }
   }
 
@@ -283,6 +300,7 @@ export class WorkbenchStatusController {
     this.refreshAbort = null
     this.mutationAbort?.abort(new Error('Workbench Client disposed'))
     this.mutationAbort = null
+    this.state = INITIAL_STATE
     this.listeners.clear()
     this.disposal = Promise.allSettled([...this.inFlight]).then(() => undefined)
     return this.disposal
@@ -320,6 +338,24 @@ export class WorkbenchStatusController {
       () => { this.inFlight.delete(pending) },
     )
     return pending
+  }
+
+  private notifyTransportFailure(): void {
+    try {
+      this.options.onTransportFailure?.()
+    } catch (error) {
+      console.error('[workbench-client] transport-failure observer failed:', error)
+    }
+  }
+
+  private admitProtectedOperation(): boolean {
+    if (this.disposed) return false
+    try {
+      return this.options.onBeforeProtectedOperation?.() ?? true
+    } catch (error) {
+      console.error('[workbench-client] protected-operation admission failed:', error)
+      return false
+    }
   }
 
   private adoptSnapshot(snapshot: WorkbenchStatusSnapshot | null): void {

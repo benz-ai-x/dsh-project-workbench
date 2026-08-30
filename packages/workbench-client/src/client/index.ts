@@ -12,8 +12,22 @@ export type {
   WorkbenchIssue,
   WorkbenchPhase,
   WorkbenchRemote,
+  WorkbenchStatusControllerOptions,
   WorkbenchTransportIssue,
 } from './controller.ts'
+export { OWNER_AUTH_ENDPOINTS, OwnerAuthHttpAdapter } from './auth-http.ts'
+export type { OwnerAuthFetch, OwnerAuthHttp } from './auth-http.ts'
+export { OwnerController } from './owner-controller.ts'
+export type {
+  OwnerControllerOptions,
+  OwnerClientState,
+  OwnerIssue,
+  OwnerIssueCode,
+  OwnerOperation,
+  OwnerPhase,
+} from './owner-controller.ts'
+export { OwnerPage } from './OwnerPage.tsx'
+export type { OwnerPageProps } from './OwnerPage.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

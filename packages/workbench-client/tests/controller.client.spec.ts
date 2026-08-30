@@ -208,7 +208,6 @@ describe('WorkbenchStatusController', () => {
     await controller.refresh()
     controller.setDraft('late')
     const saving = controller.save()
-    const beforeDispose = controller.getSnapshot()
     const observer = vi.fn()
     controller.subscribe(observer)
 
@@ -216,7 +215,13 @@ describe('WorkbenchStatusController', () => {
     expect(signal?.aborted).toBe(true)
     mutation.resolve(ok({ ok: true, value: snapshot(2, 'late') }))
     await Promise.all([saving, disposal])
-    expect(controller.getSnapshot()).toBe(beforeDispose)
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      snapshot: null,
+      draft: '',
+      draftDirty: false,
+      pending: false,
+    })
     expect(observer).not.toHaveBeenCalled()
   })
 

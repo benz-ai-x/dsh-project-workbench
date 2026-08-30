@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "pnpm@11.7.0",
   "dependencies": {
+    "@benz-ai-x/dsh-project-workbench": "workspace:*",
     "@benz-ai-x/dsh-project-workbench-bundle": "workspace:*"
   },
   "dsh": {

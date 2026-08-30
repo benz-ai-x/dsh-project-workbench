@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
 import {
   existsSync,
   mkdirSync,
@@ -33,11 +34,20 @@ const PAGE_TIMEOUT_MS = 30_000
 const SHUTDOWN_TIMEOUT_MS = 10_000
 const MAX_CAPTURED_OUTPUT = 512 * 1024
 const tempPrefixName = 'dsh-workbench-browser-'
+const CLIENT_PACKAGE_ID = '@benz-ai-x/dsh-project-workbench-client'
+const OWNER_SESSION_COOKIE_NAME = '__Host-dsh-workbench-session'
+const OWNER_AUTH_STATE_PATH = '/api/workbench-auth/state'
+const OWNER_AUTH_INITIALIZE_PATH = '/api/workbench-auth/initialize'
+const WORKBENCH_SNAPSHOT_PATH = '/api/workbench/snapshot'
+const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
+const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
 let browser
 let tempRoot
+let visualArtifactRoot
 let pendingBundleRestore
 let cleanupStarted = false
+let reportedMobileShell = false
 const runningHosts = new Set()
 
 function chromeCandidates() {
@@ -82,7 +92,9 @@ function appendBounded(current, chunk) {
 }
 
 function redact(value) {
-  return value.replace(/([?&]token=)[^&\s)]+/gu, '$1<redacted>')
+  return value
+    .replace(/([?&]token=)[^&\s)]+/gu, '$1<redacted>')
+    .replace(/\bWB1-(?:[A-Z2-9]{4}-){7}[A-Z2-9]{4}\b/gu, '<redacted-recovery-code>')
 }
 
 function commandFailure(label, code, signal, stdout, stderr) {
@@ -98,12 +110,13 @@ async function runCommand(label, command, args, options) {
     cwd: options.cwd,
     env: options.env,
     shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [options.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   })
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', chunk => { stdout = appendBounded(stdout, chunk) })
   child.stderr.on('data', chunk => { stderr = appendBounded(stderr, chunk) })
+  if (options.stdin !== undefined) child.stdin.end(options.stdin)
 
   const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
     const timeout = setTimeout(() => {
@@ -119,10 +132,10 @@ async function runCommand(label, command, args, options) {
       resolveOutcome({ code, signal })
     })
   })
-  if (outcome.code !== 0) {
+  if (outcome.code !== 0 && options.allowFailure !== true) {
     throw commandFailure(label, outcome.code, outcome.signal, stdout, stderr)
   }
-  return { stdout, stderr }
+  return { ...outcome, stdout, stderr }
 }
 
 function scrubbedRuntimeEnvironment(dshHome, agentsHome) {
@@ -265,11 +278,12 @@ async function openCheckedPage(readyUrl, label) {
   const context = await browser.newContext({
     locale: 'zh-CN',
     serviceWorkers: 'block',
+    viewport: DESKTOP_VIEWPORT,
   })
   await context.route('**/*', async route => {
     const url = route.request().url()
     if (isLoopbackBrowserUrl(url)) {
-      await route.continue()
+      await route.fallback()
       return
     }
     errors.push(`${label}: blocked non-loopback request ${url}`)
@@ -303,9 +317,10 @@ async function openCheckedPage(readyUrl, label) {
   return { context, errors, page, requests }
 }
 
-async function assertNoBrowserErrors(journey) {
+async function assertNoBrowserErrors(journey, allowed = []) {
   await journey.page.waitForTimeout(250)
-  assert.deepEqual(journey.errors, [], journey.errors.join('\n'))
+  const unexpected = journey.errors.filter(value => !allowed.some(pattern => pattern.test(value)))
+  assert.deepEqual(unexpected, [], unexpected.join('\n'))
 }
 
 async function dismissHarnessOnboarding(page) {
@@ -331,10 +346,347 @@ async function dismissHarnessOnboarding(page) {
   throw new Error(`Harness onboarding did not expose its credential-free continuation: ${JSON.stringify(dialogs)}`)
 }
 
+async function installNetworkEvidence(page) {
+  const cdp = await page.context().newCDPSession(page)
+  const requestUrls = new Map()
+  const requestHeaders = new Map()
+  const responseHeaders = new Map()
+  cdp.on('Network.requestWillBeSent', event => {
+    requestUrls.set(event.requestId, event.request.url)
+  })
+  cdp.on('Network.requestWillBeSentExtraInfo', event => {
+    requestHeaders.set(event.requestId, event.headers)
+  })
+  cdp.on('Network.responseReceivedExtraInfo', event => {
+    responseHeaders.set(event.requestId, event.headers)
+  })
+  await cdp.send('Network.enable')
+  return { cdp, requestHeaders, requestUrls, responseHeaders }
+}
+
+function headerValue(headers, name) {
+  if (headers === undefined) return undefined
+  const expected = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === expected) return String(value)
+  }
+  return undefined
+}
+
+function requestEvidenceByMarker(evidence, marker) {
+  for (const [requestId, headers] of evidence.requestHeaders) {
+    if (headerValue(headers, 'x-workbench-e2e-probe') !== marker) continue
+    return {
+      headers,
+      url: evidence.requestUrls.get(requestId),
+    }
+  }
+  return undefined
+}
+
+function responseHeaderForPath(evidence, path, name) {
+  for (const [requestId, url] of evidence.requestUrls) {
+    if (new URL(url).pathname !== path) continue
+    const value = headerValue(evidence.responseHeaders.get(requestId), name)
+    if (value !== undefined) return value
+  }
+  return undefined
+}
+
+async function ownerCookieFromChrome(evidence) {
+  const result = await evidence.cdp.send('Network.getAllCookies')
+  const matches = result.cookies.filter(cookie => cookie.name === OWNER_SESSION_COOKIE_NAME)
+  assert.equal(matches.length, 1, 'Chrome did not retain exactly one Owner session cookie')
+  const cookie = matches[0]
+  assert.equal(cookie.secure, true, 'Owner session cookie is not Secure')
+  assert.equal(cookie.httpOnly, true, 'Owner session cookie is not HttpOnly')
+  assert.equal(cookie.sameSite, 'Strict', 'Owner session cookie is not SameSite=Strict')
+  assert.equal(cookie.path, '/', 'Owner session cookie does not use Path=/')
+  assert.equal(cookie.domain, '127.0.0.1', 'Owner session cookie is not host-only on loopback')
+  assert.ok(cookie.value.length >= 40, 'Owner session cookie has unexpectedly little entropy')
+  return cookie
+}
+
+async function assertOwnerCookieRoundTrip(page, evidence) {
+  const marker = `state-${Date.now().toString(36)}`
+  const result = await page.evaluate(async ({ marker, path }) => {
+    const response = await fetch(path, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'x-workbench-e2e-probe': marker },
+    })
+    const payload = await response.json()
+    return {
+      ok: response.ok,
+      state: payload?.ok === true ? payload.value?.state : undefined,
+      status: response.status,
+    }
+  }, { marker, path: OWNER_AUTH_STATE_PATH })
+  assert.equal(result.status, 200)
+  assert.equal(result.ok, true)
+  assert.equal(result.state, 'signed-in')
+  await waitForCondition(
+    () => requestEvidenceByMarker(evidence, marker) !== undefined,
+    PAGE_TIMEOUT_MS,
+    'Chrome Owner-cookie request evidence',
+  )
+  const request = requestEvidenceByMarker(evidence, marker)
+  assert.equal(new URL(request.url).pathname, OWNER_AUTH_STATE_PATH)
+  const cookieHeader = headerValue(request.headers, 'cookie')
+  assert.ok(
+    cookieHeader?.includes(`${OWNER_SESSION_COOKIE_NAME}=`) === true,
+    'Chrome did not send the retained HttpOnly Owner cookie to the Host',
+  )
+}
+
+async function rawHttpRequest(url, headers) {
+  const target = new URL(url)
+  return await new Promise((resolveRequest, rejectRequest) => {
+    const request = httpRequest({
+      host: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: 'GET',
+      headers,
+    }, response => {
+      const chunks = []
+      response.on('data', chunk => { chunks.push(chunk) })
+      response.once('error', rejectRequest)
+      response.once('end', () => {
+        resolveRequest({
+          body: Buffer.concat(chunks).toString('utf8'),
+          headers: response.headers,
+          status: response.statusCode,
+        })
+      })
+    })
+    request.once('error', rejectRequest)
+    request.end()
+  })
+}
+
+async function assertRealCarrierForbidden(page, evidence) {
+  const allCookies = await evidence.cdp.send('Network.getAllCookies')
+  const host = new URL(page.url()).hostname
+  const cookies = allCookies.cookies.filter(cookie => cookie.domain === host)
+  assert.ok(
+    cookies.some(cookie => cookie.name === OWNER_SESSION_COOKIE_NAME),
+    'real 403 probe did not carry the established Owner cookie',
+  )
+  assert.ok(
+    cookies.some(cookie => cookie.name !== OWNER_SESSION_COOKIE_NAME),
+    'real 403 probe did not carry the established DSH launch-session cookie',
+  )
+  const response = await rawHttpRequest(
+    new URL(OWNER_AUTH_STATE_PATH, page.url()),
+    {
+      cookie: cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; '),
+      origin: 'https://attacker.invalid',
+      'sec-fetch-site': 'cross-site',
+    },
+  )
+  assert.equal(response.status, 403, 'real Connection Host/Origin fence did not reject cross-site input')
+  assert.equal(response.body, 'forbidden')
+  assert.equal(response.headers['cache-control'], 'no-store')
+}
+
+async function expectCarrierDenied(page, evidence, expectedOwnerCookie) {
+  const marker = `carrier-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  const result = await page.evaluate(async ({ marker, path }) => {
+    const response = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: {
+        'content-type': 'application/json',
+        'x-workbench-e2e-probe': marker,
+      },
+      body: '{}',
+    })
+    return { body: await response.text(), status: response.status }
+  }, { marker, path: WORKBENCH_SNAPSHOT_PATH })
+  assert.equal(result.status, 401, 'protected Workbench carrier did not deny the request')
+  assert.equal(result.body, 'unauthorized')
+  await waitForCondition(
+    () => requestEvidenceByMarker(evidence, marker) !== undefined,
+    PAGE_TIMEOUT_MS,
+    'protected carrier request evidence',
+  )
+  const request = requestEvidenceByMarker(evidence, marker)
+  assert.equal(new URL(request.url).pathname, WORKBENCH_SNAPSHOT_PATH)
+  const sentOwnerCookie = headerValue(request.headers, 'cookie')
+    ?.includes(`${OWNER_SESSION_COOKIE_NAME}=`) === true
+  assert.equal(sentOwnerCookie, expectedOwnerCookie)
+}
+
+function countRequestsToPath(journey, path) {
+  return journey.requests.filter(value => new URL(value).pathname === path).length
+}
+
+async function assertSecretsAbsentFromBrowserStorage(page, secrets) {
+  const surfaces = await page.evaluate(() => ({
+    href: location.href,
+    localStorage: Object.entries(localStorage),
+    sessionStorage: Object.entries(sessionStorage),
+  }))
+  const serialized = JSON.stringify(surfaces)
+  for (const secret of secrets) {
+    assert.ok(!serialized.includes(secret), 'an Owner secret escaped into URL or browser storage')
+  }
+}
+
+async function assertNoHorizontalOverflow(page, label) {
+  const dimensions = await page.evaluate(() => ({
+    body: document.body.scrollWidth,
+    document: document.documentElement.scrollWidth,
+    viewport: document.documentElement.clientWidth,
+  }))
+  assert.ok(
+    Math.max(dimensions.body, dimensions.document) <= dimensions.viewport + 1,
+    `${label}: page has horizontal overflow (body=${String(dimensions.body)}, document=${String(dimensions.document)}, viewport=${String(dimensions.viewport)})`,
+  )
+}
+
+async function assertWithinViewport(locator, page, label) {
+  const box = await locator.boundingBox()
+  assert.notEqual(box, null, `${label}: element has no rendered box`)
+  const viewport = page.viewportSize()
+  assert.notEqual(viewport, null, `${label}: page has no viewport`)
+  assert.ok(
+    box.x >= -1 && box.x + box.width <= viewport.width + 1,
+    `${label}: element overflows viewport (x=${String(box.x)}, width=${String(box.width)}, viewport=${String(viewport.width)})`,
+  )
+}
+
+async function captureVisual(page, name, options = {}) {
+  if (visualArtifactRoot === undefined) return
+  const recovery = options.recovery
+  const recoveryLocator = recovery === undefined
+    ? undefined
+    : page.locator('code[aria-labelledby="workbench-recovery-label"]')
+  if (recoveryLocator !== undefined) {
+    const placeholder = 'WB1-7J9K-M2NP-Q4RS-T6VW-X8YZ-3BCD-5FGH-7JKM'
+    assert.equal(placeholder.length, recovery.length)
+    await recoveryLocator.evaluate((node, value) => { node.textContent = value }, placeholder)
+  }
+  try {
+    await page.screenshot({
+      animations: 'disabled',
+      fullPage: true,
+      path: join(visualArtifactRoot, `${name}.png`),
+    })
+    await assertNoHorizontalOverflow(page, name)
+  } finally {
+    if (recoveryLocator !== undefined) {
+      await recoveryLocator.evaluate((node, value) => { node.textContent = value }, recovery)
+    }
+  }
+}
+
+async function useViewport(page, viewport, work) {
+  const previous = page.viewportSize()
+  await page.setViewportSize(viewport)
+  if (viewport.width === MOBILE_VIEWPORT.width && previous?.width !== viewport.width) {
+    // AppFrame seeds its responsive store from window.innerWidth. Reloading at
+    // the target viewport mirrors a real mobile navigation and avoids testing
+    // an intermediate wide-to-narrow transition frame.
+    await page.reload({ waitUntil: 'load' })
+    await dismissHarnessOnboarding(page)
+    if (!reportedMobileShell) {
+      reportedMobileShell = true
+      process.stdout.write(
+        'INFO 375px viewport: navigated at mobile width so the Harness shell starts on its compact rail\n',
+      )
+    }
+  }
+  await page.waitForTimeout(250)
+  await work()
+}
+
+async function assertVisibleKeyboardFocus(locator, label) {
+  const page = locator.page()
+  await page.evaluate(() => {
+    document.body.tabIndex = -1
+    document.body.focus()
+    document.body.removeAttribute('tabindex')
+  })
+  let reached = false
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    await page.keyboard.press('Tab')
+    reached = await locator.evaluate(element => document.activeElement === element)
+    if (reached) break
+  }
+  assert.equal(reached, true, `${label}: control is not reachable by keyboard Tab navigation`)
+  const focus = await locator.evaluate(element => {
+    const style = getComputedStyle(element)
+    return {
+      active: document.activeElement === element,
+      boxShadow: style.boxShadow,
+      focusVisible: element.matches(':focus-visible'),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+    }
+  })
+  assert.equal(focus.active, true, `${label}: keyboard navigation did not focus the control`)
+  assert.equal(focus.focusVisible, true, `${label}: keyboard focus is not represented by :focus-visible`)
+  assert.ok(
+    focus.boxShadow !== 'none'
+      || (focus.outlineStyle !== 'none' && focus.outlineWidth !== '0px'),
+    `${label}: focus-visible has no visual indicator`,
+  )
+}
+
+async function invokeRecoveryCli(profileDir, dshHome, env, recoveryCode, password, allowFailure = false) {
+  const stdin = Buffer.from(`${recoveryCode}\n${password}\n${password}\n`, 'utf8')
+  try {
+    return await runCommand(
+      'built dsh-workbench offline recovery',
+      'pnpm',
+      [
+        '--dir', profileDir,
+        'exec', 'dsh-workbench',
+        'owner', 'recover',
+        '--dsh-home', dshHome,
+        '--stdin',
+      ],
+      {
+        allowFailure,
+        cwd: repositoryRoot,
+        env,
+        stdin,
+        timeoutMs: COMMAND_TIMEOUT_MS,
+      },
+    )
+  } finally {
+    stdin.fill(0)
+  }
+}
+
+function replacementRecoveryCode(outcome) {
+  assert.equal(outcome.code, 0, 'offline recovery did not exit successfully')
+  const lines = outcome.stdout.split(/\r?\n/gu).filter(Boolean)
+  assert.equal(lines.length, 1, 'offline recovery stdout must contain exactly one replacement code')
+  assert.ok(
+    /^WB1-(?:[A-Z2-9]{4}-){7}[A-Z2-9]{4}$/u.test(lines[0]),
+    'offline recovery stdout was not one canonical recovery code',
+  )
+  return lines[0]
+}
+
+function assertRecoveryRejected(outcome) {
+  assert.equal(outcome.code, 1, 'a consumed recovery code was unexpectedly accepted')
+  assert.ok(outcome.stdout === '', 'failed recovery leaked data on stdout')
+  assert.ok(
+    outcome.stderr.includes('invalid or has already been used'),
+    'failed recovery did not report the stable consumed-code result',
+  )
+}
+
 async function waitForCondition(predicate, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (predicate()) return
+    if (await predicate()) return
     await new Promise(resolveWait => setTimeout(resolveWait, 50))
   }
   throw new Error(`${label} did not happen within ${String(timeoutMs)} ms`)
@@ -369,21 +721,23 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const requestFence = journey.requests.length
   const original = readFileSync(bundlePath)
   pendingBundleRestore = { path: bundlePath, bytes: original }
+  const originalSource = original.toString('utf8')
+  const cssPrefix = `registerWorkbenchStyle("${CLIENT_PACKAGE_ID}/WorkbenchStatusPage.module.css", "`
+  const cssAt = originalSource.indexOf(cssPrefix)
+  assert.ok(cssAt >= 0, 'built Client bundle did not expose the status CSS registration')
+  assert.equal(originalSource.lastIndexOf(cssPrefix), cssAt, 'built Client bundle duplicated the status CSS registration')
+  const cssMarker = ':root{--workbench-e2e-css-hmr:applied}'
+  assert.equal(originalSource.includes(cssMarker), false)
+  const insertion = cssAt + cssPrefix.length
+  const changed = originalSource.slice(0, insertion) + cssMarker + originalSource.slice(insertion)
+  const initialStyleCount = await page.locator(
+    `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
+  ).count()
+  assert.equal(initialStyleCount, 2, 'Workbench Client did not own exactly two CSS Module resources')
 
-  // First exercise the safest possible stat change. The Host hashes bytes, so
-  // an equal rewrite intentionally produces no rebuilt frame on current DSH.
-  writeFileSync(bundlePath, original)
-  let replaced = false
-  try {
-    await page.waitForFunction(surface => !surface.isConnected, oldSurface, { timeout: 1_500 })
-    replaced = true
-  } catch (error) {
-    if (error?.name !== 'TimeoutError') throw error
-  }
-  if (!replaced) {
-    // One trailing newline changes the bundle hash without changing its lazy-CJS semantics.
-    writeFileSync(bundlePath, Buffer.concat([original, Buffer.from('\n')]))
-  }
+  // Change actual inline CSS bytes: stale tag reuse now fails this journey,
+  // while a lifecycle-owned HMR replacement updates the live document.
+  writeFileSync(bundlePath, changed)
 
   await page.waitForFunction(surface => !surface.isConnected, oldSurface, {
     timeout: PAGE_TIMEOUT_MS,
@@ -396,6 +750,15 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   assert.equal(await projection.textContent(), message)
   assert.equal(await restored.locator('#workbench-status-editor').inputValue(), message)
   assert.equal(await page.evaluate(() => window.__workbenchE2ePageIdentity), pageIdentity)
+  await page.waitForFunction(marker => getComputedStyle(document.documentElement)
+    .getPropertyValue('--workbench-e2e-css-hmr').trim() === marker, 'applied')
+  const styleEvidence = await page.locator(
+    `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
+  ).evaluateAll((styles, marker) => ({
+    count: styles.length,
+    marked: styles.filter(style => style.textContent?.includes(marker) === true).length,
+  }), cssMarker)
+  assert.deepEqual(styleEvidence, { count: initialStyleCount, marked: 1 })
   assert.ok(journey.requests.slice(requestFence).some(url =>
     decodeURIComponent(url).includes('@benz-ai-x/dsh-project-workbench-client/client.js')),
   'browser did not request the rebuilt Workbench Client bundle')
@@ -440,6 +803,7 @@ async function main() {
     dshBin,
     chromeExecutable,
     join(repositoryRoot, 'packages/workbench-host/lib/index.js'),
+    join(repositoryRoot, 'packages/workbench-host/lib/recover-cli.js'),
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
   ]) {
     assert.ok(existsSync(required), `required built artifact is missing: ${required}`)
@@ -447,6 +811,11 @@ async function main() {
 
   tempRoot = mkdtempSync(join(tmpdir(), tempPrefixName))
   assertSafeTempRoot(tempRoot)
+  const configuredVisualRoot = process.env.DSH_WORKBENCH_E2E_VISUAL_OUTPUT?.trim()
+  visualArtifactRoot = configuredVisualRoot === undefined || configuredVisualRoot === ''
+    ? join(tempRoot, 'visuals')
+    : resolve(configuredVisualRoot)
+  mkdirSync(visualArtifactRoot, { recursive: true })
   const dshHome = join(tempRoot, 'home')
   const agentsHome = join(tempRoot, 'agents')
   const projectDir = join(tempRoot, 'project')
@@ -496,11 +865,145 @@ async function main() {
     ],
   })
 
-  const message = `T01 browser restart proof ${new Date().toISOString()}`
+  const initialPassword = `T02 Owner initial ${new Date().toISOString()}!`
+  const wrongPassword = 'T02 deliberately wrong password!'
+  const firstRecoveredPassword = `T02 Owner recovered once ${new Date().toISOString()}!`
+  const finalRecoveredPassword = `T02 Owner recovered twice ${new Date().toISOString()}!`
+  const message = `T02 authenticated browser restart proof ${new Date().toISOString()}`
+  const expectedHttpError = /(?:401|Unauthorized)/u
+
+  // Fresh browser: setup is visible, but the protected projection is neither
+  // requested nor rendered before the Owner session exists.
   const first = await startDsh(projectDir, runtimeEnv)
   const firstJourney = await openCheckedPage(first.readyUrl, 'initial boot')
-  await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
   await dismissHarnessOnboarding(firstJourney.page)
+  const firstNetwork = await installNetworkEvidence(firstJourney.page)
+  const setupPassword = firstJourney.page.locator('#workbench-owner-password')
+  const setupConfirmation = firstJourney.page.locator('#workbench-owner-confirmation')
+  await setupPassword.waitFor({ state: 'visible' })
+  assert.equal(await firstJourney.page.locator('#workbench-login-password').count(), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
+  await captureVisual(firstJourney.page, '01-setup-desktop')
+  await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
+    await setupPassword.waitFor({ state: 'visible' })
+    await captureVisual(firstJourney.page, '02-setup-mobile-375')
+    await assertWithinViewport(setupPassword, firstJourney.page, 'mobile setup password')
+    await assertVisibleKeyboardFocus(setupPassword, 'mobile setup password')
+  })
+
+  await expectCarrierDenied(firstJourney.page, firstNetwork, false)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 1)
+  assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+
+  // Hold the real initialize request briefly so the actual disabled/pending
+  // UI is observable rather than inferred from component internals.
+  let releaseInitialization
+  const initializationGate = new Promise(resolveGate => { releaseInitialization = resolveGate })
+  await firstJourney.page.route(`**${OWNER_AUTH_INITIALIZE_PATH}`, async route => {
+    await initializationGate
+    await route.fallback()
+  }, { times: 1 })
+  await setupPassword.fill(initialPassword)
+  await setupConfirmation.fill(initialPassword)
+  const initializeButton = firstJourney.page.locator('form button[type="submit"]')
+  const initializationClick = initializeButton.click()
+  try {
+    await firstJourney.page.waitForFunction(() => {
+      const password = document.querySelector('#workbench-owner-password')
+      const confirmation = document.querySelector('#workbench-owner-confirmation')
+      const submit = document.querySelector('form button[type="submit"]')
+      return password?.disabled === true
+        && confirmation?.disabled === true
+        && submit?.disabled === true
+    })
+    await captureVisual(firstJourney.page, '03-setup-pending-disabled')
+  } finally {
+    releaseInitialization()
+  }
+  await initializationClick
+
+  const recoveryLocator = firstJourney.page
+    .locator('code[aria-labelledby="workbench-recovery-label"]')
+  await recoveryLocator.waitFor({ state: 'visible' })
+  const recoveryCode = (await recoveryLocator.textContent())?.trim()
+  assert.ok(
+    typeof recoveryCode === 'string'
+      && /^WB1-(?:[A-Z2-9]{4}-){7}[A-Z2-9]{4}$/u.test(recoveryCode),
+    'browser did not render one canonical offline recovery code',
+  )
+  const recoveryOccurrences = await firstJourney.page.evaluate(
+    code => document.body.innerText.split(code).length - 1,
+    recoveryCode,
+  )
+  assert.equal(recoveryOccurrences, 1, 'initial recovery code was rendered more than once')
+  await assertSecretsAbsentFromBrowserStorage(
+    firstJourney.page,
+    [initialPassword, recoveryCode],
+  )
+
+  await waitForCondition(
+    () => responseHeaderForPath(firstNetwork, OWNER_AUTH_INITIALIZE_PATH, 'set-cookie') !== undefined,
+    PAGE_TIMEOUT_MS,
+    'Owner initialize Set-Cookie response evidence',
+  )
+  const setCookie = responseHeaderForPath(
+    firstNetwork,
+    OWNER_AUTH_INITIALIZE_PATH,
+    'set-cookie',
+  )
+  assert.ok(setCookie?.startsWith(`${OWNER_SESSION_COOKIE_NAME}=`) === true)
+  assert.ok(/(?:^|;)\s*Path=\/(?:;|$)/iu.test(setCookie), 'Owner cookie is missing Path=/')
+  assert.ok(/(?:^|;)\s*Secure(?:;|$)/iu.test(setCookie), 'Owner cookie is missing Secure')
+  assert.ok(/(?:^|;)\s*HttpOnly(?:;|$)/iu.test(setCookie), 'Owner cookie is missing HttpOnly')
+  assert.ok(/(?:^|;)\s*SameSite=Strict(?:;|$)/iu.test(setCookie), 'Owner cookie is missing SameSite=Strict')
+  assert.ok(!/(?:^|;)\s*Domain=/iu.test(setCookie), 'Owner cookie unexpectedly declares Domain')
+
+  await ownerCookieFromChrome(firstNetwork)
+  assert.ok(
+    !(await firstJourney.page.evaluate(name => document.cookie.includes(`${name}=`), OWNER_SESSION_COOKIE_NAME)),
+    'HttpOnly Owner cookie was visible to document.cookie',
+  )
+  await assertOwnerCookieRoundTrip(firstJourney.page, firstNetwork)
+  await assertRealCarrierForbidden(firstJourney.page, firstNetwork)
+
+  const recoveryPresentation = await recoveryLocator.evaluate(element => {
+    const style = getComputedStyle(element)
+    return {
+      clientWidth: element.clientWidth,
+      fontSize: Number.parseFloat(style.fontSize),
+      overflowWrap: style.overflowWrap,
+      scrollWidth: element.scrollWidth,
+    }
+  })
+  assert.ok(recoveryPresentation.fontSize >= 12, 'recovery code text is too small to read')
+  assert.equal(recoveryPresentation.overflowWrap, 'anywhere')
+  assert.ok(
+    recoveryPresentation.scrollWidth <= recoveryPresentation.clientWidth + 1,
+    'mobile recovery code overflows its readable block',
+  )
+  await assertWithinViewport(recoveryLocator, firstJourney.page, 'mobile recovery code')
+  await assertVisibleKeyboardFocus(recoveryLocator, 'mobile recovery code')
+  await captureVisual(firstJourney.page, '04-recovery-mobile-375', { recovery: recoveryCode })
+  await firstJourney.page.setViewportSize(DESKTOP_VIEWPORT)
+  await firstJourney.page.waitForTimeout(250)
+  await assertWithinViewport(recoveryLocator, firstJourney.page, 'desktop recovery code')
+  await assertVisibleKeyboardFocus(recoveryLocator, 'desktop recovery code')
+  await captureVisual(firstJourney.page, '05-recovery-desktop', { recovery: recoveryCode })
+
+  await firstJourney.page.getByRole('button', { name: '我已安全保存，进入工作台' }).click()
+  await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
+  assert.equal(await recoveryLocator.count(), 0)
+  await firstJourney.page.reload({ waitUntil: 'load' })
+  await dismissHarnessOnboarding(firstJourney.page)
+  await firstJourney.page.locator('main[data-workbench-phase="empty"]').waitFor({ state: 'visible' })
+  assert.equal(await recoveryLocator.count(), 0, 'refresh redisplayed the one-time recovery code')
+  await assertSecretsAbsentFromBrowserStorage(
+    firstJourney.page,
+    [initialPassword, recoveryCode],
+  )
+
   const firstEditor = firstJourney.page.locator('#workbench-status-editor')
   await firstEditor.click()
   await firstEditor.pressSequentially(message)
@@ -518,29 +1021,197 @@ async function main() {
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
     message,
   )
-  await assertNoBrowserErrors(firstJourney)
+  const sessionBar = firstJourney.page.locator('header').filter({
+    has: firstJourney.page.getByRole('button', { name: '退出登录' }),
+  })
+  await sessionBar.waitFor({ state: 'visible' })
+  await captureVisual(firstJourney.page, '06-authenticated-desktop')
+  await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
+    await sessionBar.waitFor({ state: 'visible' })
+    await firstJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
+    await assertWithinViewport(sessionBar, firstJourney.page, 'mobile Owner session bar')
+    await assertWithinViewport(firstJourney.page.locator('#workbench-status-editor'), firstJourney.page, 'mobile status editor')
+    const layout = await firstJourney.page.evaluate(() => {
+      const session = document.querySelector('header[aria-label]')
+      const status = document.querySelector('main[data-workbench-phase]')
+      return {
+        sessionHeight: session?.getBoundingClientRect().height ?? 0,
+        statusHeight: status?.getBoundingClientRect().height ?? 0,
+      }
+    })
+    assert.ok(layout.sessionHeight > 0 && layout.sessionHeight < MOBILE_VIEWPORT.height / 2)
+    assert.ok(layout.statusHeight > 0, 'mobile session bar squeezed out the status surface')
+    await captureVisual(firstJourney.page, '07-authenticated-mobile-375')
+  })
+  await firstJourney.page.setViewportSize(DESKTOP_VIEWPORT)
+  await assertNoBrowserErrors(firstJourney, [expectedHttpError])
+
+  await firstJourney.page.getByRole('button', { name: '退出登录' }).click()
+  await firstJourney.page.locator('#workbench-login-password').waitFor({ state: 'visible' })
+  assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
+  await expectCarrierDenied(firstJourney.page, firstNetwork, false)
+  const postLogoutCookies = await firstNetwork.cdp.send('Network.getAllCookies')
+  assert.equal(
+    postLogoutCookies.cookies.filter(cookie => cookie.name === OWNER_SESSION_COOKIE_NAME).length,
+    0,
+    'logout did not clear the browser Owner cookie',
+  )
   await firstJourney.context.close()
+
+  // A genuinely separate browser context sees login, never setup. A rejected
+  // password cannot create the protected controller; the correct password can.
+  const separateJourney = await openCheckedPage(first.readyUrl, 'separate browser context')
+  await dismissHarnessOnboarding(separateJourney.page)
+  const separateLogin = separateJourney.page.locator('#workbench-login-password')
+  await separateLogin.waitFor({ state: 'visible' })
+  assert.equal(await separateJourney.page.locator('#workbench-owner-password').count(), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SNAPSHOT_PATH), 0)
+  await separateLogin.fill(wrongPassword)
+  await separateJourney.page.locator('form button[type="submit"]').click()
+  await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
+  assert.equal(await separateJourney.page.locator('#workbench-status-editor').count(), 0)
+  await separateLogin.fill(initialPassword)
+  await separateJourney.page.locator('form button[type="submit"]').click()
+  await separateJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
+  const separateProjection = separateJourney.page
+    .locator('main[data-workbench-phase="value"] p')
+    .filter({ hasText: message })
+  await separateProjection.waitFor({ state: 'visible' })
+  assert.equal(await separateProjection.textContent(), message)
+  await assertNoBrowserErrors(separateJourney, [expectedHttpError])
+  await separateJourney.context.close()
   await stopDsh(first.host)
   restoreClientBundle()
 
   const databasePath = join(projectDir, '.dsh/project-workbench.sqlite')
   assert.ok(existsSync(databasePath), `Workbench database was not committed at ${databasePath}`)
 
+  // A full Host restart reopens both the DSH credential record and Workbench
+  // database. Login with the original credential recovers the same projection.
   const second = await startDsh(projectDir, runtimeEnv)
-  const secondJourney = await openCheckedPage(second.readyUrl, 'restart boot')
-  await secondJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
+  const secondJourney = await openCheckedPage(second.readyUrl, 'credential and data restart boot')
   await dismissHarnessOnboarding(secondJourney.page)
+  const secondNetwork = await installNetworkEvidence(secondJourney.page)
+  const secondLogin = secondJourney.page.locator('#workbench-login-password')
+  await secondLogin.waitFor({ state: 'visible' })
+  assert.equal(await secondJourney.page.locator('#workbench-owner-password').count(), 0)
+  await secondLogin.fill(initialPassword)
+  await secondJourney.page.locator('form button[type="submit"]').click()
+  await secondJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
   const recoveredProjection = secondJourney.page
     .locator('main[data-workbench-phase="value"] p')
     .filter({ hasText: message })
   await recoveredProjection.waitFor({ state: 'visible' })
   assert.equal(await recoveredProjection.textContent(), message)
   assert.equal(await secondJourney.page.locator('#workbench-status-editor').inputValue(), message)
+  await ownerCookieFromChrome(secondNetwork)
   await assertNoBrowserErrors(secondJourney)
-  await secondJourney.context.close()
   await stopDsh(second.host)
 
-  process.stdout.write('PASS real Workbench browser command -> projection -> Client HMR -> full restart recovery\n')
+  // Recovery executes only with the Host stopped and carries every secret over
+  // bounded stdin. The first replacement works once to rotate credentials a
+  // second time; both consumed codes are then rejected.
+  const firstRecovery = await invokeRecoveryCli(
+    profileDir,
+    dshHome,
+    runtimeEnv,
+    recoveryCode,
+    firstRecoveredPassword,
+  )
+  const replacementCode = replacementRecoveryCode(firstRecovery)
+  assert.ok(replacementCode !== recoveryCode, 'recovery did not rotate the one-time code')
+
+  const replayedInitial = await invokeRecoveryCli(
+    profileDir,
+    dshHome,
+    runtimeEnv,
+    recoveryCode,
+    firstRecoveredPassword,
+    true,
+  )
+  assertRecoveryRejected(replayedInitial)
+
+  const secondRecovery = await invokeRecoveryCli(
+    profileDir,
+    dshHome,
+    runtimeEnv,
+    replacementCode,
+    finalRecoveredPassword,
+  )
+  const secondReplacementCode = replacementRecoveryCode(secondRecovery)
+  assert.ok(secondReplacementCode !== replacementCode, 'replacement recovery code did not rotate')
+
+  const replayedReplacement = await invokeRecoveryCli(
+    profileDir,
+    dshHome,
+    runtimeEnv,
+    replacementCode,
+    finalRecoveredPassword,
+    true,
+  )
+  assertRecoveryRejected(replayedReplacement)
+
+  // The recovery credential-version fence revokes the pre-recovery browser
+  // session. Old passwords fail; only the twice-rotated password reopens the
+  // unchanged durable projection.
+  const third = await startDsh(projectDir, runtimeEnv)
+  const postRecoveryJourney = secondJourney
+  postRecoveryJourney.errors.length = 0
+  postRecoveryJourney.requests.length = 0
+  const postRecoveryNavigation = await postRecoveryJourney.page.goto(third.readyUrl, {
+    waitUntil: 'load',
+  })
+  assert.notEqual(postRecoveryNavigation, null)
+  assert.ok(postRecoveryNavigation.ok(), 'post-recovery navigation failed')
+  assert.equal(new URL(postRecoveryJourney.page.url()).searchParams.has('token'), false)
+  await dismissHarnessOnboarding(postRecoveryJourney.page)
+  const postRecoveryNetwork = secondNetwork
+  const postRecoveryLogin = postRecoveryJourney.page.locator('#workbench-login-password')
+  await postRecoveryLogin.waitFor({ state: 'visible' })
+  assert.equal(await postRecoveryJourney.page.locator('#workbench-owner-password').count(), 0)
+
+  await expectCarrierDenied(postRecoveryJourney.page, postRecoveryNetwork, true)
+  const staleLogout = await postRecoveryJourney.page.evaluate(async () => {
+    const response = await fetch('/api/workbench-auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    const payload = await response.json()
+    return { state: payload?.ok === true ? payload.value?.state : undefined, status: response.status }
+  })
+  assert.equal(staleLogout.status, 200)
+  assert.equal(staleLogout.state, 'signed-out')
+  await waitForCondition(async () => {
+    const result = await postRecoveryNetwork.cdp.send('Network.getAllCookies')
+    return !result.cookies.some(cookie => cookie.name === OWNER_SESSION_COOKIE_NAME)
+  }, PAGE_TIMEOUT_MS, 'stale Owner cookie clearing')
+
+  await postRecoveryLogin.fill(initialPassword)
+  await postRecoveryJourney.page.locator('form button[type="submit"]').click()
+  await postRecoveryJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
+  await postRecoveryLogin.fill(firstRecoveredPassword)
+  await postRecoveryJourney.page.locator('form button[type="submit"]').click()
+  await postRecoveryJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
+  await postRecoveryLogin.fill(finalRecoveredPassword)
+  await postRecoveryJourney.page.locator('form button[type="submit"]').click()
+  await postRecoveryJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
+  const finalProjection = postRecoveryJourney.page
+    .locator('main[data-workbench-phase="value"] p')
+    .filter({ hasText: message })
+  await finalProjection.waitFor({ state: 'visible' })
+  assert.equal(await finalProjection.textContent(), message)
+  assert.equal(await postRecoveryJourney.page.locator('#workbench-status-editor').inputValue(), message)
+  await assertNoBrowserErrors(postRecoveryJourney, [expectedHttpError])
+  await postRecoveryJourney.context.close()
+  await stopDsh(third.host)
+
+  process.stdout.write(
+    'PASS real Workbench setup -> protected carrier -> secure cookie -> Client HMR '
+      + '-> logout -> restart -> one-time offline recovery -> session revocation\n',
+  )
 }
 
 for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T01 npm archives without touching publication.
+ * Create and inspect the real T02 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -35,16 +35,46 @@ const packageSpecs = [
     role: 'Host',
     directory: 'packages/workbench-host',
     name: '@benz-ai-x/dsh-project-workbench',
-    requiredExports: ['.', './client', './typert', './remote', './package.json'],
+    requiredExports: [
+      '.',
+      './auth',
+      './client',
+      './typert',
+      './remote',
+      './recovery',
+      './package.json',
+    ],
     requiredFiles: [
       'lib/index.js',
       'lib/client.js',
+      'lib/owner-auth-service.js',
+      'lib/recovery.js',
+      'lib/recover-cli.js',
       'lib/types/index.d.ts',
       'lib/types/client.d.ts',
+      'lib/types/owner-auth-service.d.ts',
+      'lib/types/recovery.d.ts',
       'lib/typert.host.js',
       'lib/typert.host.d.ts',
       'lib/typert.remote-client.js',
       'lib/typert.remote-client.d.ts',
+    ],
+    expectedDeclarations: [
+      'lib/typert.host.d.ts',
+      'lib/typert.remote-client.d.ts',
+      'lib/types/authorization.d.ts',
+      'lib/types/client.d.ts',
+      'lib/types/http-bridge.d.ts',
+      'lib/types/index.d.ts',
+      'lib/types/owner-access.d.ts',
+      'lib/types/owner-auth-service.d.ts',
+      'lib/types/owner-credential-store.d.ts',
+      'lib/types/password.d.ts',
+      'lib/types/recover-cli.d.ts',
+      'lib/types/recovery.d.ts',
+      'lib/types/repository.d.ts',
+      'lib/types/scenario.d.ts',
+      'lib/types/sqlite-repository.d.ts',
     ],
   },
   {
@@ -53,6 +83,18 @@ const packageSpecs = [
     name: '@benz-ai-x/dsh-project-workbench-client',
     requiredExports: ['.', './client', './package.json'],
     requiredFiles: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts'],
+    expectedDeclarations: [
+      'lib/types/client/OwnerPage.d.ts',
+      'lib/types/client/WorkbenchStatusPage.d.ts',
+      'lib/types/client/auth-http.d.ts',
+      'lib/types/client/controller.d.ts',
+      'lib/types/client/index.d.ts',
+      'lib/types/client/locales.d.ts',
+      'lib/types/client/mount.d.ts',
+      'lib/types/client/owner-controller.d.ts',
+      'lib/types/client/style-lifecycle.d.ts',
+      'lib/types/index.d.ts',
+    ],
   },
   {
     role: 'Bundle',
@@ -178,6 +220,7 @@ function packAndInspect(spec) {
   for (const file of spec.requiredFiles) {
     check(existsSync(resolve(packedDir, file)), `${spec.role}: archive contains ${file}`)
   }
+  verifyPackedDeclarationSet(spec, packedDir)
   verifyExportTargets(spec, packedDir, manifest)
   verifyRuntimeDependencySpecs(spec, manifest)
   verifyPackedRuntimeImports(spec, packedDir, manifest)
@@ -186,6 +229,14 @@ function packAndInspect(spec) {
   if (spec.role === 'Host') {
     check(manifest.main === 'lib/index.js', 'Host: packed main is lib/index.js')
     check(manifest.types === 'lib/types/index.d.ts', 'Host: packed types are lib/types/index.d.ts')
+    check(manifest.bin?.['dsh-workbench'] === './lib/recover-cli.js', 'Host: packed dsh-workbench bin targets built JavaScript')
+    const packedCli = resolve(packedDir, 'lib/recover-cli.js')
+    if (existsSync(packedCli)) {
+      check(readFileSync(packedCli, 'utf8').startsWith('#!/usr/bin/env node'), 'Host: packed recovery CLI preserves its shebang')
+      if (process.platform !== 'win32') {
+        check((statSync(packedCli).mode & 0o111) !== 0, 'Host: packed recovery CLI is executable')
+      }
+    }
   } else if (spec.role === 'Client') {
     check(manifest.main === 'lib/index.js', 'Client: packed main is lib/index.js')
     check(manifest.types === 'lib/types/index.d.ts', 'Client: packed types are lib/types/index.d.ts')
@@ -243,12 +294,15 @@ function verifyCleanConsumerInstall() {
     '@deepseek-ai/dsh-app-boot': 'packages/boot/app-boot',
     '@deepseek-ai/dsh-atomic-write': 'packages/util/atomic-write',
     '@deepseek-ai/dsh-client-connection': 'packages/client/connection',
+    '@deepseek-ai/dsh-credentials': 'packages/credentials/credentials',
+    '@deepseek-ai/dsh-credentials-local': 'packages/credentials/credentials-local',
     '@deepseek-ai/dsh-client-locale': 'packages/client/locale',
     '@deepseek-ai/dsh-client-ui-layout': 'packages/client/ui-layout',
     '@deepseek-ai/dsh-client-ui-primitives': 'packages/client/ui-primitives',
     '@deepseek-ai/dsh-client-ui-renderer': 'packages/client/ui-renderer',
     '@deepseek-ai/dsh-client-ui-slots': 'packages/client/ui-slots',
     '@deepseek-ai/dsh-home-paths': 'packages/util/home-paths',
+    '@deepseek-ai/dsh-host-webserver': 'packages/host/webserver',
     '@deepseek-ai/dsh-invariants': 'packages/runtime-diagnostics/invariants',
     '@deepseek-ai/dsh-launch-environment': 'packages/util/launch-environment',
     '@deepseek-ai/dsh-system-prompt': 'packages/core/system-prompt',
@@ -296,6 +350,8 @@ function verifyCleanConsumerInstall() {
     `  ${JSON.stringify(hostName)}: ${JSON.stringify(archiveDependencies[hostName])}`,
     `  ${JSON.stringify(clientName)}: ${JSON.stringify(archiveDependencies[clientName])}`,
     `  ${JSON.stringify('@deepseek-ai/schemastery')}: ${JSON.stringify(linkedDependencies['@deepseek-ai/schemastery'])}`,
+    'allowBuilds:',
+    '  argon2: true',
     '',
   ].join('\n'))
 
@@ -322,9 +378,68 @@ function verifyCleanConsumerInstall() {
   check(existsSync(resolve(consumerRoot, 'pnpm-lock.yaml')), 'clean consumer: offline pnpm install wrote an isolated lockfile')
   check(existsSync(resolve(consumerRoot, 'node_modules')), 'clean consumer: offline pnpm install materialized node_modules')
 
+  const packedBin = resolve(
+    consumerRoot,
+    'node_modules/.bin',
+    process.platform === 'win32' ? 'dsh-workbench.cmd' : 'dsh-workbench',
+  )
+  check(existsSync(packedBin), 'clean consumer: package manager installed the dsh-workbench bin')
+  if (existsSync(packedBin)) {
+    const help = spawnSync(packedBin, ['--help'], {
+      cwd: consumerRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: PROBE_TIMEOUT_MS,
+      maxBuffer: PROCESS_MAX_BUFFER,
+    })
+    if (help.error !== undefined || help.status !== 0) {
+      fail(`clean consumer: packed dsh-workbench --help failed${formatProcessFailure(help)}`)
+    } else {
+      check(
+        help.stdout.trim() === 'Usage: dsh-workbench owner recover [--dsh-home PATH] [--stdin]',
+        'clean consumer: packed recovery CLI executes through its installed bin',
+      )
+      check(help.stderr.trim() === '', 'clean consumer: packed recovery CLI help emits no secret-channel noise')
+    }
+  }
+
   const configPath = resolve(consumerRoot, 'workbench.cordis.yml')
   const databasePath = resolve(consumerRoot, 'runtime/workbench.sqlite')
+  const authFixturePath = resolve(consumerRoot, 'packed-auth-fixture.mjs')
+  writeFileSync(authFixturePath, `
+import { Service } from '@deepseek-ai/cordis'
+import {
+  V1OwnerAuthorizationPolicy,
+  WorkbenchAuthorizationContext,
+  ownerPrincipal,
+} from ${JSON.stringify(hostName)}
+
+export default class PackedAuthFixture extends Service {
+  static inject = []
+
+  constructor(ctx) {
+    super(ctx, 'workbenchAuth')
+    this.authorization = new WorkbenchAuthorizationContext(
+      new V1OwnerAuthorizationPolicy(async () => true),
+    )
+    this.principal = ownerPrincipal({
+      kind: 'owner',
+      ownerId: 'owner-packed-fixture',
+      organizationId: 'organization-packed-fixture',
+      teamId: 'team-packed-fixture',
+      sessionId: 'session-packed-fixture',
+      credentialVersion: 1,
+    })
+  }
+
+  run(operation) {
+    return this.authorization.runAs(this.principal, operation)
+  }
+}
+`)
   writeFileSync(configPath, [
+    '- id: packed-workbench-auth-fixture',
+    `  name: ${JSON.stringify(authFixturePath)}`,
     '- id: packed-workbench-host',
     `  name: ${JSON.stringify(hostName)}`,
     '  config:',
@@ -374,10 +489,11 @@ function verifyCleanConsumerInstall() {
     fail(`clean consumer: probe result was not JSON: ${errorMessage(error)}`)
     return
   }
-  check(result?.resolvedCount === 7, 'clean consumer: all Host, Client, Typert, Remote, and Bundle subpaths resolve from installed node_modules')
+  check(result?.resolvedCount === 9, 'clean consumer: all Host, Auth, Client, Typert, Remote, Recovery, and Bundle subpaths resolve from installed node_modules')
   check(result?.allResolvedInsideConsumer === true, 'clean consumer: public imports resolve inside the temporary consumer')
   check(result?.loaderEntryName === hostName, 'clean consumer: real Loader activates the public Host package name')
   check(result?.loadedInstanceMatchesPublicImport === true, 'clean consumer: Loader instance comes from the tgz-installed public Host import')
+  check(result?.unauthorizedCode === 'unauthorized', 'clean consumer: installed Host direct invocation fails closed without a principal')
   check(result?.initialSnapshot === null, 'clean consumer: installed Host starts with an empty projection')
   check(result?.committed?.message === 'packed consumer status' && result?.committed?.revision === 1, 'clean consumer: installed Host commits setStatus revision 1')
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
@@ -415,9 +531,11 @@ const consumerPrefix = canonicalConsumer.endsWith(sep) ? canonicalConsumer : can
 const projectPrefix = canonicalProjectPackages.endsWith(sep) ? canonicalProjectPackages : canonicalProjectPackages + sep
 const specifiers = [
   HOST,
+  HOST + '/auth',
   HOST + '/client',
   HOST + '/typert',
   HOST + '/remote',
+  HOST + '/recovery',
   CLIENT,
   BUNDLE + '/package.json',
   BUNDLE + '/cordis.patch.yml',
@@ -430,18 +548,23 @@ const resolved = specifiers.map((specifier) => {
 })
 
 const host = await import(HOST)
+const hostAuth = await import(HOST + '/auth')
 const hostContract = await import(HOST + '/client')
 const client = await import(CLIENT)
 const hostTypert = await import(HOST + '/typert')
 const remoteTypert = await import(HOST + '/remote')
+const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
+assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
 assert.ok(!('default' in hostContract))
 assert.equal(typeof client.apply, 'function')
 assert.ok(!('default' in client))
 assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), ['setStatus', 'snapshot'])
 assert.deepEqual(remoteTypert.TYPERT_REMOTE.descriptors.map(value => value.method).sort(), ['setStatus', 'snapshot'])
+assert.equal(typeof recovery.recoverOwnerOffline, 'function')
+assert.ok(!('default' in recovery))
 assert.equal(bundle.dsh.bundle.patch, './cordis.patch.yml')
 const bundlePatchPath = fileURLToPath(import.meta.resolve(BUNDLE + '/cordis.patch.yml'))
 const bundlePatch = readFileSync(bundlePatchPath, 'utf8')
@@ -455,6 +578,7 @@ let firstContext
 let firstService
 let loaderEntryName
 let loadedInstanceMatchesPublicImport = false
+let unauthorizedCode
 try {
   firstContext = await boot('packed-consumer', CONFIG_PATH, undefined, undefined, bareModuleBaseUrl)
   const entries = [...firstContext.loader.entries()].filter(entry => entry.options.name === HOST)
@@ -462,16 +586,25 @@ try {
   assert.ok(entries[0].fiber !== undefined)
   loaderEntryName = entries[0].options.name
   firstService = firstContext.get('workbench')
+  const firstAuth = firstContext.get('workbenchAuth')
   assert.ok(firstService instanceof host.WorkbenchService)
+  assert.equal(typeof firstAuth?.run, 'function')
   loadedInstanceMatchesPublicImport = true
-  initialSnapshot = await firstService.snapshot()
+  await assert.rejects(
+    () => firstService.snapshot(new AbortController().signal),
+    error => {
+      unauthorizedCode = error?.failure?.code
+      return unauthorizedCode === 'unauthorized'
+    },
+  )
+  initialSnapshot = await firstAuth.run(() => firstService.snapshot(new AbortController().signal))
   assert.equal(initialSnapshot, null)
-  const outcome = await firstService.setStatus({ message: 'packed consumer status', expectedRevision: null }, new AbortController().signal)
+  const outcome = await firstAuth.run(() => firstService.setStatus({ message: 'packed consumer status', expectedRevision: null }, new AbortController().signal))
   assert.equal(outcome.ok, true)
   committed = outcome.value
   assert.equal(committed.message, 'packed consumer status')
   assert.equal(committed.revision, 1)
-  assert.deepEqual(await firstService.snapshot(), committed)
+  assert.deepEqual(await firstAuth.run(() => firstService.snapshot(new AbortController().signal)), committed)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -485,8 +618,9 @@ let secondService
 try {
   secondContext = await boot('packed-consumer-restart', CONFIG_PATH, undefined, undefined, bareModuleBaseUrl)
   secondService = secondContext.get('workbench')
+  const secondAuth = secondContext.get('workbenchAuth')
   assert.ok(secondService instanceof host.WorkbenchService)
-  restartSnapshot = await secondService.snapshot()
+  restartSnapshot = await secondAuth.run(() => secondService.snapshot(new AbortController().signal))
   assert.deepEqual(restartSnapshot, committed)
 } finally {
   await secondContext?.fiber.dispose()
@@ -502,6 +636,7 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   allResolvedInsideConsumer: true,
   loaderEntryName,
   loadedInstanceMatchesPublicImport,
+  unauthorizedCode,
   initialSnapshot,
   committed,
   restartSnapshot,
@@ -556,6 +691,27 @@ function verifyExportTargets(spec, packedDir, manifest) {
       if (target.startsWith('./')) check(existsSync(resolve(packedDir, target)), `${spec.role}: export ${subpath} target ${target} exists in archive`)
     }
   }
+}
+
+function verifyPackedDeclarationSet(spec, packedDir) {
+  if (spec.expectedDeclarations === undefined) return
+  const expected = [...spec.expectedDeclarations].sort()
+  const packed = walkFiles(packedDir)
+    .map(relativePath => relativePath.replaceAll('\\', '/'))
+    .filter(relativePath => relativePath.endsWith('.d.ts'))
+    .sort()
+  const expectedSet = new Set(expected)
+  const packedSet = new Set(packed)
+  const missing = expected.filter(relativePath => !packedSet.has(relativePath))
+  const unexpected = packed.filter(relativePath => !expectedSet.has(relativePath))
+  if (missing.length > 0 || unexpected.length > 0) {
+    const details = []
+    if (missing.length > 0) details.push(`missing: ${missing.join(', ')}`)
+    if (unexpected.length > 0) details.push(`unexpected: ${unexpected.join(', ')}`)
+    fail(`${spec.role}: archive declaration set differs from the expected package surface (${details.join('; ')})`)
+    return
+  }
+  check(true, `${spec.role}: archive declaration set exactly matches the expected package surface`)
 }
 
 function verifyRuntimeDependencySpecs(spec, manifest) {

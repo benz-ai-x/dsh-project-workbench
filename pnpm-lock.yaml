@@ -12,6 +12,10 @@ overrides:
   '@deepseek-ai/dsh-api-remotes': link:../deepseek-harness-baseline/packages/api/remotes
   '@deepseek-ai/dsh-base': link:../deepseek-harness-baseline/packages/bundle/base
   '@deepseek-ai/dsh-client-connection': link:../deepseek-harness-baseline/packages/client/connection
+  '@deepseek-ai/dsh-credentials': link:../deepseek-harness-baseline/packages/credentials/credentials
+  '@deepseek-ai/dsh-credentials-local': link:../deepseek-harness-baseline/packages/credentials/credentials-local
+  '@deepseek-ai/dsh-home-paths': link:../deepseek-harness-baseline/packages/util/home-paths
+  '@deepseek-ai/dsh-host-webserver': link:../deepseek-harness-baseline/packages/host/webserver
   '@deepseek-ai/dsh-client-locale': link:../deepseek-harness-baseline/packages/client/locale
   '@deepseek-ai/dsh-client-store': link:../deepseek-harness-baseline/packages/client/store
   '@deepseek-ai/dsh-client-test-runtime': link:../deepseek-harness-baseline/packages/test-support/client-runtime
@@ -80,6 +84,18 @@ importers:
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../deepseek-harness-baseline/packages/client/ui-slots
         version: link:../deepseek-harness-baseline/packages/client/ui-slots
+      '@deepseek-ai/dsh-credentials':
+        specifier: link:../deepseek-harness-baseline/packages/credentials/credentials
+        version: link:../deepseek-harness-baseline/packages/credentials/credentials
+      '@deepseek-ai/dsh-credentials-local':
+        specifier: link:../deepseek-harness-baseline/packages/credentials/credentials-local
+        version: link:../deepseek-harness-baseline/packages/credentials/credentials-local
+      '@deepseek-ai/dsh-home-paths':
+        specifier: link:../deepseek-harness-baseline/packages/util/home-paths
+        version: link:../deepseek-harness-baseline/packages/util/home-paths
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: link:../deepseek-harness-baseline/packages/host/webserver
+        version: link:../deepseek-harness-baseline/packages/host/webserver
       '@deepseek-ai/dsh-typert-generator':
         specifier: link:../deepseek-harness-baseline/packages/typert/generator
         version: link:../deepseek-harness-baseline/packages/typert/generator
@@ -232,12 +248,30 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../../deepseek-harness-baseline/vendor/cordis
         version: link:../../../deepseek-harness-baseline/vendor/cordis
+      '@deepseek-ai/dsh-client-connection':
+        specifier: link:../../../deepseek-harness-baseline/packages/client/connection
+        version: link:../../../deepseek-harness-baseline/packages/client/connection
+      '@deepseek-ai/dsh-credentials':
+        specifier: link:../../../deepseek-harness-baseline/packages/credentials/credentials
+        version: link:../../../deepseek-harness-baseline/packages/credentials/credentials
+      '@deepseek-ai/dsh-credentials-local':
+        specifier: link:../../../deepseek-harness-baseline/packages/credentials/credentials-local
+        version: link:../../../deepseek-harness-baseline/packages/credentials/credentials-local
+      '@deepseek-ai/dsh-home-paths':
+        specifier: link:../../../deepseek-harness-baseline/packages/util/home-paths
+        version: link:../../../deepseek-harness-baseline/packages/util/home-paths
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: link:../../../deepseek-harness-baseline/packages/host/webserver
+        version: link:../../../deepseek-harness-baseline/packages/host/webserver
       '@deepseek-ai/dsh-typert-protocol':
         specifier: link:../../../deepseek-harness-baseline/packages/typert/protocol
         version: link:../../../deepseek-harness-baseline/packages/typert/protocol
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness-baseline/vendor/schemastery
         version: link:../../../deepseek-harness-baseline/vendor/schemastery
+      argon2:
+        specifier: 0.45.1
+        version: 0.45.1
       zod:
         specifier: ^4.4.3
         version: 4.5.4
@@ -260,6 +294,9 @@ importers:
 
   profiles/workbench-test:
     dependencies:
+      '@benz-ai-x/dsh-project-workbench':
+        specifier: workspace:*
+        version: link:../../packages/workbench-host
       '@benz-ai-x/dsh-project-workbench-bundle':
         specifier: workspace:*
         version: link:../../packages/workbench-bundle
@@ -333,6 +370,9 @@ packages:
     resolution: {integrity: sha512-QxULHAm7cNu72w97JUNCBFODFaXpbDg+dP8b/oWFAZ2MTRppA3U00Y2L1HqaS4J6yBqxwa/Y3nMBaxVKbB/NsA==}
     engines: {node: '>=20.19.0'}
 
+  '@epic-web/invariant@1.0.0':
+    resolution: {integrity: sha512-lrTPqgvfFQtR/eY/qkIzp98OGdNJu0m5ji3q/nJI8v3SXkRKEnWiOxMmbvcSoAIzv/cGiuvRy57k4suKQSAdwA==}
+
   '@exodus/bytes@1.15.1':
     resolution: {integrity: sha512-S6mL0yNB/Abt9Ei4tq8gDhcczc4S3+vQ4ra7vxnAf+YHC02srtqxKKZghx2Dq6p0e66THKwR6r8N6P95wEty7Q==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
@@ -351,6 +391,10 @@ packages:
 
   '@oxc-project/types@0.147.0':
     resolution: {integrity: sha512-IJ3s6ltHLp45S0bh7phkX+gJO7A1Wuz2EaqpAhb8WjqDwbzMiWKHhyyT42tskaWjEYXtHtVCPpnBJVT9+dcRLg==}
+
+  '@phc/format@1.0.0':
+    resolution: {integrity: sha512-m7X9U6BG2+J+R1lSOdCiITLLrxm+cWlNI3HUFA92oLO77ObGNzaKdh8pMLqdZcshtkKuV84olNNXDfMc4FezBQ==}
+    engines: {node: '>=10'}
 
   '@quansync/fs@1.0.0':
     resolution: {integrity: sha512-4TJ3DFtlf1L5LDMaM6CanJ/0lckGNtJcMjQ1NAV6zDmA0tEHKZtxNKin8EgPaVX1YzljbxckyT2tJrpQKAtngQ==}
@@ -698,6 +742,10 @@ packages:
     resolution: {integrity: sha512-BJ8/l4R5LRE7hW9WdSuGYrLSHi2ynxeFpDFbH0K/CgNeY/tyhk+vO6TYxXC5r5CpUhNVX310xzPsN/H9lCdfOA==}
     engines: {node: '>=14'}
 
+  argon2@0.45.1:
+    resolution: {integrity: sha512-skm+/WCjkGqCQxF7FG1LuZXM5yvbFjgbfiCGsud2oLgaDhh6b6dbH0b1EkghbM+xx4Bj8Ape+KKgixoIlWZicQ==}
+    engines: {node: '>=16.17.0'}
+
   argparse@2.0.1:
     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
 
@@ -732,6 +780,15 @@ packages:
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
+
+  cross-env@10.1.0:
+    resolution: {integrity: sha512-GsYosgnACZTADcmEyJctkJIoqAhHjttw7RsFrVoJNXbsWWqaq6Ym+7kZjq6mS45O0jij6vtiReppKQEtqWy6Dw==}
+    engines: {node: '>=20'}
+    hasBin: true
+
+  cross-spawn@7.0.6:
+    resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
+    engines: {node: '>= 8'}
 
   css-tree@3.2.1:
     resolution: {integrity: sha512-X7sjQzceUhu1u7Y/ylrRZFU2FS6LRiFVp6rKLPg23y3x3c3DOKAwuXGDp+PAGjh6CSnCjYeAul8pcT8bAl+lSA==}
@@ -823,6 +880,9 @@ packages:
 
   is-potential-custom-element-name@1.0.1:
     resolution: {integrity: sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==}
+
+  isexe@2.0.0:
+    resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
 
   js-tokens@3.0.0:
     resolution: {integrity: sha512-poXEQHPMmTrYZuJgNRll2sbc3kJsSU1m/g1Q93IE6txNj3p6xOOOmdj1G/zCVGawYSPzTkSoWGg1otqbeqKJeg==}
@@ -940,12 +1000,24 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
+  node-addon-api@8.9.2:
+    resolution: {integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==}
+    engines: {node: ^18 || ^20 || >= 21}
+
+  node-gyp-build@4.8.4:
+    resolution: {integrity: sha512-LA4ZjwlnUblHVgq0oBF3Jl/6h/Nvs5fzBLwdEF4nuxnFdsfajde4WfxtJr3CaiH+F6ewcIB/q4jQ4UzPyid+CQ==}
+    hasBin: true
+
   obug@2.1.4:
     resolution: {integrity: sha512-4a+OsYv9UktOJKE+l1A4OufDgdRF9PifWj+tJnHURo/P+WOxpG4GzUFL9qCalmWauao6ogiG+QvnCovwPoyAWA==}
     engines: {node: '>=12.20.0'}
 
   parse5@8.0.1:
     resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
+
+  path-key@3.1.1:
+    resolution: {integrity: sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==}
+    engines: {node: '>=8'}
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
@@ -1026,6 +1098,14 @@ packages:
 
   scheduler@0.23.0:
     resolution: {integrity: sha512-CtuThmgHNg7zIZWAXi3AsyIzA3n4xx7aNyjwC2VJldO2LMVDhFK+63xGqq6CsJH4rTAt6/M+N4GhZiDYPx9eUw==}
+
+  shebang-command@2.0.0:
+    resolution: {integrity: sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==}
+    engines: {node: '>=8'}
+
+  shebang-regex@3.0.0:
+    resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
+    engines: {node: '>=8'}
 
   siginfo@2.0.0:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
@@ -1234,6 +1314,11 @@ packages:
     resolution: {integrity: sha512-1to4zXBxmXHV3IiSSEInrreIlu02vUOvrhxJJH5vcxYTBDAx51cqZiKdyTxlecdKNSjj8EcxGBxNf6Vg+945gw==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
 
+  which@2.0.1:
+    resolution: {integrity: sha512-N7GBZOTswtB9lkQBZA4+zAXrjEIWAUOB93AvzUiudRzRxhUdLURQ7D/gAIMY1gatT/LTbmbcv8SiYazy3eYB7w==}
+    engines: {node: '>= 8'}
+    hasBin: true
+
   why-is-node-running@2.3.0:
     resolution: {integrity: sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w==}
     engines: {node: '>=8'}
@@ -1318,6 +1403,8 @@ snapshots:
 
   '@csstools/css-tokenizer@4.0.0': {}
 
+  '@epic-web/invariant@1.0.0': {}
+
   '@exodus/bytes@1.15.1': {}
 
   '@jest/types@27.0.2':
@@ -1331,6 +1418,8 @@ snapshots:
   '@jridgewell/sourcemap-codec@1.6.0': {}
 
   '@oxc-project/types@0.147.0': {}
+
+  '@phc/format@1.0.0': {}
 
   '@quansync/fs@1.0.0':
     dependencies:
@@ -1575,6 +1664,13 @@ snapshots:
 
   ansis@4.3.1: {}
 
+  argon2@0.45.1:
+    dependencies:
+      '@phc/format': 1.0.0
+      cross-env: 10.1.0
+      node-addon-api: 8.9.2
+      node-gyp-build: 4.8.4
+
   argparse@2.0.1: {}
 
   aria-query@5.3.0:
@@ -1603,6 +1699,17 @@ snapshots:
   color-name@1.1.4: {}
 
   convert-source-map@2.0.0: {}
+
+  cross-env@10.1.0:
+    dependencies:
+      '@epic-web/invariant': 1.0.0
+      cross-spawn: 7.0.6
+
+  cross-spawn@7.0.6:
+    dependencies:
+      path-key: 3.1.1
+      shebang-command: 2.0.0
+      which: 2.0.1
 
   css-tree@3.2.1:
     dependencies:
@@ -1666,6 +1773,8 @@ snapshots:
   import-without-cache@0.4.0: {}
 
   is-potential-custom-element-name@1.0.1: {}
+
+  isexe@2.0.0: {}
 
   js-tokens@3.0.0: {}
 
@@ -1766,11 +1875,17 @@ snapshots:
 
   nanoid@3.3.18: {}
 
+  node-addon-api@8.9.2: {}
+
+  node-gyp-build@4.8.4: {}
+
   obug@2.1.4: {}
 
   parse5@8.0.1:
     dependencies:
       entities: 8.0.0
+
+  path-key@3.1.1: {}
 
   pathe@2.0.3: {}
 
@@ -1855,6 +1970,12 @@ snapshots:
   scheduler@0.23.0:
     dependencies:
       loose-envify: 1.4.0
+
+  shebang-command@2.0.0:
+    dependencies:
+      shebang-regex: 3.0.0
+
+  shebang-regex@3.0.0: {}
 
   siginfo@2.0.0: {}
 
@@ -1989,6 +2110,10 @@ snapshots:
       webidl-conversions: 8.0.1
     transitivePeerDependencies:
       - '@noble/hashes'
+
+  which@2.0.1:
+    dependencies:
+      isexe: 2.0.0
 
   why-is-node-running@2.3.0:
     dependencies:

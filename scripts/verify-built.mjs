@@ -55,9 +55,11 @@ async function verifyHost() {
 
   const expectedExports = {
     '.': './lib/index.js',
+    './auth': './lib/owner-auth-service.js',
     './client': './lib/client.js',
     './typert': './lib/typert.host.js',
     './remote': './lib/typert.remote-client.js',
+    './recovery': './lib/recovery.js',
     './package.json': './package.json',
   }
   for (const [subpath, expected] of Object.entries(expectedExports)) {
@@ -68,6 +70,8 @@ async function verifyHost() {
 
   check(hostManifest.main === 'lib/index.js', `${packageName}: main resolves to built JavaScript`)
   check(hostManifest.types === 'lib/types/index.d.ts', `${packageName}: types resolve to built declarations`)
+  check(hostManifest.bin?.['dsh-workbench'] === './lib/recover-cli.js', `${packageName}: dsh-workbench resolves to the built recovery CLI`)
+  checkArtifact(hostDir, hostManifest.bin?.['dsh-workbench'], `${packageName}: dsh-workbench bin`)
   verifyDeclaredFiles(hostDir, hostManifest)
   verifyNoSourceEntries(hostManifest)
   verifyRuntimeImports(hostDir, hostManifest)
@@ -85,6 +89,22 @@ async function verifyHost() {
   const browserContract = await importArtifact(hostDir, './lib/client.js', `${packageName}: browser-safe contract`)
   if (browserContract !== undefined) {
     check(!('default' in browserContract), `${packageName}/client has no accidental default export`)
+  }
+
+  const auth = await importArtifact(hostDir, './lib/owner-auth-service.js', `${packageName}: Owner auth Service`)
+  if (auth !== undefined) {
+    check(typeof auth.default === 'function', `${packageName}/auth exposes a default Service class`)
+    check(auth.default === auth.OwnerAuthService, `${packageName}/auth default is OwnerAuthService`)
+    check(auth.OWNER_SESSION_COOKIE_NAME?.startsWith('__Host-') === true, `${packageName}/auth owns a __Host- session cookie`)
+  }
+  const recovery = await importArtifact(hostDir, './lib/recovery.js', `${packageName}: offline recovery API`)
+  if (recovery !== undefined) {
+    check(typeof recovery.recoverOwnerOffline === 'function', `${packageName}/recovery exposes recoverOwnerOffline`)
+    check(!('default' in recovery), `${packageName}/recovery has no accidental default export`)
+  }
+  const recoveryCli = readArtifact(hostDir, './lib/recover-cli.js', `${packageName}: recovery CLI`)
+  if (recoveryCli !== undefined) {
+    check(recoveryCli.startsWith('#!/usr/bin/env node'), `${packageName}: recovery CLI preserves its executable shebang`)
   }
 
   const hostTypertSource = readArtifact(hostDir, './lib/typert.host.js', `${packageName}: generated Host Typert`)
@@ -168,13 +188,17 @@ async function verifyClient() {
 function verifyPublicHostImports(packageDir, packageName) {
   const script = `
     const main = await import(${JSON.stringify(packageName)})
+    const auth = await import(${JSON.stringify(`${packageName}/auth`)})
     const contract = await import(${JSON.stringify(`${packageName}/client`)})
     const typert = await import(${JSON.stringify(`${packageName}/typert`)})
     const remote = await import(${JSON.stringify(`${packageName}/remote`)})
+    const recovery = await import(${JSON.stringify(`${packageName}/recovery`)})
     if (typeof main.default !== 'function' || main.default !== main.WorkbenchService) throw new Error('invalid Host default export')
+    if (typeof auth.default !== 'function' || auth.default !== auth.OwnerAuthService) throw new Error('invalid Owner auth export')
     if ('default' in contract) throw new Error('browser-safe contract has an accidental default export')
     if (typert.TYPERT?.package !== ${JSON.stringify(packageName)}) throw new Error('invalid Host Typert export')
     if (remote.TYPERT_REMOTE?.package !== ${JSON.stringify(packageName)}) throw new Error('invalid Remote Typert export')
+    if (typeof recovery.recoverOwnerOffline !== 'function' || 'default' in recovery) throw new Error('invalid recovery export')
   `
   verifyPublicImport(packageDir, script, `${packageName}: public-name imports traverse package exports`)
 }

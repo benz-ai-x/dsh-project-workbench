@@ -16,6 +16,10 @@ overrides:
   '@deepseek-ai/dsh-api-remotes': 'link:../deepseek-harness-baseline/packages/api/remotes'
   '@deepseek-ai/dsh-base': 'link:../deepseek-harness-baseline/packages/bundle/base'
   '@deepseek-ai/dsh-client-connection': 'link:../deepseek-harness-baseline/packages/client/connection'
+  '@deepseek-ai/dsh-credentials': 'link:../deepseek-harness-baseline/packages/credentials/credentials'
+  '@deepseek-ai/dsh-credentials-local': 'link:../deepseek-harness-baseline/packages/credentials/credentials-local'
+  '@deepseek-ai/dsh-home-paths': 'link:../deepseek-harness-baseline/packages/util/home-paths'
+  '@deepseek-ai/dsh-host-webserver': 'link:../deepseek-harness-baseline/packages/host/webserver'
   '@deepseek-ai/dsh-client-locale': 'link:../deepseek-harness-baseline/packages/client/locale'
   '@deepseek-ai/dsh-client-store': 'link:../deepseek-harness-baseline/packages/client/store'
   '@deepseek-ai/dsh-client-test-runtime': 'link:../deepseek-harness-baseline/packages/test-support/client-runtime'
@@ -33,5 +37,6 @@ overrides:
   '@deepseek-ai/schemastery': 'link:../deepseek-harness-baseline/vendor/schemastery'
 
 allowBuilds:
+  argon2: true
   esbuild: true
   node-addon-require-builtin: false
