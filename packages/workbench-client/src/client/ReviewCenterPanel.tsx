@@ -25,6 +25,14 @@ import type {
 } from '@benz-ai-x/dsh-project-workbench/client'
 import type { WorkbenchKey } from './locales.ts'
 import {
+  acceptanceStatusKey,
+  calendarRemoteStatusKey,
+  calendarSyncStateKey,
+  criterionOutcomeKey,
+  deliverableStateKey,
+  taskAvailabilityKey,
+} from './deliverable-presentation.ts'
+import {
   MAX_REVIEW_EVIDENCE,
   MAX_REVIEW_FEEDBACK_LENGTH,
   type WorkbenchReviewClientState,
@@ -565,7 +573,7 @@ function AcceptanceReviewCenter({
                 >
                   <option value="all">{t('review.acceptance.filters.all')}</option>
                   {ACCEPTANCE_STATUSES.map(status => (
-                    <option key={status} value={status}>{status}</option>
+                    <option key={status} value={status}>{t(acceptanceStatusKey(status))}</option>
                   ))}
                 </select>
               </label>
@@ -665,8 +673,8 @@ function AcceptanceReviewCard({
           <code>{request.acceptanceRequestId}</code>
         </div>
         <div className={css.badges}>
-          <span>{request.effectiveStatus}</span>
-          <span>{item.currentState}</span>
+          <span>{t(acceptanceStatusKey(request.effectiveStatus))}</span>
+          <span>{t(deliverableStateKey(item.currentState))}</span>
         </div>
       </header>
 
@@ -674,10 +682,10 @@ function AcceptanceReviewCard({
         <section>
           <h4>{t('review.acceptance.frozen')}</h4>
           <dl className={css.cardMeta}>
-            <div><dt>Plan Snapshot</dt><dd><code>{request.plan.planSnapshotId}</code></dd></div>
+            <div><dt>{t('deliverables.plan.snapshot')}</dt><dd><code>{request.plan.planSnapshotId}</code></dd></div>
             <div><dt>{t('deliverables.role.accountable')}</dt><dd>{request.plan.responsibility.accountable.displayName}</dd></div>
             <div><dt>{t('deliverables.role.acceptor')}</dt><dd>{request.plan.responsibility.acceptor.displayName}</dd></div>
-            <div><dt>Event observation</dt><dd><code>{request.calendar.remoteObservationVersion}</code></dd></div>
+            <div><dt>{t('deliverables.calendar.observation')}</dt><dd><code>{request.calendar.remoteObservationVersion}</code></dd></div>
           </dl>
           <h5>{t('review.acceptance.candidates')}</h5>
           <ul className={css.acceptanceVersions}>
@@ -692,12 +700,12 @@ function AcceptanceReviewCard({
         </section>
         <section>
           <h4>{t('review.acceptance.current')}</h4>
-          <p>{scheduleLabel(item.currentCalendar.schedule)} · {item.currentCalendar.remoteStatus} · {item.currentCalendar.syncState}</p>
+          <p>{scheduleLabel(item.currentCalendar.schedule)} · {t(calendarRemoteStatusKey(item.currentCalendar.remoteStatus))} · {t(calendarSyncStateKey(item.currentCalendar.syncState))}</p>
           <ul>{item.currentTasks.map(task => (
             <li key={task.taskGuid}>
               {task.task === null ? <code>{task.taskGuid}</code> : (
                 <a href={task.task.canonicalUrl} target="_blank" rel="noreferrer">{task.task.summary}</a>
-              )} — {task.availability}
+              )} — {t(taskAvailabilityKey(task.availability))}
             </li>
           ))}</ul>
         </section>
@@ -705,17 +713,17 @@ function AcceptanceReviewCard({
 
       {request.decision !== null && (
         <section className={css.recordedDecision}>
-          <h4>{request.decision.outcome}</h4>
+          <h4>{t(acceptanceStatusKey(request.decision.outcome))}</h4>
           <dl className={css.cardMeta}>
             <div><dt>{t('deliverables.acceptance.designated')}</dt><dd>{request.decision.designatedAcceptor.displayName}</dd></div>
-            <div><dt>{t('deliverables.acceptance.recordedBy')}</dt><dd>Owner · <code>{request.decision.actor.id}</code></dd></div>
+            <div><dt>{t('deliverables.acceptance.recordedBy')}</dt><dd>{t('deliverables.actor.owner')} · <code>{request.decision.actor.id}</code></dd></div>
           </dl>
           <p>{request.decision.feedback}</p>
           <ul>{request.decision.criteria.map(result => (
             <li key={result.criterionId}>
               {request.plan.criteria.find(criterion =>
                 criterion.criterionId === result.criterionId)?.statement ?? result.criterionId}
-              {' — '}<strong>{result.outcome}</strong>
+              {' — '}<strong>{t(criterionOutcomeKey(result.outcome))}</strong>
             </li>
           ))}</ul>
         </section>

@@ -188,8 +188,14 @@ describe('ProjectDeliverablesPanel', () => {
     expect(within(card).getByRole('link', { name: 'Write evidence' }).getAttribute('href')).toBe(
       'https://applink.feishu.cn/task-1',
     )
+    expect(within(card).getByText(zh['deliverables.state.planned'])).toBeTruthy()
+    expect(within(card).getByText((_, node) => node?.tagName === 'P'
+      && node.textContent?.includes(zh['deliverables.calendar.remote.confirmed']) === true
+      && node.textContent?.includes(zh['deliverables.calendar.sync.healthy']) === true)).toBeTruthy()
     expect(within(card).getByText(zh['deliverables.plan.immutable'])).toBeTruthy()
     expect(screen.getByText(zh['deliverables.activity.title'])).toBeTruthy()
+    expect(screen.getByText(zh['deliverables.activity.action.created'])).toBeTruthy()
+    expect(screen.getByText(zh['deliverables.activity.source.auditEvent'])).toBeTruthy()
     expect(screen.getByText('audit-create-1')).toBeTruthy()
 
     fireEvent.change(within(card).getByLabelText(zh['deliverables.artifact.source']), {

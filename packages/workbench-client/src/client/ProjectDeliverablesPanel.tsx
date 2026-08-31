@@ -18,6 +18,16 @@ import type {
 } from '@benz-ai-x/dsh-project-workbench/client'
 import type { WorkbenchKey } from './locales.ts'
 import {
+  acceptanceStatusKey,
+  artifactSourceKey,
+  calendarRemoteStatusKey,
+  calendarSyncStateKey,
+  criterionOutcomeKey,
+  deliverableActivityActionKey,
+  deliverableActivitySourceKey,
+  deliverableStateKey,
+} from './deliverable-presentation.ts'
+import {
   MAX_DELIVERABLE_CANDIDATE_VERSIONS,
   MAX_DELIVERABLE_CRITERIA,
   MAX_DELIVERABLE_CRITERION_LENGTH,
@@ -509,12 +519,12 @@ export function ProjectDeliverablesPanel({
                   <ol>
                     {projection.activity.map(entry => (
                       <li key={entry.activityId}>
-                        <div><strong>{entry.action}</strong> · <time dateTime={entry.occurredAt}>{readableTimestamp(entry.occurredAt)}</time></div>
+                        <div><strong>{t(deliverableActivityActionKey(entry.action))}</strong> · <time dateTime={entry.occurredAt}>{readableTimestamp(entry.occurredAt)}</time></div>
                         <dl className={css.compactMeta}>
                           <div><dt>{t('deliverables.activity.plan')}</dt><dd><code>{entry.planSnapshotId}</code></dd></div>
                           {entry.acceptanceRequestId !== null && <div><dt>{t('deliverables.activity.request')}</dt><dd><code>{entry.acceptanceRequestId}</code></dd></div>}
                           {entry.decisionId !== null && <div><dt>{t('deliverables.activity.decision')}</dt><dd><code>{entry.decisionId}</code></dd></div>}
-                          <div><dt>{entry.source.kind}</dt><dd><code>{entry.source.kind === 'audit-event' ? entry.source.auditEventId : entry.source.scheduleChangeId}</code></dd></div>
+                          <div><dt>{t(deliverableActivitySourceKey(entry.source.kind))}</dt><dd><code>{entry.source.kind === 'audit-event' ? entry.source.auditEventId : entry.source.scheduleChangeId}</code></dd></div>
                         </dl>
                       </li>
                     ))}
@@ -566,7 +576,7 @@ function DeliverableCard({
           <h4>{item.plan.name}</h4>
           {item.plan.description !== null && <p>{item.plan.description}</p>}
         </div>
-        <span className={css.stateBadge}>{item.state}</span>
+        <span className={css.stateBadge}>{t(deliverableStateKey(item.state))}</span>
       </header>
       <dl className={css.meta}>
         <div><dt>{t('deliverables.plan.snapshot')}</dt><dd><code>{item.plan.planSnapshotId}</code></dd></div>
@@ -580,7 +590,7 @@ function DeliverableCard({
       </section>
       <section className={css.cardSection}>
         <h5>{t('deliverables.calendar.title')}</h5>
-        <p>{scheduleText(item.calendar.schedule)} · {item.calendar.remoteStatus} · {item.calendar.syncState}</p>
+        <p>{scheduleText(item.calendar.schedule)} · {t(calendarRemoteStatusKey(item.calendar.remoteStatus))} · {t(calendarSyncStateKey(item.calendar.syncState))}</p>
         <a href={item.calendar.eventAppLink} target="_blank" rel="noreferrer">
           {t('deliverables.calendar.open')}
         </a>
@@ -611,9 +621,9 @@ function DeliverableCard({
                 <select value={artifact.source} onChange={event => {
                   setArtifact({ ...artifact, source: event.currentTarget.value as ArtifactInput['source'] })
                 }}>
-                  <option value="managed">managed</option>
-                  <option value="local">local</option>
-                  <option value="feishu">feishu</option>
+                  <option value="managed">{t(artifactSourceKey('managed'))}</option>
+                  <option value="local">{t(artifactSourceKey('local'))}</option>
+                  <option value="feishu">{t(artifactSourceKey('feishu'))}</option>
                 </select>
               </label>
               <label className={css.field}>
@@ -702,18 +712,18 @@ function DeliverableCard({
             key={request.acceptanceRequestId}
             aria-label={`${t('deliverables.activity.request')} ${request.sequence}`}
           >
-            <header><strong>{request.effectiveStatus}</strong><code>{request.acceptanceRequestId}</code></header>
+            <header><strong>{t(acceptanceStatusKey(request.effectiveStatus))}</strong><code>{request.acceptanceRequestId}</code></header>
             <ul>{request.candidateVersions.map(version => <Version key={version.referenceDigest} version={version} t={t} />)}</ul>
             {request.decision !== null && (
               <div className={css.decision}>
                 <dl className={css.meta}>
                   <div><dt>{t('deliverables.acceptance.designated')}</dt><dd>{request.decision.designatedAcceptor.displayName}</dd></div>
-                  <div><dt>{t('deliverables.acceptance.recordedBy')}</dt><dd>{request.decision.actor.kind} · <code>{request.decision.actor.id}</code></dd></div>
+                  <div><dt>{t('deliverables.acceptance.recordedBy')}</dt><dd>{t('deliverables.actor.owner')} · <code>{request.decision.actor.id}</code></dd></div>
                 </dl>
                 <p>{request.decision.feedback}</p>
                 <ul>{request.decision.criteria.map(result => {
                   const criterion = request.plan.criteria.find(item => item.criterionId === result.criterionId)
-                  return <li key={result.criterionId}>{criterion?.statement ?? result.criterionId}: <strong>{result.outcome}</strong></li>
+                  return <li key={result.criterionId}>{criterion?.statement ?? result.criterionId}: <strong>{t(criterionOutcomeKey(result.outcome))}</strong></li>
                 })}</ul>
               </div>
             )}

@@ -121,6 +121,11 @@ describe('ReviewCenterPanel Deliverable Acceptance', () => {
     })
     expect(card.getAttribute('data-review-kind')).toBe('deliverable-acceptance')
     expect(within(card).getByText(zh['deliverables.artifact.declared'])).toBeTruthy()
+    expect(within(card).getByText(zh['deliverables.acceptance.status.pending'])).toBeTruthy()
+    expect(within(card).getByText(zh['deliverables.state.inReview'])).toBeTruthy()
+    expect(screen.getByRole('option', {
+      name: zh['deliverables.acceptance.status.needsChanges'],
+    })).toBeTruthy()
     expect(within(card).getByText(zh['review.acceptance.decision.actor'])).toBeTruthy()
     expect(within(card).getByText(zh['review.acceptance.decision.hint'])).toBeTruthy()
 
