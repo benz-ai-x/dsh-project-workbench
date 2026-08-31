@@ -207,8 +207,12 @@ describe('ProjectDeliverablesPanel', () => {
     fireEvent.click(within(card).getByRole('button', { name: zh['deliverables.artifact.add'] }))
     expect(within(card).getByText(zh['deliverables.artifact.declared'])).toBeTruthy()
 
+    const packageRoot = process.cwd().endsWith('packages/workbench-client')
+      ? process.cwd()
+      : resolve(process.cwd(), 'packages/workbench-client')
     const styles = await readFile(resolve(
-      'packages/workbench-client/src/client/ProjectDeliverablesPanel.module.css',
+      packageRoot,
+      'src/client/ProjectDeliverablesPanel.module.css',
     ), 'utf8')
     expect(styles).toContain('@media (max-width: 640px)')
     expect(styles).toMatch(/overflow-wrap:\s*anywhere/u)
