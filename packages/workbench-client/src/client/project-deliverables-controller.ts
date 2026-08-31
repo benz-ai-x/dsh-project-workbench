@@ -47,6 +47,9 @@ export interface WorkbenchDeclaredArtifactVersionDraft extends DeliverableArtifa
   readonly resolution: 'declared'
 }
 
+export type WorkbenchArtifactDraftResult =
+  | 'added' | 'invalid' | 'duplicate' | 'limit' | 'unavailable'
+
 export interface WorkbenchProjectDeliverableCreateDraft {
   readonly name: string
   readonly description: string
@@ -286,13 +289,16 @@ export class WorkbenchProjectDeliverablesController {
     this.updateCreateDraft({ ...this.state.createDraft, schedule: detachSchedule(schedule) })
   }
 
-  addCandidateVersion(deliverableId: string, value: DeliverableArtifactVersionRef): void {
-    if (!this.canEdit() || this.deliverable(deliverableId) === null) return
+  addCandidateVersion(
+    deliverableId: string,
+    value: DeliverableArtifactVersionRef,
+  ): WorkbenchArtifactDraftResult {
+    if (!this.canEdit() || this.deliverable(deliverableId) === null) return 'unavailable'
     const normalized = normalizeArtifact(value)
-    if (normalized === null) return
+    if (normalized === null) return 'invalid'
     const current = this.state.candidateDrafts[deliverableId] ?? []
-    if (current.length >= MAX_DELIVERABLE_CANDIDATE_VERSIONS
-      || current.some(item => sameArtifactReference(item, normalized))) return
+    if (current.length >= MAX_DELIVERABLE_CANDIDATE_VERSIONS) return 'limit'
+    if (current.some(item => sameArtifactReference(item, normalized))) return 'duplicate'
     this.clearRetryFor('request-acceptance', deliverableId)
     this.publish({
       ...this.state,
@@ -303,6 +309,7 @@ export class WorkbenchProjectDeliverablesController {
       issue: this.state.issue?.operation === 'request-acceptance' ? null : this.state.issue,
       canRetryMutation: this.retryEnvelope !== null,
     })
+    return 'added'
   }
 
   removeCandidateVersion(deliverableId: string, index: number): void {

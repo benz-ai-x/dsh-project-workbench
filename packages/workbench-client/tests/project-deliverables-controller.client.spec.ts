@@ -277,9 +277,9 @@ describe('WorkbenchProjectDeliverablesController', () => {
     const controller = new WorkbenchProjectDeliverablesController(makeRemote())
     await controller.selectProject('project-1', 'Evidence Project')
 
-    controller.addCandidateVersion('deliverable-1', {
+    expect(controller.addCandidateVersion('deliverable-1', {
       ...artifact(), resourceId: 'bad-url', canonicalUrl: 'http://example.test/report',
-    })
+    })).toBe('invalid')
     controller.addCandidateVersion('deliverable-1', {
       ...artifact(), resourceId: 'bad-digest', contentDigest: `sha256:${'A'.repeat(64)}`,
     })
@@ -293,10 +293,10 @@ describe('WorkbenchProjectDeliverablesController', () => {
     controller.addCandidateVersion('deliverable-1', {
       ...artifact(), resourceId: 'bad-long-label', displayName: 'x'.repeat(201),
     })
-    controller.addCandidateVersion('deliverable-1', {
+    expect(controller.addCandidateVersion('deliverable-1', {
       ...artifact(), resourceId: 'boundary-reference', versionId: 'v'.repeat(256),
       displayName: 'd'.repeat(200), canonicalUrl: 'https://example.test/report',
-    })
+    })).toBe('added')
     for (let index = 0; index < 21; index += 1) {
       controller.addCandidateVersion('deliverable-1', {
         ...artifact(), resourceId: `report-${index}.md`, versionId: `version-${index}`,

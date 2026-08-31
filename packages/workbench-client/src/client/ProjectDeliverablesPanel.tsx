@@ -36,6 +36,7 @@ import {
   MAX_DELIVERABLE_CRITERION_LENGTH,
   MAX_DELIVERABLE_DESCRIPTION_LENGTH,
   MAX_DELIVERABLE_NAME_LENGTH,
+  type WorkbenchArtifactDraftResult,
   type WorkbenchProjectDeliverablesClientState,
   type WorkbenchProjectDeliverablesController,
 } from './project-deliverables-controller.ts'
@@ -556,13 +557,25 @@ function DeliverableCard({
   readonly setRef: (node: HTMLElement | null) => void
 }) {
   const [artifact, setArtifact] = useState<ArtifactInput>(EMPTY_ARTIFACT)
+  const [artifactIssue, setArtifactIssue] = useState<Exclude<
+    WorkbenchArtifactDraftResult,
+    'added'
+  > | null>(null)
   const candidates = state.candidateDrafts[item.deliverableId] ?? []
   const pending = state.pendingOperation !== null
   const addArtifact = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
     const value = artifactRef(artifact)
-    if (value === null) return
-    controller.addCandidateVersion(item.deliverableId, value)
+    if (value === null) {
+      setArtifactIssue('invalid')
+      return
+    }
+    const outcome = controller.addCandidateVersion(item.deliverableId, value)
+    if (outcome !== 'added') {
+      setArtifactIssue(outcome)
+      return
+    }
+    setArtifactIssue(null)
     setArtifact(EMPTY_ARTIFACT)
   }
   return (
@@ -618,6 +631,11 @@ function DeliverableCard({
           <fieldset className={css.nestedFieldset} disabled={pending}>
             <legend>{t('deliverables.artifact.legend')}</legend>
             <p className={css.hint}>{t('deliverables.artifact.truth')}</p>
+            {artifactIssue !== null && (
+              <p className={css.issue} role="alert">
+                {t(`deliverables.artifact.error.${artifactIssue}`)}
+              </p>
+            )}
             <div className={css.twoColumn}>
               <label className={css.field}>
                 <span>{t('deliverables.artifact.source')}</span>

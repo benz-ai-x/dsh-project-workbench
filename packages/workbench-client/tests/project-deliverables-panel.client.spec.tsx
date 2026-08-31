@@ -210,7 +210,18 @@ describe('ProjectDeliverablesPanel', () => {
     fireEvent.change(within(card).getByLabelText(zh['deliverables.artifact.displayName']), {
       target: { value: 'Evidence report v1' },
     })
+    fireEvent.change(within(card).getByLabelText(zh['deliverables.artifact.url']), {
+      target: { value: 'https://owner:secret@example.test/report' },
+    })
     fireEvent.click(within(card).getByRole('button', { name: zh['deliverables.artifact.add'] }))
+    expect(within(card).getByRole('alert').textContent).toBe(
+      zh['deliverables.artifact.error.invalid'],
+    )
+    fireEvent.change(within(card).getByLabelText(zh['deliverables.artifact.url']), {
+      target: { value: '' },
+    })
+    fireEvent.click(within(card).getByRole('button', { name: zh['deliverables.artifact.add'] }))
+    expect(within(card).queryByRole('alert')).toBeNull()
     expect(within(card).getByText(zh['deliverables.artifact.declared'])).toBeTruthy()
 
     const packageRoot = process.cwd().endsWith('packages/workbench-client')

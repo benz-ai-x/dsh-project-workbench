@@ -134,6 +134,7 @@ export {
   WorkbenchProjectDeliverablesController,
 } from './project-deliverables-controller.ts'
 export type {
+  WorkbenchArtifactDraftResult,
   WorkbenchDeclaredArtifactVersionDraft,
   WorkbenchProjectDeliverableCreateDraft,
   WorkbenchProjectDeliverablesClientState,
