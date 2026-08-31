@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T11 actually loads.
+ * Verify the executable artifacts that T12 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -345,12 +345,14 @@ function verifyTypertFace(face, packageName, label) {
     'reconcileProjectTasks',
     'referenceFeishuTask',
     'requestDeliverableAcceptance',
+    'reviseProjectRisk',
     'reviewCenter',
     'reviseProjectRisk',
     'setProjectMemberStatus',
     'setProjectResponsibility',
     'setStatus',
     'snapshot',
+    'transitionProjectRisk',
     'updateFeishuTask',
     'updateProjectMilestoneDate',
     'transitionProjectRisk',
@@ -411,7 +413,9 @@ function verifyTypertFace(face, packageName, label) {
   const projectDeliverables = invocations.find(
     invocation => invocation?.method === 'projectDeliverables',
   )
-  const projectRisks = invocations.find(invocation => invocation?.method === 'projectRisks')
+  const projectRisks = invocations.find(
+    invocation => invocation?.method === 'projectRisks',
+  )
   const getProjectMilestones = invocations.find(
     invocation => invocation?.method === 'getProjectMilestones',
   )
@@ -425,11 +429,11 @@ function verifyTypertFace(face, packageName, label) {
     invocation => invocation?.method === 'proposeProjectResponsibilityChange',
   )
   const reviewCenter = invocations.find(invocation => invocation?.method === 'reviewCenter')
-  const reviseProjectRisk = invocations.find(
-    invocation => invocation?.method === 'reviseProjectRisk',
-  )
   const requestDeliverableAcceptance = invocations.find(
     invocation => invocation?.method === 'requestDeliverableAcceptance',
+  )
+  const reviseProjectRisk = invocations.find(
+    invocation => invocation?.method === 'reviseProjectRisk',
   )
   const reconcileProjectTasks = invocations.find(
     invocation => invocation?.method === 'reconcileProjectTasks',
@@ -507,6 +511,18 @@ function verifyTypertFace(face, packageName, label) {
     check(
       invocation?.cancellation?.parameter === 'signal',
       `${packageName}: ${label} ${String(invocation?.method)} carries caller cancellation`,
+    )
+  }
+  for (const [invocation, parameterName] of [
+    [projectRisks, 'query'],
+    [createProjectRisk, 'request'],
+    [reviseProjectRisk, 'request'],
+    [transitionProjectRisk, 'request'],
+  ]) {
+    const parameter = invocation?.parameters?.find(candidate => candidate?.name === parameterName)
+    check(
+      parameter?.codec?.schema !== undefined && invocation?.result?.schema !== undefined,
+      `${packageName}: ${label} ${String(invocation?.method)} exposes generated ${parameterName} and result codecs`,
     )
   }
 

@@ -795,7 +795,7 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
-assert.equal(host.WORKBENCH_SCHEMA_VERSION, 10)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 11)
 assert.equal(typeof host.DshFeishuConnectionAdapter, 'function')
 assert.equal(host.FEISHU_CONNECTION_ADAPTER_ID, 'feishu-open-platform-v1')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.startIdentityVerification, 'function')
@@ -828,6 +828,7 @@ const remoteMethods = [
   'createProject',
   'createProjectDeliverable',
   'createProjectMilestone',
+  'createProjectRisk',
   'decideDeliverableAcceptance',
   'decideSuggestedChange',
   'discoverFeishuCalendarEvents',
@@ -839,6 +840,7 @@ const remoteMethods = [
   'previewFeishuTaskWorkflow',
   'project',
   'projectDeliverables',
+  'projectRisks',
   'projectStart',
   'projectTasks',
   'projectTeam',
@@ -847,11 +849,13 @@ const remoteMethods = [
   'reconcileProjectTasks',
   'referenceFeishuTask',
   'requestDeliverableAcceptance',
+  'reviseProjectRisk',
   'reviewCenter',
   'setProjectMemberStatus',
   'setProjectResponsibility',
   'setStatus',
   'snapshot',
+  'transitionProjectRisk',
   'updateFeishuTask',
   'updateProjectMilestoneDate',
   'verifyFeishuIdentityRoute',

@@ -60,6 +60,7 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'createProject',
   'createProjectDeliverable',
   'createProjectMilestone',
+  'createProjectRisk',
   'decideDeliverableAcceptance',
   'decideSuggestedChange',
   'discoverFeishuCalendarEvents',
@@ -71,6 +72,7 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'previewFeishuTaskWorkflow',
   'project',
   'projectDeliverables',
+  'projectRisks',
   'projectStart',
   'projectTasks',
   'projectTeam',
@@ -79,11 +81,13 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'reconcileProjectTasks',
   'referenceFeishuTask',
   'requestDeliverableAcceptance',
+  'reviseProjectRisk',
   'reviewCenter',
   'setProjectMemberStatus',
   'setProjectResponsibility',
   'setStatus',
   'snapshot',
+  'transitionProjectRisk',
   'updateFeishuTask',
   'updateProjectMilestoneDate',
   'verifyFeishuIdentityRoute',
@@ -94,6 +98,12 @@ const DELIVERABLE_REMOTE_METHODS = Object.freeze([
   'projectDeliverables',
   'requestDeliverableAcceptance',
 ])
+const RISK_REMOTE_METHODS = Object.freeze([
+  'createProjectRisk',
+  'projectRisks',
+  'reviseProjectRisk',
+  'transitionProjectRisk',
+])
 
 function expectDeliverableRemoteSurface(service: WorkbenchService): void {
   expect(DELIVERABLE_REMOTE_METHODS.filter(
@@ -101,7 +111,23 @@ function expectDeliverableRemoteSurface(service: WorkbenchService): void {
   )).toEqual(DELIVERABLE_REMOTE_METHODS)
 }
 
+function expectRiskRemoteSurface(service: WorkbenchService): void {
+  expect(RISK_REMOTE_METHODS.filter(
+    method => typeof Reflect.get(service, method) === 'function',
+  )).toEqual(RISK_REMOTE_METHODS)
+}
+
 function callDeliverableRemote(
+  service: WorkbenchService,
+  method: string,
+  value: unknown,
+): Promise<unknown> {
+  const remote = Reflect.get(service, method)
+  if (typeof remote !== 'function') throw new TypeError(`${method} is not a Remote method`)
+  return Reflect.apply(remote, service, [value, new AbortController().signal]) as Promise<unknown>
+}
+
+function callRiskRemote(
   service: WorkbenchService,
   method: string,
   value: unknown,
@@ -128,7 +154,15 @@ interface WorkbenchContext extends Context {
   readonly workbench: WorkbenchService
   readonly workbenchAuth: {
     readonly routeLifecycle: 'accepting' | 'closing' | 'closed'
+    readonly authorizationRequests: string[]
     run<T>(operation: () => T): T
+    deny(action: string): void
+    overrideScope(action: string, scope: {
+      readonly ownerId: string
+      readonly organizationId: string
+      readonly teamId: string
+    }): void
+    resetAuthorizationEvidence(): void
   }
   readonly ownerAuthDependencies: {
     readonly routes: Map<string, {
@@ -289,6 +323,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
       method => typeof Reflect.get(firstService, method) === 'function',
     )).toEqual(WORKBENCH_REMOTE_METHODS)
     expectDeliverableRemoteSurface(firstService)
+    expectRiskRemoteSurface(firstService)
     await expect(firstService.snapshot(new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })
@@ -311,6 +346,16 @@ describe('built Workbench Host through the real DSH Loader', () => {
       ['decideDeliverableAcceptance', {}],
     ] as const) {
       await expect(callDeliverableRemote(firstService, method, value)).rejects.toMatchObject({
+        failure: { code: 'unauthorized' },
+      })
+    }
+    for (const [method, value] of [
+      ['projectRisks', { projectId: 'project-secret', activityLimit: 10 }],
+      ['createProjectRisk', {}],
+      ['reviseProjectRisk', {}],
+      ['transitionProjectRisk', {}],
+    ] as const) {
+      await expect(callRiskRemote(firstService, method, value)).rejects.toMatchObject({
         failure: { code: 'unauthorized' },
       })
     }
@@ -969,6 +1014,45 @@ describe('built Workbench Host through the real DSH Loader', () => {
     expect(restarted.get('workbench')).toBeUndefined()
   })
 
+  it('requires identical Risk and Risk Activity read scopes before the Loader-owned query', async () => {
+    expect(existsSync(hostEntry)).toBe(true)
+    const test = await fixture()
+    await writeFile(test.configPath, config(hostEntry, test.databasePath))
+
+    const context = await load(test.configPath)
+    expectRiskRemoteSurface(context.workbench)
+    const query = { projectId: 'project-not-created', activityLimit: 10 }
+
+    context.workbenchAuth.resetAuthorizationEvidence()
+    context.workbenchAuth.deny('workbench.project.risk.activity.read')
+    await expect(context.workbenchAuth.run(() =>
+      callRiskRemote(context.workbench, 'projectRisks', query))).rejects.toMatchObject({
+      failure: {
+        code: 'unauthorized',
+        details: { action: 'workbench.project.risk.activity.read' },
+      },
+    })
+    expect(context.workbenchAuth.authorizationRequests).toEqual([
+      'workbench.project.risk.read',
+      'workbench.project.risk.activity.read',
+    ])
+
+    context.workbenchAuth.resetAuthorizationEvidence()
+    context.workbenchAuth.overrideScope('workbench.project.risk.activity.read', {
+      ownerId: 'owner-loader-fixture',
+      organizationId: 'organization-loader-fixture',
+      teamId: 'team-other-scope',
+    })
+    await expect(context.workbenchAuth.run(() =>
+      callRiskRemote(context.workbench, 'projectRisks', query))).rejects.toMatchObject({
+      failure: { code: 'forbidden' },
+    })
+    expect(context.workbenchAuth.authorizationRequests).toEqual([
+      'workbench.project.risk.read',
+      'workbench.project.risk.activity.read',
+    ])
+  })
+
   it('recovers a non-empty Calendar binding and Milestone through a real Loader restart', async () => {
     expect(existsSync(hostEntry)).toBe(true)
     expect(existsSync(calendarHostFixtureEntry)).toBe(true)
@@ -1144,6 +1228,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
     if (entry === undefined) throw new Error('real Loader did not publish workbench-host entry')
     const firstService = context.workbench
     expectDeliverableRemoteSurface(firstService)
+    expectRiskRemoteSurface(firstService)
     const committed = await context.workbenchAuth.run(() => firstService.setStatus(
       statusRequest(
         'same-process HMR status',
@@ -1167,6 +1252,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
     expect(context.get('workbench')).toBeDefined()
     expect(context.workbench).not.toBe(firstService)
     expectDeliverableRemoteSurface(context.workbench)
+    expectRiskRemoteSurface(context.workbench)
     await expect(context.workbenchAuth.run(() =>
       context.workbench.snapshot(new AbortController().signal))).resolves.toEqual(committed.value)
     const remountedActivity = await context.workbenchAuth.run(() => context.workbench.activity(

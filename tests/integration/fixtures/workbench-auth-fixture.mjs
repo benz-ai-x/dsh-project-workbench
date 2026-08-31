@@ -2,7 +2,6 @@
 
 import { Service } from '@deepseek-ai/cordis'
 import {
-  V1OwnerAuthorizationPolicy,
   WorkbenchAuthorizationContext,
   ownerPrincipal,
 } from '../../../packages/workbench-host/lib/index.js'
@@ -12,9 +11,6 @@ export default class WorkbenchAuthFixture extends Service {
 
   constructor(ctx) {
     super(ctx, 'workbenchAuth')
-    this.authorization = new WorkbenchAuthorizationContext(
-      new V1OwnerAuthorizationPolicy(async () => true),
-    )
     this.principal = ownerPrincipal({
       kind: 'owner',
       ownerId: 'owner-loader-fixture',
@@ -23,9 +19,42 @@ export default class WorkbenchAuthFixture extends Service {
       sessionId: 'session-loader-fixture',
       credentialVersion: 1,
     })
+    this.authorizationRequests = []
+    this.deniedActions = new Set()
+    this.scopeOverrides = new Map()
+    this.authorization = new WorkbenchAuthorizationContext({
+      authorize: async request => {
+        this.authorizationRequests.push(request.action)
+        if (request.principal === null || this.deniedActions.has(request.action)) {
+          return { allowed: false, reason: 'revoked-session' }
+        }
+        return {
+          allowed: true,
+          scope: this.scopeOverrides.get(request.action) ?? Object.freeze({
+            ownerId: request.principal.ownerId,
+            organizationId: request.principal.organizationId,
+            teamId: request.principal.teamId,
+          }),
+        }
+      },
+    })
   }
 
   run(operation) {
     return this.authorization.runAs(this.principal, operation)
+  }
+
+  deny(action) {
+    this.deniedActions.add(action)
+  }
+
+  overrideScope(action, scope) {
+    this.scopeOverrides.set(action, Object.freeze({ ...scope }))
+  }
+
+  resetAuthorizationEvidence() {
+    this.authorizationRequests.length = 0
+    this.deniedActions.clear()
+    this.scopeOverrides.clear()
   }
 }

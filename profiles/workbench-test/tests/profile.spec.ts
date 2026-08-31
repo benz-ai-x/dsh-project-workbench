@@ -170,7 +170,7 @@ describe('Workbench test profile', () => {
     })
   })
 
-  it('resolves the generated T11 Deliverable Remote face through the materialized Profile closure', async () => {
+  it('resolves the generated T12 Risk Remote face through the materialized Profile closure', async () => {
     const require = createRequire(import.meta.url)
     const resolved = require.resolve('@benz-ai-x/dsh-project-workbench/remote')
     const remote = await import(pathToFileURL(resolved).href) as {
@@ -180,10 +180,10 @@ describe('Workbench test profile', () => {
 
     expect(resolved).toMatch(/[/\\]packages[/\\]workbench-host[/\\]lib[/\\]typert\.remote-client\.js$/u)
     expect(methods).toEqual(expect.arrayContaining([
-      'createProjectDeliverable',
-      'decideDeliverableAcceptance',
-      'projectDeliverables',
-      'requestDeliverableAcceptance',
+      'createProjectRisk',
+      'projectRisks',
+      'reviseProjectRisk',
+      'transitionProjectRisk',
     ]))
   })
 
