@@ -2,6 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
+import { canonicalizeJson } from './audit.ts'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
@@ -14,12 +15,20 @@ import type {
   ConfigureFeishuTaskWorkflowMapping,
   ConfigureFeishuTaskWorkflowRequest,
   ConfigureFeishuTaskWorkflowResult,
+  CreateProjectDeliverableRequest,
+  CreateProjectDeliverableResult,
   CreateProjectRequest,
   CreateProjectResult,
   CreateProjectMilestoneRequest,
   CreateProjectMilestoneResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  DecideDeliverableAcceptanceRequest,
+  DecideDeliverableAcceptanceResult,
+  DeliverableAcceptanceReviewCenterFilter,
+  DeliverableArtifactVersionRef,
+  DeliverableAcceptanceReviewCenterProjection,
+  DeliverablePlanProjection,
   DiscoverFeishuTaskListsRequest,
   DiscoverFeishuCalendarsRequest,
   DiscoverFeishuCalendarEventsRequest,
@@ -43,6 +52,9 @@ import type {
   FeishuScopeObservation,
   OutcomeDraft,
   ProjectDetailProjection,
+  ProjectDeliverablesProjection,
+  ProjectDeliverablesQuery,
+  ProjectDeliverableConflict,
   ProjectCalendarSchedule,
   ProjectMilestonesProjection,
   ProjectMilestonesQuery,
@@ -67,8 +79,11 @@ import type {
   ReconcileProjectCalendarResult,
   ReferenceFeishuTaskRequest,
   ReferenceFeishuTaskResult,
+  RequestDeliverableAcceptanceRequest,
+  RequestDeliverableAcceptanceResult,
   ReviewCenterFilter,
-  ReviewCenterProjection,
+  ReviewCenterQuery,
+  ReviewCenterResultProjection,
   SetProjectMemberStatusRequest,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityRequest,
@@ -91,7 +106,9 @@ import type {
   UpdateProjectMilestoneDateResult,
 } from './client.ts'
 import {
+  deliverableAcceptanceReviewCenterProjection,
   projectDetailProjection,
+  projectDeliverablesProjection,
   projectMilestonesProjection,
   projectResult,
   projectStartProjection,
@@ -117,9 +134,14 @@ import {
   type WorkbenchFeishuTaskWorkflowContext,
   type WorkbenchFeishuCalendarReconciliationMutation,
   type WorkbenchFeishuCalendarReconciliationTarget,
+  type WorkbenchDeliverableAcceptanceDecisionMutation,
+  type WorkbenchDeliverableAcceptanceRequestMutation,
+  type WorkbenchDeliverableCalendarCreationReservationMutation,
+  type WorkbenchProjectDeliverableMutation,
+  type WorkbenchProjectDeliverableReplayQuery,
   type WorkbenchProjectMilestoneReplayQuery,
 } from './repository.ts'
-import type { AuthorizedScope, WorkbenchAuthorization } from './authorization.ts'
+import type { AuthorizedScope, WorkbenchAction, WorkbenchAuthorization } from './authorization.ts'
 import type {
   WorkbenchFeishuTaskEventObservation,
   WorkbenchFeishuTaskExternalAdapter,
@@ -156,6 +178,13 @@ export interface WorkbenchIdGenerator {
   nextOutboxId(): string
   nextMilestoneId?(): string
   nextScheduleChangeId?(): string
+  nextDeliverableId?(): string
+  nextDeliverablePlanSnapshotId?(): string
+  nextDeliverableCriterionId?(): string
+  nextDeliverableAcceptanceRequestId?(): string
+  nextDeliverableDecisionId?(): string
+  nextDeliverableFinalReleaseId?(): string
+  nextDeliverableActivityId?(): string
 }
 
 /** Stable identity for a future independently versioned external capability. */
@@ -260,6 +289,13 @@ export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextOutboxId: () => `outbox-${randomUUID()}`,
   nextMilestoneId: () => `milestone-${randomUUID()}`,
   nextScheduleChangeId: () => `schedule-change-${randomUUID()}`,
+  nextDeliverableId: () => `deliverable-${randomUUID()}`,
+  nextDeliverablePlanSnapshotId: () => `deliverable-plan-${randomUUID()}`,
+  nextDeliverableCriterionId: () => `criterion-${randomUUID()}`,
+  nextDeliverableAcceptanceRequestId: () => `acceptance-request-${randomUUID()}`,
+  nextDeliverableDecisionId: () => `acceptance-decision-${randomUUID()}`,
+  nextDeliverableFinalReleaseId: () => `final-release-${randomUUID()}`,
+  nextDeliverableActivityId: () => `deliverable-activity-${randomUUID()}`,
 })
 
 export const noWorkbenchExternalAdapters: WorkbenchExternalAdapters = Object.freeze({})
@@ -1671,7 +1707,7 @@ export class WorkbenchScenario {
       )
       throwIfCancelled(operationSignal)
       if (observed.state !== 'ok') throw unavailable('Feishu event discovery was rejected')
-      const used = new Set(target.milestones.map(milestone => milestone.eventId))
+      const used = new Set(target.commitments.map(commitment => commitment.eventId))
       const seen = new Set<string>()
       const items = Object.freeze(observed.value.map((item) => {
         validateCalendarEventSnapshot(item)
@@ -1712,6 +1748,422 @@ export class WorkbenchScenario {
         projectMilestonesProjection(projection),
         operationSignal,
       )
+    })
+  }
+
+  /** Read one Project's complete Deliverables workspace and authorized replay chain. */
+  projectDeliverables(
+    query: ProjectDeliverablesQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectDeliverablesProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'projectDeliverables')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await requireIdenticalScopes(
+        this.options.authorization,
+        'workbench.project.deliverable.read',
+        'workbench.project.deliverable.activity.read',
+        operationSignal,
+      )
+      const normalized = validateProjectDeliverablesQuery(query)
+      const projection = await this.options.repository.readProjectDeliverables(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+        ...(normalized.beforeActivitySequence === undefined
+          ? {}
+          : { beforeActivitySequence: normalized.beforeActivitySequence }),
+        ...(normalized.activityLimit === undefined ? {} : { activityLimit: normalized.activityLimit }),
+      }), operationSignal)
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.project.deliverable.read',
+        projectDeliverablesProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Create one immutable Deliverable Plan and bind its formal Calendar event. */
+  createProjectDeliverable(
+    request: CreateProjectDeliverableRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'createProjectDeliverable')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.deliverable.write',
+        operationSignal,
+      )
+      const normalized = validateCreateProjectDeliverableRequest(request)
+      const replayQuery: WorkbenchProjectDeliverableReplayQuery = Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        name: normalized.name,
+        description: normalized.description ?? null,
+        criteria: Object.freeze(normalized.criteria.map(criterion => criterion.statement)),
+        accountableMemberId: normalized.accountableMemberId,
+        contributorMemberIds: normalized.contributorMemberIds,
+        humanSponsorMemberId: normalized.humanSponsorMemberId,
+        acceptorMemberId: normalized.acceptorMemberId,
+        taskGuids: normalized.taskGuids,
+        event: normalized.event,
+        expectedDeliverablesRevision: normalized.expectedDeliverablesRevision,
+        expectedDeliverableRevision: null,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        expectedScheduleRevision: normalized.expectedScheduleRevision,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+      })
+      const replay = await this.options.repository.replayProjectDeliverableCreation(
+        replayQuery,
+        operationSignal,
+      )
+      if (replay !== null) return replay
+      const current = await this.options.repository.readProjectDeliverables(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const preflight = deliverableCreatePreflight(current, normalized)
+      if (preflight !== null) return preflight
+      if (current === null) throw infrastructure('Workbench Deliverable preflight lost its Project')
+      const target = await this.options.repository.readFeishuCalendarReconciliationTarget(
+        Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }),
+        operationSignal,
+      )
+      if (target === null) return deliverableConflict('calendar-unbound', 'Project has no bound Calendar')
+      if (normalized.event.mode === 'existing-event'
+        && target.commitments.some(item => item.eventId === normalized.event.eventId)) {
+        return deliverableConflict('event-already-used', 'Calendar event already backs a commitment', current)
+      }
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const deliverableId = nextDeliverableIdentity(
+        this.options.ids.nextDeliverableId,
+        `deliverable-${commandId}`,
+        'Deliverable',
+      )
+      const planSnapshotId = nextDeliverableIdentity(
+        this.options.ids.nextDeliverablePlanSnapshotId,
+        `deliverable-plan-${commandId}`,
+        'Deliverable Plan snapshot',
+      )
+      const criteria = Object.freeze(normalized.criteria.map((criterion, index) => Object.freeze({
+        criterionId: nextDeliverableIdentity(
+          this.options.ids.nextDeliverableCriterionId,
+          `criterion-${commandId}-${String(index + 1)}`,
+          'Acceptance Criterion',
+        ),
+        statement: criterion.statement,
+      })))
+      const member = (memberId: string) => {
+        const option = current.memberOptions.find(candidate => candidate.memberId === memberId)
+        if (option === undefined) throw infrastructure('Workbench Deliverable member option disappeared')
+        return Object.freeze({
+          memberId: option.memberId,
+          displayName: option.displayName,
+          kind: option.kind,
+        })
+      }
+      const responsibility = Object.freeze({
+        accountable: member(normalized.accountableMemberId),
+        contributors: Object.freeze(normalized.contributorMemberIds.map(member)),
+        humanSponsor: normalized.humanSponsorMemberId === null
+          ? null
+          : member(normalized.humanSponsorMemberId),
+        acceptor: member(normalized.acceptorMemberId),
+      })
+      const planWithoutDigest = Object.freeze({
+        planSnapshotId,
+        name: normalized.name,
+        description: normalized.description ?? null,
+        criteria,
+        responsibility,
+        taskGuids: normalized.taskGuids,
+        createdAt: occurredAt,
+      })
+      const plan: DeliverablePlanProjection = Object.freeze({
+        ...planWithoutDigest,
+        digest: scenarioContentDigest(planWithoutDigest),
+      })
+      const command = Object.freeze({
+        commandId,
+        auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+        outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+        actor: Object.freeze({
+          kind: 'owner' as const,
+          id: scope.ownerId,
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+        }),
+        occurredAt,
+      })
+      const shared = Object.freeze({
+        deliverableId,
+        activityId: nextDeliverableIdentity(
+          this.options.ids.nextDeliverableActivityId,
+          `deliverable-activity-${commandId}`,
+          'Deliverable Activity',
+        ),
+        changeId: nextScheduleChangeId(this.options.ids, `${commandId}-created`),
+        projectId: normalized.projectId,
+        plan,
+        memberIds: Object.freeze({
+          accountableMemberId: normalized.accountableMemberId,
+          contributorMemberIds: normalized.contributorMemberIds,
+          humanSponsorMemberId: normalized.humanSponsorMemberId,
+          acceptorMemberId: normalized.acceptorMemberId,
+        }),
+        expectedDeliverablesRevision: normalized.expectedDeliverablesRevision,
+        expectedDeliverableRevision: null,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        expectedScheduleRevision: normalized.expectedScheduleRevision,
+        createdAt: occurredAt,
+        command,
+      })
+      const adapter = requiredCalendarAdapter(this.options.adapters)
+      if (normalized.event.mode === 'existing-event') {
+        const observed = await adapter.readCalendarEvent(
+          target.route,
+          target.calendarId,
+          normalized.event.eventId,
+          operationSignal,
+        )
+        throwIfCancelled(operationSignal)
+        if (observed.state !== 'ok') {
+          return deliverableConflict('remote-rejected', 'Feishu rejected the event observation', current, observed.issue)
+        }
+        validateCalendarEventSnapshot(observed.value)
+        if (!eventSelectable(observed.value, target.calendarId)
+          || observed.value.eventId !== normalized.event.eventId) {
+          return deliverableConflict('event-not-selectable', 'Calendar event is not selectable', current)
+        }
+        const mutation: WorkbenchProjectDeliverableMutation = Object.freeze({
+          ...shared,
+          eventIntent: normalized.event,
+          event: observed.value,
+        })
+        return this.options.repository.commitProjectDeliverable(mutation, operationSignal)
+      }
+      const effectId = generatedId(`effect-${commandId}`, 'Deliverable Calendar effect')
+      const reservationMutation: WorkbenchDeliverableCalendarCreationReservationMutation =
+        Object.freeze({
+          ...shared,
+          effectId,
+          eventIntent: normalized.event,
+          providerIdempotencyKey: calendarProviderIdempotencyKey(commandId, normalized.projectId),
+          preparedAt: occurredAt,
+        })
+      let reservation = await this.options.repository.reserveDeliverableCalendarCreation(
+        reservationMutation,
+        operationSignal,
+      )
+      if (reservation.state !== 'deliver') return reservation.result
+      if (!await this.options.repository.claimFeishuCalendarEffect(
+        reservation.effectId,
+        commandInstant(this.options.clock),
+        operationSignal,
+      )) {
+        reservation = await this.options.repository.reserveDeliverableCalendarCreation(
+          reservationMutation,
+          operationSignal,
+        )
+        if (reservation.state !== 'deliver') return reservation.result
+        return deliverableConflict(
+          'remote-outcome-unknown',
+          'Deliverable event creation outcome is unknown',
+          current,
+        )
+      }
+      const settleSignal = new AbortController().signal
+      try {
+        const outcome = await adapter.createCalendarEvent(
+          reservation.route,
+          Object.freeze({
+            calendarId: reservation.calendarId,
+            idempotencyKey: reservation.providerIdempotencyKey,
+            summary: normalized.name,
+            description: normalized.description ?? null,
+            schedule: normalized.event.schedule,
+          }),
+          operationSignal,
+        )
+        const settledAt = commandInstant(this.options.clock)
+        if (outcome.state === 'ok') {
+          validateCalendarEventSnapshot(outcome.value)
+          if (!eventSelectable(outcome.value, reservation.calendarId)) {
+            return this.options.repository.settleDeliverableCalendarCreation(
+              reservation.effectId,
+              Object.freeze({ state: 'failed', issue: invalidCalendarIssue(), settledAt }),
+              settleSignal,
+            )
+          }
+          return this.options.repository.settleDeliverableCalendarCreation(
+            reservation.effectId,
+            Object.freeze({ state: 'delivered', event: outcome.value, settledAt }),
+            settleSignal,
+          )
+        }
+        return this.options.repository.settleDeliverableCalendarCreation(
+          reservation.effectId,
+          Object.freeze({
+            state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+            issue: outcome.issue,
+            settledAt,
+          }),
+          settleSignal,
+        )
+      } catch {
+        return this.options.repository.settleDeliverableCalendarCreation(
+          reservation.effectId,
+          Object.freeze({
+            state: 'unknown',
+            issue: ambiguousCalendarTransportIssue(),
+            settledAt: commandInstant(this.options.clock),
+          }),
+          settleSignal,
+        )
+      }
+    })
+  }
+
+  /** Freeze one exact candidate-version set as a typed Acceptance Request. */
+  requestDeliverableAcceptance(
+    request: RequestDeliverableAcceptanceRequest,
+    signal: AbortSignal,
+  ): Promise<RequestDeliverableAcceptanceResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'requestDeliverableAcceptance')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.deliverable.write',
+        operationSignal,
+      )
+      const normalized = validateRequestDeliverableAcceptanceRequest(request)
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const candidates = Object.freeze(normalized.candidateVersions.map((candidate) => {
+        const referenceDigest = scenarioContentDigest(candidate)
+        return Object.freeze({ ...candidate, referenceDigest, resolution: 'declared' as const })
+      }))
+      const mutation: WorkbenchDeliverableAcceptanceRequestMutation = Object.freeze({
+        acceptanceRequestId: nextDeliverableIdentity(
+          this.options.ids.nextDeliverableAcceptanceRequestId,
+          `acceptance-request-${commandId}`,
+          'Acceptance Request',
+        ),
+        activityId: nextDeliverableIdentity(
+          this.options.ids.nextDeliverableActivityId,
+          `deliverable-activity-${commandId}`,
+          'Deliverable Activity',
+        ),
+        projectId: normalized.projectId,
+        deliverableId: normalized.deliverableId,
+        candidateVersions: candidates,
+        candidatesDigest: scenarioContentDigest(candidates),
+        expectedDeliverablesRevision: normalized.expectedDeliverablesRevision,
+        expectedDeliverableRevision: normalized.expectedDeliverableRevision,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        expectedScheduleRevision: normalized.expectedScheduleRevision,
+        expectedRemoteObservationVersion: normalized.expectedRemoteObservationVersion,
+        createdAt: occurredAt,
+        command: Object.freeze({
+          commandId,
+          auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+          outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: normalized.reason,
+          actor: Object.freeze({
+            kind: 'owner' as const,
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      return this.options.repository.commitDeliverableAcceptanceRequest(mutation, operationSignal)
+    })
+  }
+
+  /** Record one Owner decision under identical Review and Deliverable-accept scopes. */
+  decideDeliverableAcceptance(
+    request: DecideDeliverableAcceptanceRequest,
+    signal: AbortSignal,
+  ): Promise<DecideDeliverableAcceptanceResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'decideDeliverableAcceptance')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await requireIdenticalScopes(
+        this.options.authorization,
+        'workbench.review.decide',
+        'workbench.project.deliverable.accept',
+        operationSignal,
+      )
+      const normalized = validateDecideDeliverableAcceptanceRequest(request)
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const mutation: WorkbenchDeliverableAcceptanceDecisionMutation = Object.freeze({
+        decisionId: nextDeliverableIdentity(
+          this.options.ids.nextDeliverableDecisionId,
+          `acceptance-decision-${commandId}`,
+          'Acceptance Decision',
+        ),
+        finalReleaseId: normalized.mode === 'approve'
+          ? nextDeliverableIdentity(
+              this.options.ids.nextDeliverableFinalReleaseId,
+              `final-release-${commandId}`,
+              'Final Release',
+            )
+          : null,
+        activityId: nextDeliverableIdentity(
+          this.options.ids.nextDeliverableActivityId,
+          `deliverable-activity-${commandId}`,
+          'Deliverable Activity',
+        ),
+        projectId: normalized.projectId,
+        deliverableId: normalized.deliverableId,
+        acceptanceRequestId: normalized.acceptanceRequestId,
+        mode: normalized.mode,
+        criteria: normalized.criteria,
+        feedback: normalized.feedback,
+        expectedDeliverablesRevision: normalized.expectedDeliverablesRevision,
+        expectedDeliverableRevision: normalized.expectedDeliverableRevision,
+        expectedAcceptanceRequestRevision: normalized.expectedAcceptanceRequestRevision,
+        decidedAt: occurredAt,
+        command: Object.freeze({
+          commandId,
+          auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+          outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: normalized.reason,
+          actor: Object.freeze({
+            kind: 'owner' as const,
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      return this.options.repository.commitDeliverableAcceptanceDecision(mutation, operationSignal)
     })
   }
 
@@ -1948,7 +2400,8 @@ export class WorkbenchScenario {
         operationSignal,
       )
       if (target === null) throw infrastructure('Workbench Calendar target disappeared')
-      const milestone = target.milestones.find(item => item.milestoneId === normalized.milestoneId)
+      const milestone = target.commitments.find(item =>
+        item.kind === 'milestone' && item.targetId === normalized.milestoneId)
       if (milestone === undefined) return milestoneNotFound(normalized.milestoneId)
       const observed = await requiredCalendarAdapter(this.options.adapters).readCalendarEvent(
         target.route,
@@ -2491,9 +2944,9 @@ export class WorkbenchScenario {
 
   /** Read proposal context and one authorized, Host-filtered Review page. */
   reviewCenter(
-    filter: ReviewCenterFilter,
+    filter: ReviewCenterQuery,
     signal: AbortSignal,
-  ): Promise<ReviewCenterProjection | null> {
+  ): Promise<ReviewCenterResultProjection | null> {
     return this.execute(async (lifetimeSignal) => {
       if (!(signal instanceof AbortSignal)) {
         throw badRequest('reviewCenter requires an AbortSignal', { field: 'signal' })
@@ -2504,9 +2957,9 @@ export class WorkbenchScenario {
         'workbench.review.read',
         operationSignal,
       )
-      const normalized = validateReviewCenterFilter(filter)
+      const normalized = validateReviewCenterQuery(filter)
       throwIfCancelled(operationSignal)
-      let projection: ReviewCenterProjection | null
+      let projection: ReviewCenterResultProjection | null
       try {
         projection = await this.options.repository.readReviewCenter(Object.freeze({
           organizationId: scope.organizationId,
@@ -2520,7 +2973,9 @@ export class WorkbenchScenario {
       if (projection === null) return null
       return this.options.authorization.filterProjection(
         'workbench.review.read',
-        reviewCenterProjection(projection),
+        isDeliverableAcceptanceReviewCenter(projection)
+          ? deliverableAcceptanceReviewCenterProjection(projection)
+          : reviewCenterProjection(projection),
         operationSignal,
       )
     })
@@ -2893,14 +3348,15 @@ export class WorkbenchScenario {
     const adapter = requiredCalendarAdapter(this.options.adapters)
     const observations: WorkbenchFeishuCalendarReconciliationMutation['observations'][number][] = []
     const attemptedAt = commandInstant(this.options.clock)
-    for (const milestone of target.milestones) {
+    for (const commitment of target.commitments) {
       throwIfCancelled(signal)
       const changeId = (outcome: string) => nextScheduleChangeId(
         this.options.ids,
         [
           target.projectId,
-          milestone.milestoneId,
-          String(milestone.milestoneRevision),
+          commitment.kind,
+          commitment.targetId,
+          String(commitment.targetRevision),
           outcome,
         ].join('-'),
       )
@@ -2908,13 +3364,13 @@ export class WorkbenchScenario {
         const observed = await adapter.readCalendarEvent(
           target.route,
           target.calendarId,
-          milestone.eventId,
+          commitment.eventId,
           signal,
         )
         throwIfCancelled(signal)
         if (observed.state !== 'ok') {
           observations.push(Object.freeze({
-            eventId: milestone.eventId,
+            eventId: commitment.eventId,
             issue: observed.issue,
             changeId: changeId(`failure-${observed.issue.code}`),
           }))
@@ -2922,9 +3378,9 @@ export class WorkbenchScenario {
         }
         validateCalendarEventSnapshot(observed.value)
         if (observed.value.calendarId !== target.calendarId
-          || observed.value.eventId !== milestone.eventId) {
+          || observed.value.eventId !== commitment.eventId) {
           observations.push(Object.freeze({
-            eventId: milestone.eventId,
+            eventId: commitment.eventId,
             issue: invalidCalendarIssue(),
             changeId: changeId('invalid-identity'),
           }))
@@ -2937,7 +3393,7 @@ export class WorkbenchScenario {
       } catch (error: unknown) {
         throwIfCancelled(signal)
         observations.push(Object.freeze({
-          eventId: milestone.eventId,
+          eventId: commitment.eventId,
           issue: invalidCalendarIssue(),
           changeId: changeId('invalid-response'),
         }))
@@ -3031,6 +3487,17 @@ const DEFAULT_REVIEW_CENTER_LIMIT = 20
 const MAX_REVIEW_CENTER_LIMIT = 50
 const MAX_SUGGESTED_CHANGE_EVIDENCE_REFS = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
+const MAX_DELIVERABLE_NAME_LENGTH = 200
+const MAX_DELIVERABLE_DESCRIPTION_LENGTH = 2_000
+const MAX_DELIVERABLE_CRITERIA = 20
+const MAX_DELIVERABLE_CRITERION_LENGTH = 2_000
+const MAX_DELIVERABLE_CONTRIBUTORS = 20
+const MAX_DELIVERABLE_TASKS = 50
+const MAX_DELIVERABLE_CANDIDATES = 20
+const MAX_DELIVERABLE_ARTIFACT_LABEL_LENGTH = 200
+const MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH = 256
+const MAX_DELIVERABLE_CANONICAL_URL_LENGTH = 2_048
+const MAX_DELIVERABLE_FEEDBACK_LENGTH = 2_000
 const TEXT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u
 const CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
@@ -3683,6 +4150,47 @@ function validateSetProjectResponsibilityRequest(
     causationId: validateCommandKey(record.causationId, 'causationId'),
     reason: 'owner-project-responsibility-set',
   })
+}
+
+function validateReviewCenterQuery(value: ReviewCenterQuery): ReviewCenterQuery {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Reflect.get(value, 'reviewKind') === 'deliverable-acceptance') {
+    const record = exactRecord(value, 'reviewCenter filter', ['reviewKind', 'projectId'], [
+      'status', 'beforeSequence', 'limit',
+    ])
+    const status = record.status
+    if (status !== undefined && status !== 'pending' && status !== 'approved'
+      && status !== 'rejected' && status !== 'needs_changes' && status !== 'stale') {
+      throw badRequest('status is not supported for Deliverable Acceptance', { field: 'status' })
+    }
+    const beforeSequence = record.beforeSequence === undefined
+      ? undefined
+      : positiveRevision(record.beforeSequence, 'beforeSequence')
+    const requestedLimit = record.limit
+    if (requestedLimit !== undefined
+      && (!Number.isSafeInteger(requestedLimit) || (requestedLimit as number) < 1
+        || (requestedLimit as number) > MAX_REVIEW_CENTER_LIMIT)) {
+      throw badRequest(`limit must be an integer from 1 to ${MAX_REVIEW_CENTER_LIMIT}`, {
+        field: 'limit',
+      })
+    }
+    return Object.freeze({
+      reviewKind: 'deliverable-acceptance',
+      projectId: safeId(record.projectId, 'projectId'),
+      ...(status === undefined ? {} : {
+        status: status as Exclude<DeliverableAcceptanceReviewCenterFilter['status'], undefined>,
+      }),
+      ...(beforeSequence === undefined ? {} : { beforeSequence }),
+      limit: requestedLimit === undefined ? DEFAULT_REVIEW_CENTER_LIMIT : requestedLimit as number,
+    })
+  }
+  return validateReviewCenterFilter(value as ReviewCenterFilter)
+}
+
+function isDeliverableAcceptanceReviewCenter(
+  value: ReviewCenterResultProjection,
+): value is DeliverableAcceptanceReviewCenterProjection {
+  return Reflect.get(value, 'reviewKind') === 'deliverable-acceptance'
 }
 
 function validateReviewCenterFilter(value: ReviewCenterFilter): ReviewCenterFilter {
@@ -4968,6 +5476,13 @@ const MAX_MILESTONE_NAME_LENGTH = 200
 const MAX_MILESTONE_DESCRIPTION_LENGTH = 2_000
 const MAX_PROJECT_MILESTONES = 100
 const CALENDAR_OBSERVATION_VERSION = /^sha256:[0-9a-f]{64}$/u
+
+function calendarObservationVersion(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !CALENDAR_OBSERVATION_VERSION.test(value)) {
+    throw badRequest(`${field} must be a Calendar observation digest`, { field })
+  }
+  return value
+}
 const STRICT_DATE = /^(\d{4})-(\d{2})-(\d{2})$/u
 const OFFSET_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u
 
@@ -4975,6 +5490,359 @@ function requireSignal(signal: AbortSignal, operation: string): void {
   if (!(signal instanceof AbortSignal)) {
     throw badRequest(`${operation} requires an AbortSignal`, { field: 'signal' })
   }
+}
+
+async function requireIdenticalScopes(
+  authorization: WorkbenchAuthorization,
+  first: WorkbenchAction,
+  second: WorkbenchAction,
+  signal: AbortSignal,
+): Promise<AuthorizedScope> {
+  const left = await authorization.require(first, signal)
+  const right = await authorization.require(second, signal)
+  if (left.ownerId !== right.ownerId || left.organizationId !== right.organizationId
+    || left.teamId !== right.teamId) {
+    throw forbidden('Workbench authorization capabilities resolved to different scopes')
+  }
+  return left
+}
+
+function validateProjectDeliverablesQuery(
+  value: ProjectDeliverablesQuery,
+): ProjectDeliverablesQuery {
+  const record = exactRecord(
+    value,
+    'projectDeliverables query',
+    ['projectId'],
+    ['beforeActivitySequence', 'activityLimit'],
+  )
+  const before = record.beforeActivitySequence === undefined
+    ? undefined
+    : positiveRevision(record.beforeActivitySequence, 'beforeActivitySequence')
+  const limit = record.activityLimit === undefined
+    ? undefined
+    : positiveRevision(record.activityLimit, 'activityLimit')
+  if (limit !== undefined && limit > 100) {
+    throw badRequest('activityLimit must not exceed 100', { field: 'activityLimit' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    ...(before === undefined ? {} : { beforeActivitySequence: before }),
+    ...(limit === undefined ? {} : { activityLimit: limit }),
+  })
+}
+
+function validateCreateProjectDeliverableRequest(
+  value: CreateProjectDeliverableRequest,
+): CreateProjectDeliverableRequest {
+  const record = exactRecord(value, 'createProjectDeliverable request', [
+    'projectId', 'name', 'criteria', 'accountableMemberId', 'contributorMemberIds',
+    'humanSponsorMemberId', 'acceptorMemberId', 'taskGuids', 'event',
+    'expectedDeliverablesRevision', 'expectedDeliverableRevision', 'expectedTeamRevision',
+    'expectedTaskRevision', 'expectedScheduleRevision', 'idempotencyKey', 'causationId', 'reason',
+  ], ['description'])
+  if (!Array.isArray(record.criteria) || record.criteria.length < 1
+    || record.criteria.length > MAX_DELIVERABLE_CRITERIA) {
+    throw badRequest(`criteria must contain 1-${MAX_DELIVERABLE_CRITERIA} items`, {
+      field: 'criteria',
+    })
+  }
+  const criteria = Object.freeze(record.criteria.map((value, index) => {
+    const criterion = exactRecord(value, `criteria[${String(index)}]`, ['statement'])
+    return Object.freeze({
+      statement: boundedText(
+        criterion.statement,
+        `criteria[${String(index)}].statement`,
+        MAX_DELIVERABLE_CRITERION_LENGTH,
+      ),
+    })
+  }))
+  if (!Array.isArray(record.contributorMemberIds)
+    || record.contributorMemberIds.length > MAX_DELIVERABLE_CONTRIBUTORS) {
+    throw badRequest(
+      `contributorMemberIds must contain 0-${MAX_DELIVERABLE_CONTRIBUTORS} items`,
+      { field: 'contributorMemberIds' },
+    )
+  }
+  const contributorMemberIds = Object.freeze(record.contributorMemberIds.map((memberId, index) =>
+    safeId(memberId, `contributorMemberIds[${String(index)}]`)))
+  if (new Set(contributorMemberIds).size !== contributorMemberIds.length) {
+    throw badRequest('contributorMemberIds must not contain duplicates', {
+      field: 'contributorMemberIds',
+    })
+  }
+  if (!Array.isArray(record.taskGuids) || record.taskGuids.length < 1
+    || record.taskGuids.length > MAX_DELIVERABLE_TASKS) {
+    throw badRequest(`taskGuids must contain 1-${MAX_DELIVERABLE_TASKS} items`, {
+      field: 'taskGuids',
+    })
+  }
+  const taskGuids = Object.freeze(record.taskGuids.map((taskGuid, index) =>
+    safeId(taskGuid, `taskGuids[${String(index)}]`)))
+  if (new Set(taskGuids).size !== taskGuids.length) {
+    throw badRequest('taskGuids must not contain duplicates', { field: 'taskGuids' })
+  }
+  const sponsor = record.humanSponsorMemberId === null
+    ? null
+    : safeId(record.humanSponsorMemberId, 'humanSponsorMemberId')
+  if (record.expectedDeliverableRevision !== null) {
+    throw badRequest('expectedDeliverableRevision must be null for creation', {
+      field: 'expectedDeliverableRevision',
+    })
+  }
+  if (record.reason !== 'owner-project-deliverable-create') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  const event = validateCreateProjectDeliverableEvent(record.event)
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    name: boundedText(record.name, 'name', MAX_DELIVERABLE_NAME_LENGTH),
+    description: nullableDeliverableText(record.description, 'description'),
+    criteria,
+    accountableMemberId: safeId(record.accountableMemberId, 'accountableMemberId'),
+    contributorMemberIds,
+    humanSponsorMemberId: sponsor,
+    acceptorMemberId: safeId(record.acceptorMemberId, 'acceptorMemberId'),
+    taskGuids,
+    event,
+    expectedDeliverablesRevision: nonNegativeRevision(
+      record.expectedDeliverablesRevision,
+      'expectedDeliverablesRevision',
+    ),
+    expectedDeliverableRevision: null,
+    expectedTeamRevision: nonNegativeRevision(record.expectedTeamRevision, 'expectedTeamRevision'),
+    expectedTaskRevision: nonNegativeRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    expectedScheduleRevision: nonNegativeRevision(
+      record.expectedScheduleRevision,
+      'expectedScheduleRevision',
+    ),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-deliverable-create',
+  })
+}
+
+function validateCreateProjectDeliverableEvent(
+  value: unknown,
+): CreateProjectDeliverableRequest['event'] {
+  const mode = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? Reflect.get(value, 'mode')
+    : undefined
+  if (mode === 'existing-event') {
+    const record = exactRecord(value, 'event', ['mode', 'eventId'])
+    return Object.freeze({
+      mode: 'existing-event',
+      eventId: safeId(record.eventId, 'event.eventId'),
+    })
+  }
+  if (mode === 'create-event') {
+    const record = exactRecord(value, 'event', ['mode', 'schedule'])
+    return Object.freeze({
+      mode: 'create-event',
+      schedule: validateCalendarSchedule(record.schedule, 'event.schedule'),
+    })
+  }
+  throw badRequest('event.mode must be existing-event or create-event', { field: 'event.mode' })
+}
+
+function nullableDeliverableText(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') throw badRequest(`${field} must be a string or null`, { field })
+  const normalized = value.trim()
+  if (normalized.length === 0) return null
+  return boundedText(normalized, field, MAX_DELIVERABLE_DESCRIPTION_LENGTH)
+}
+
+function validateRequestDeliverableAcceptanceRequest(
+  value: RequestDeliverableAcceptanceRequest,
+): RequestDeliverableAcceptanceRequest {
+  const record = exactRecord(value, 'requestDeliverableAcceptance request', [
+    'projectId', 'deliverableId', 'candidateVersions', 'expectedDeliverablesRevision',
+    'expectedDeliverableRevision', 'expectedTeamRevision', 'expectedTaskRevision',
+    'expectedScheduleRevision', 'expectedRemoteObservationVersion', 'idempotencyKey',
+    'causationId', 'reason',
+  ])
+  if (!Array.isArray(record.candidateVersions) || record.candidateVersions.length < 1
+    || record.candidateVersions.length > MAX_DELIVERABLE_CANDIDATES) {
+    throw badRequest(`candidateVersions must contain 1-${MAX_DELIVERABLE_CANDIDATES} items`, {
+      field: 'candidateVersions',
+    })
+  }
+  const candidateVersions = Object.freeze(record.candidateVersions.map((candidate, index) =>
+    validateDeliverableArtifactVersion(candidate, index)))
+  const digests = candidateVersions.map(candidate => scenarioContentDigest(candidate))
+  if (new Set(digests).size !== digests.length) {
+    throw badRequest('candidateVersions must contain distinct normalized references', {
+      field: 'candidateVersions',
+    })
+  }
+  if (record.reason !== 'owner-deliverable-acceptance-request') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    deliverableId: safeId(record.deliverableId, 'deliverableId'),
+    candidateVersions,
+    expectedDeliverablesRevision: nonNegativeRevision(
+      record.expectedDeliverablesRevision,
+      'expectedDeliverablesRevision',
+    ),
+    expectedDeliverableRevision: positiveRevision(
+      record.expectedDeliverableRevision,
+      'expectedDeliverableRevision',
+    ),
+    expectedTeamRevision: nonNegativeRevision(record.expectedTeamRevision, 'expectedTeamRevision'),
+    expectedTaskRevision: nonNegativeRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    expectedScheduleRevision: nonNegativeRevision(
+      record.expectedScheduleRevision,
+      'expectedScheduleRevision',
+    ),
+    expectedRemoteObservationVersion: calendarObservationVersion(
+      record.expectedRemoteObservationVersion,
+      'expectedRemoteObservationVersion',
+    ),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-deliverable-acceptance-request',
+  })
+}
+
+function validateDeliverableArtifactVersion(
+  value: unknown,
+  index: number,
+): DeliverableArtifactVersionRef {
+  const field = `candidateVersions[${String(index)}]`
+  const record = exactRecord(value, field, [
+    'kind', 'source', 'resourceId', 'versionId', 'displayName', 'canonicalUrl', 'contentDigest',
+  ])
+  if (record.kind !== 'declared-file-version') {
+    throw badRequest(`${field}.kind is not supported`, { field: `${field}.kind` })
+  }
+  if (record.source !== 'managed' && record.source !== 'local' && record.source !== 'feishu') {
+    throw badRequest(`${field}.source is not supported`, { field: `${field}.source` })
+  }
+  const contentDigest = record.contentDigest
+  if (contentDigest !== null
+    && (typeof contentDigest !== 'string' || !DIGEST_PATTERN.test(contentDigest))) {
+    throw badRequest(`${field}.contentDigest must be null or a SHA-256 digest`, {
+      field: `${field}.contentDigest`,
+    })
+  }
+  return Object.freeze({
+    kind: 'declared-file-version',
+    source: record.source,
+    resourceId: boundedArtifactReference(record.resourceId, `${field}.resourceId`),
+    versionId: boundedArtifactReference(record.versionId, `${field}.versionId`),
+    displayName: boundedText(
+      record.displayName,
+      `${field}.displayName`,
+      MAX_DELIVERABLE_ARTIFACT_LABEL_LENGTH,
+    ),
+    canonicalUrl: validateDeliverableCanonicalUrl(record.canonicalUrl, `${field}.canonicalUrl`),
+    contentDigest: contentDigest as string | null,
+  })
+}
+
+function boundedArtifactReference(value: unknown, field: string): string {
+  if (typeof value !== 'string') throw badRequest(`${field} must be a string`, { field })
+  const normalized = value.trim()
+  if (normalized.length < 1 || [...normalized].length > MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH
+    || !normalized.isWellFormed() || TEXT_CONTROL_CHARACTER_PATTERN.test(normalized)) {
+    throw badRequest(`${field} must be a bounded safe reference`, { field })
+  }
+  return normalized
+}
+
+function validateDeliverableCanonicalUrl(value: unknown, field: string): string | null {
+  if (value === null) return null
+  if (typeof value !== 'string' || value.length > MAX_DELIVERABLE_CANONICAL_URL_LENGTH) {
+    throw badRequest(`${field} must be null or a bounded HTTPS URL`, { field })
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw badRequest(`${field} must be null or a bounded HTTPS URL`, { field })
+  }
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') {
+    throw badRequest(`${field} must be null or a bounded HTTPS URL`, { field })
+  }
+  const normalized = parsed.toString()
+  if (normalized.length > MAX_DELIVERABLE_CANONICAL_URL_LENGTH) {
+    throw badRequest(`${field} must be null or a bounded HTTPS URL`, { field })
+  }
+  return normalized
+}
+
+function validateDecideDeliverableAcceptanceRequest(
+  value: DecideDeliverableAcceptanceRequest,
+): DecideDeliverableAcceptanceRequest {
+  const record = exactRecord(value, 'decideDeliverableAcceptance request', [
+    'projectId', 'deliverableId', 'acceptanceRequestId', 'mode', 'criteria', 'feedback',
+    'expectedDeliverablesRevision', 'expectedDeliverableRevision',
+    'expectedAcceptanceRequestRevision', 'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.mode !== 'approve' && record.mode !== 'reject' && record.mode !== 'request-changes') {
+    throw badRequest('mode is not supported', { field: 'mode' })
+  }
+  const expectedReason = record.mode === 'approve'
+    ? 'owner-deliverable-acceptance-approve'
+    : record.mode === 'reject'
+      ? 'owner-deliverable-acceptance-reject'
+      : 'owner-deliverable-acceptance-needs-changes'
+  if (record.reason !== expectedReason) {
+    throw badRequest('reason does not match the decision mode', { field: 'reason' })
+  }
+  if (!Array.isArray(record.criteria) || record.criteria.length < 1
+    || record.criteria.length > MAX_DELIVERABLE_CRITERIA) {
+    throw badRequest(`criteria must contain 1-${MAX_DELIVERABLE_CRITERIA} items`, {
+      field: 'criteria',
+    })
+  }
+  const criteria = Object.freeze(record.criteria.map((value, index) => {
+    const field = `criteria[${String(index)}]`
+    const criterion = exactRecord(value, field, ['criterionId', 'outcome'])
+    if (criterion.outcome !== 'met' && criterion.outcome !== 'not-met') {
+      throw badRequest(`${field}.outcome is invalid`, { field: `${field}.outcome` })
+    }
+    return Object.freeze({
+      criterionId: safeId(criterion.criterionId, `${field}.criterionId`),
+      outcome: criterion.outcome,
+    })
+  }))
+  if (new Set(criteria.map(criterion => criterion.criterionId)).size !== criteria.length) {
+    throw badRequest('criteria must not contain duplicate criterionId values', { field: 'criteria' })
+  }
+  const common = {
+    projectId: safeId(record.projectId, 'projectId'),
+    deliverableId: safeId(record.deliverableId, 'deliverableId'),
+    acceptanceRequestId: safeId(record.acceptanceRequestId, 'acceptanceRequestId'),
+    criteria,
+    feedback: boundedText(record.feedback, 'feedback', MAX_DELIVERABLE_FEEDBACK_LENGTH),
+    expectedDeliverablesRevision: nonNegativeRevision(
+      record.expectedDeliverablesRevision,
+      'expectedDeliverablesRevision',
+    ),
+    expectedDeliverableRevision: positiveRevision(
+      record.expectedDeliverableRevision,
+      'expectedDeliverableRevision',
+    ),
+    expectedAcceptanceRequestRevision: positiveRevision(
+      record.expectedAcceptanceRequestRevision,
+      'expectedAcceptanceRequestRevision',
+    ),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+  }
+  if (record.mode === 'approve') return Object.freeze({
+    ...common, mode: 'approve', reason: 'owner-deliverable-acceptance-approve',
+  })
+  if (record.mode === 'reject') return Object.freeze({
+    ...common, mode: 'reject', reason: 'owner-deliverable-acceptance-reject',
+  })
+  return Object.freeze({
+    ...common, mode: 'request-changes', reason: 'owner-deliverable-acceptance-needs-changes',
+  })
 }
 
 function validateProjectMilestonesQuery(value: ProjectMilestonesQuery): ProjectMilestonesQuery {
@@ -5519,6 +6387,176 @@ function calendarReconciliationPreflight(
   return null
 }
 
+function deliverableCreatePreflight(
+  current: ProjectDeliverablesProjection | null,
+  request: CreateProjectDeliverableRequest,
+): CreateProjectDeliverableResult | null {
+  if (current === null) return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found',
+      message: `Workbench Project ${request.projectId} was not found in the authorized scope`,
+      projectId: request.projectId,
+    }),
+  })
+  if (current.calendarBinding === null) {
+    return deliverableConflict('calendar-unbound', 'Project has no bound Calendar', current)
+  }
+  if (current.revision !== request.expectedDeliverablesRevision) {
+    return deliverableConflict(
+      'deliverables-revision-conflict',
+      'Deliverables revision changed',
+      current,
+    )
+  }
+  if (current.teamRevision !== request.expectedTeamRevision) {
+    return deliverableConflict('team-revision-conflict', 'Project Team revision changed', current)
+  }
+  if (current.taskRevision !== request.expectedTaskRevision) {
+    return deliverableConflict(
+      'task-projection-revision-conflict',
+      'Project task projection changed',
+      current,
+    )
+  }
+  if (current.scheduleRevision !== request.expectedScheduleRevision) {
+    return deliverableConflict(
+      'project-schedule-revision-conflict',
+      'Project schedule revision changed',
+      current,
+    )
+  }
+  if (current.deliverables.length >= 100) {
+    return deliverableConflict('deliverable-limit-reached', 'Project already has 100 Deliverables', current)
+  }
+  if (request.contributorMemberIds.includes(request.accountableMemberId)) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'accountable-also-contributor',
+        message: 'Deliverable Accountable cannot also be a Contributor',
+        memberId: request.accountableMemberId,
+      }),
+    })
+  }
+  const requestedMembers = new Set([
+    request.accountableMemberId,
+    ...request.contributorMemberIds,
+    ...(request.humanSponsorMemberId === null ? [] : [request.humanSponsorMemberId]),
+    request.acceptorMemberId,
+  ])
+  for (const memberId of requestedMembers) {
+    const member = current.memberOptions.find(option => option.memberId === memberId)
+    if (member === undefined) return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'member-not-found',
+        message: `Workbench ProjectMember ${memberId} was not found`,
+        memberId,
+      }),
+    })
+    if (member.status !== 'active') return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'member-inactive',
+        message: `Workbench ProjectMember ${memberId} is inactive`,
+        memberId,
+      }),
+    })
+  }
+  const accountable = current.memberOptions.find(
+    option => option.memberId === request.accountableMemberId,
+  )
+  const acceptor = current.memberOptions.find(option => option.memberId === request.acceptorMemberId)
+  if (accountable === undefined || acceptor === undefined) {
+    throw infrastructure('Workbench Deliverable member option disappeared during preflight')
+  }
+  if (accountable.requiresHumanSponsor && request.humanSponsorMemberId === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'human-sponsor-required',
+        message: 'Deliverable Accountable requires a Human Sponsor',
+        memberId: accountable.memberId,
+      }),
+    })
+  }
+  if (!accountable.requiresHumanSponsor && request.humanSponsorMemberId !== null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'human-sponsor-forbidden',
+        message: 'A declared-Feishu human Accountable cannot have a Human Sponsor',
+        memberId: accountable.memberId,
+      }),
+    })
+  }
+  if (request.humanSponsorMemberId !== null) {
+    const sponsor = current.memberOptions.find(
+      option => option.memberId === request.humanSponsorMemberId,
+    )
+    if (sponsor === undefined || !sponsor.canBeHumanSponsor) return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'human-sponsor-invalid',
+        message: 'Deliverable Human Sponsor must be an active human',
+        memberId: request.humanSponsorMemberId,
+      }),
+    })
+  }
+  if (!acceptor.canAccept) return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'acceptor-invalid',
+      message: 'Deliverable Acceptor must be an active human',
+      memberId: acceptor.memberId,
+    }),
+  })
+  for (const taskGuid of request.taskGuids) {
+    if (!current.taskOptions.some(task => task.taskGuid === taskGuid)) {
+      return Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'task-not-in-project',
+          message: 'Deliverable task is not visible in this Project',
+          taskGuid,
+          current,
+        }),
+      })
+    }
+  }
+  return null
+}
+
+function deliverableConflict(
+  code: ProjectDeliverableConflict['code'],
+  message: string,
+  current?: ProjectDeliverablesProjection,
+  issue?: FeishuConnectionIssue,
+): CreateProjectDeliverableResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code,
+      message,
+      ...(current === undefined ? {} : { current }),
+      ...(issue === undefined ? {} : { issue: detachedIssue(issue) }),
+    }),
+  })
+}
+
+function nextDeliverableIdentity(
+  generator: (() => string) | undefined,
+  fallback: string,
+  kind: string,
+): string {
+  return generatedId(generator?.() ?? fallback, kind)
+}
+
+function scenarioContentDigest(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(canonicalizeJson(value)).digest('hex')}`
+}
+
 function calendarProjectNotFound(projectId: string) {
   return Object.freeze({
     ok: false as const,
@@ -5672,6 +6710,10 @@ function cancelled(message: string): TypertRemoteFailure {
 
 function unavailable(message: string): TypertRemoteFailure {
   return new TypertRemoteFailure({ code: 'unavailable', message, details: {} })
+}
+
+function forbidden(message: string): TypertRemoteFailure {
+  return new TypertRemoteFailure({ code: 'forbidden', message, details: {} })
 }
 
 function infrastructure(message: string, cause?: unknown): TypertRemoteFailure {

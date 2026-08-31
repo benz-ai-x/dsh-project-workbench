@@ -86,7 +86,26 @@ function connection(workbench: SqliteWorkbenchRepository): DatabaseSync {
   return Reflect.get(workbench, 'database') as DatabaseSync
 }
 
+function dropDeliverableSchema(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TABLE workbench_deliverable_calendar_effect;
+    DROP TABLE workbench_deliverable_activity;
+    DROP TABLE workbench_deliverable_final_release_version;
+    DROP TABLE workbench_deliverable_final_release;
+    DROP TABLE workbench_deliverable_acceptance_decision;
+    DROP TABLE workbench_deliverable_candidate_version;
+    DROP TABLE workbench_deliverable_acceptance_request;
+    DROP TABLE workbench_project_deliverable_member;
+    DROP TABLE workbench_project_deliverable;
+    DROP TABLE workbench_calendar_commitment;
+    DROP TABLE workbench_project_deliverable_head;
+    PRAGMA foreign_keys = ON;
+  `)
+}
+
 function dropTaskFederationSchema(database: DatabaseSync): void {
+  dropDeliverableSchema(database)
   database.exec(`
     DROP TABLE workbench_feishu_calendar_effect;
     DROP TABLE workbench_feishu_calendar_inbox;
@@ -1223,7 +1242,7 @@ describe('SqliteWorkbenchRepository', () => {
     await expect(workbench.open()).rejects.toThrow(/closed/u)
   })
 
-  it('migrates v2 through v9, seeds the exact template, and preserves the T03 ledger', async () => {
+  it('migrates v2 through v10, seeds the exact template, and preserves the T03 ledger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1286,7 +1305,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({
-      user_version: 9,
+      user_version: WORKBENCH_SCHEMA_VERSION,
     })
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({
       id: 'status-legacy-v2',
@@ -1909,7 +1928,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates v3 through v8, backfills one empty Team per Project, and creates heads for new Projects', async () => {
+  it('migrates v3 through v10, backfills one empty Team per Project, and creates heads for new Projects', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1959,7 +1978,9 @@ describe('SqliteWorkbenchRepository', () => {
 
     const upgraded = repository(path)
     await upgraded.open()
-    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
+    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({
+      user_version: WORKBENCH_SCHEMA_VERSION,
+    })
     await expect(upgraded.readProjectTeam({
       organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
     }, signal)).resolves.toEqual({
@@ -1992,7 +2013,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates an exact v4 database to v8 and validates every SuggestedChange trigger', async () => {
+  it('migrates an exact v4 database to v10 and validates every SuggestedChange trigger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -2031,7 +2052,9 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     const database = connection(upgraded)
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({
+      user_version: WORKBENCH_SCHEMA_VERSION,
+    })
     expect(database.prepare(`
       SELECT name FROM sqlite_schema
       WHERE type = 'table' AND name LIKE 'workbench_suggested_change%'

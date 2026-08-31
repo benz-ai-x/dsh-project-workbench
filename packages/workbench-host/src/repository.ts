@@ -3,9 +3,16 @@ import type {
   BindProjectCalendarResult,
   ConfigureFeishuIdentityRouteResult,
   ConfigureFeishuTaskWorkflowResult,
+  CreateProjectDeliverableResult,
   CreateProjectResult,
   CreateProjectMilestoneResult,
+  DecideDeliverableAcceptanceResult,
   DecideSuggestedChangeResult,
+  DeliverableAcceptanceReviewCenterFilter,
+  DeliverableAcceptanceReviewCenterProjection,
+  DeliverableArtifactVersionProjection,
+  DeliverableCalendarMutationEffectProjection,
+  DeliverablePlanProjection,
   BindFeishuTaskListResult,
   FeishuTaskEventInput,
   FeishuTaskEventResult,
@@ -21,6 +28,7 @@ import type {
   OutcomeMetric,
   ProjectResponsibilitySuggestedValue,
   ProjectDetailProjection,
+  ProjectDeliverablesProjection,
   ProjectCalendarSchedule,
   ProjectMilestonesProjection,
   ProjectMemberDraft,
@@ -39,8 +47,10 @@ import type {
   ReconcileProjectTasksResult,
   ReconcileProjectCalendarResult,
   ReferenceFeishuTaskResult,
-  ReviewCenterFilter,
+  RequestDeliverableAcceptanceResult,
   ReviewCenterProjection,
+  ReviewCenterQuery,
+  ReviewCenterResultProjection,
   SuggestedChangeEvidenceRef,
   SuggestedChangeRiskLevel,
   SetProjectMemberStatusResult,
@@ -735,18 +745,30 @@ export type WorkbenchFeishuCalendarDateUpdateSettlement =
     readonly settledAt: string
   }
 
+/** Closed CalendarCommitment target used by discovery and reconciliation. */
+export type WorkbenchCalendarCommitmentTarget =
+  | {
+    readonly kind: 'milestone'
+    readonly targetId: string
+    readonly targetRevision: number
+    readonly eventId: string
+    readonly remoteObservationVersion: string
+  }
+  | {
+    readonly kind: 'deliverable'
+    readonly targetId: string
+    readonly targetRevision: number
+    readonly eventId: string
+    readonly remoteObservationVersion: string
+  }
+
 /** Exact immutable binding plus all bound event identities for bounded repair. */
 export interface WorkbenchFeishuCalendarReconciliationTarget {
   readonly projectId: string
   readonly revision: number
   readonly calendarId: string
   readonly route: WorkbenchFeishuCalendarRoute
-  readonly milestones: readonly {
-    readonly milestoneId: string
-    readonly milestoneRevision: number
-    readonly eventId: string
-    readonly remoteObservationVersion: string
-  }[]
+  readonly commitments: readonly WorkbenchCalendarCommitmentTarget[]
 }
 
 export interface WorkbenchFeishuCalendarReconciliationMutation {
@@ -778,6 +800,161 @@ export interface WorkbenchFeishuCalendarEventMutation {
   readonly receivedAt: string
 }
 
+/** Host-fixed scope for the full Deliverables workspace and replay feed. */
+export interface WorkbenchProjectDeliverablesReadQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly projectId: string
+  readonly beforeActivitySequence?: number
+  readonly activityLimit?: number
+}
+
+export type WorkbenchProjectDeliverableEventIntent =
+  | { readonly mode: 'existing-event'; readonly eventId: string }
+  | { readonly mode: 'create-event'; readonly schedule: ProjectCalendarSchedule }
+
+/** Side-effect-free receipt replay query used before any Calendar provider call. */
+export interface WorkbenchProjectDeliverableReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly name: string
+  readonly description: string | null
+  readonly criteria: readonly string[]
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly acceptorMemberId: string
+  readonly taskGuids: readonly string[]
+  readonly event: WorkbenchProjectDeliverableEventIntent
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: null
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly expectedScheduleRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-deliverable-create'
+}
+
+/** Immutable semantic plan and existing-event authority committed in one transaction. */
+export interface WorkbenchProjectDeliverableMutation {
+  readonly deliverableId: string
+  readonly activityId: string
+  readonly changeId: string
+  readonly projectId: string
+  readonly plan: DeliverablePlanProjection
+  readonly memberIds: Readonly<{
+    accountableMemberId: string
+    contributorMemberIds: readonly string[]
+    humanSponsorMemberId: string | null
+    acceptorMemberId: string
+  }>
+  readonly eventIntent: Extract<WorkbenchProjectDeliverableEventIntent, {
+    readonly mode: 'existing-event'
+  }>
+  readonly event: WorkbenchFeishuCalendarEventSnapshot
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: null
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly expectedScheduleRevision: number
+  readonly createdAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-project-deliverable-create'
+  }
+}
+
+/** Create-event path freezes the entire plan before the sole provider attempt. */
+export interface WorkbenchDeliverableCalendarCreationReservationMutation
+  extends Omit<WorkbenchProjectDeliverableMutation, 'eventIntent' | 'event'> {
+  readonly effectId: string
+  readonly eventIntent: Extract<WorkbenchProjectDeliverableEventIntent, {
+    readonly mode: 'create-event'
+  }>
+  readonly providerIdempotencyKey: string
+  readonly preparedAt: string
+}
+
+export type WorkbenchDeliverableCalendarCreationReservation =
+  | {
+    readonly state: 'deliver'
+    readonly effectId: string
+    readonly route: WorkbenchFeishuCalendarRoute
+    readonly calendarId: string
+    readonly providerIdempotencyKey: string
+    readonly effect: DeliverableCalendarMutationEffectProjection
+    readonly receipt: import('./client.ts').WorkbenchCommandReceipt
+  }
+  | { readonly state: 'replay'; readonly result: CreateProjectDeliverableResult }
+  | { readonly state: 'rejected'; readonly result: CreateProjectDeliverableResult }
+
+export type WorkbenchDeliverableCalendarCreationSettlement =
+  | {
+    readonly state: 'delivered'
+    readonly event: WorkbenchFeishuCalendarEventSnapshot
+    readonly settledAt: string
+  }
+  | {
+    readonly state: 'unknown' | 'failed'
+    readonly issue: FeishuConnectionIssue
+    readonly settledAt: string
+  }
+
+/** Local acceptance request command; candidate refs are already normalized and digested. */
+export interface WorkbenchDeliverableAcceptanceRequestMutation {
+  readonly acceptanceRequestId: string
+  readonly activityId: string
+  readonly projectId: string
+  readonly deliverableId: string
+  readonly candidateVersions: readonly DeliverableArtifactVersionProjection[]
+  readonly candidatesDigest: string
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: number
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly expectedScheduleRevision: number
+  readonly expectedRemoteObservationVersion: string
+  readonly createdAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-deliverable-acceptance-request'
+  }
+}
+
+/** One complete formal decision with Host-derived immutable identities. */
+export interface WorkbenchDeliverableAcceptanceDecisionMutation {
+  readonly decisionId: string
+  readonly finalReleaseId: string | null
+  readonly activityId: string
+  readonly projectId: string
+  readonly deliverableId: string
+  readonly acceptanceRequestId: string
+  readonly mode: 'approve' | 'reject' | 'request-changes'
+  readonly criteria: readonly {
+    readonly criterionId: string
+    readonly outcome: 'met' | 'not-met'
+  }[]
+  readonly feedback: string
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: number
+  readonly expectedAcceptanceRequestRevision: number
+  readonly decidedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason:
+      | 'owner-deliverable-acceptance-approve'
+      | 'owner-deliverable-acceptance-reject'
+      | 'owner-deliverable-acceptance-needs-changes'
+  }
+}
+
+/** Host-fixed Deliverable Acceptance Review Center query. */
+export interface WorkbenchDeliverableReviewCenterQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly filter: DeliverableAcceptanceReviewCenterFilter
+}
+
 /** Host-fixed scope for the Project creation-page read. */
 export interface WorkbenchProjectStartQuery {
   readonly organizationId: string
@@ -801,7 +978,7 @@ export interface WorkbenchProjectTeamReadQuery extends ProjectQuery {
 export interface WorkbenchReviewCenterQuery {
   readonly organizationId: string
   readonly teamId: string
-  readonly filter: ReviewCenterFilter
+  readonly filter: ReviewCenterQuery
 }
 
 /** Host-only query with the actor organization already fixed by authorization. */
@@ -885,7 +1062,7 @@ export interface WorkbenchRepository {
   readReviewCenter(
     query: WorkbenchReviewCenterQuery,
     signal: AbortSignal,
-  ): Promise<ReviewCenterProjection | null>
+  ): Promise<ReviewCenterResultProjection | null>
   /** Atomically derive and persist one immutable typed Project Responsibility proposal. */
   commitSuggestedChangeProposal(
     mutation: WorkbenchSuggestedChangeProposalMutation,
@@ -1088,6 +1265,42 @@ export interface WorkbenchRepository {
     mutation: WorkbenchFeishuCalendarEventMutation,
     signal: AbortSignal,
   ): Promise<FeishuCalendarEventResult>
+  /** Read the complete Deliverables workspace and separately authorized replay feed. */
+  readProjectDeliverables(
+    query: WorkbenchProjectDeliverablesReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectDeliverablesProjection | null>
+  /** Receipt-first replay before any Deliverable Calendar provider call. */
+  replayProjectDeliverableCreation(
+    query: WorkbenchProjectDeliverableReplayQuery,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult | null>
+  /** Commit one immutable plan against a freshly observed existing event. */
+  commitProjectDeliverable(
+    mutation: WorkbenchProjectDeliverableMutation,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult>
+  /** Reserve the create-event intent and command ledger before the sole attempt. */
+  reserveDeliverableCalendarCreation(
+    mutation: WorkbenchDeliverableCalendarCreationReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchDeliverableCalendarCreationReservation>
+  /** Materialize or safely terminate a claimed Deliverable event-create effect. */
+  settleDeliverableCalendarCreation(
+    effectId: string,
+    settlement: WorkbenchDeliverableCalendarCreationSettlement,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult>
+  /** Atomically freeze one complete acceptance round. */
+  commitDeliverableAcceptanceRequest(
+    mutation: WorkbenchDeliverableAcceptanceRequestMutation,
+    signal: AbortSignal,
+  ): Promise<RequestDeliverableAcceptanceResult>
+  /** Atomically close one request and optionally create the exact Final Release. */
+  commitDeliverableAcceptanceDecision(
+    mutation: WorkbenchDeliverableAcceptanceDecisionMutation,
+    signal: AbortSignal,
+  ): Promise<DecideDeliverableAcceptanceResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */
@@ -1131,6 +1344,150 @@ export function projectMilestonesProjection(
         : Object.freeze({ ...change.beforeSchedule }),
       afterSchedule: Object.freeze({ ...change.afterSchedule }),
     }))),
+  })
+}
+
+/** Detach the complete Deliverables aggregate from repository-owned values. */
+export function projectDeliverablesProjection(
+  value: ProjectDeliverablesProjection,
+): ProjectDeliverablesProjection {
+  const cloneMember = (member: import('./client.ts').DeliverableMemberSnapshot) =>
+    Object.freeze({ ...member })
+  const cloneCalendar = (calendar: import('./client.ts').DeliverableCalendarProjection) =>
+    Object.freeze({ ...calendar, schedule: Object.freeze({ ...calendar.schedule }) })
+  const cloneArtifact = (artifact: DeliverableArtifactVersionProjection) =>
+    Object.freeze({ ...artifact })
+  const clonePlan = (plan: DeliverablePlanProjection): DeliverablePlanProjection => Object.freeze({
+    ...plan,
+    criteria: Object.freeze(plan.criteria.map(criterion => Object.freeze({ ...criterion }))),
+    responsibility: Object.freeze({
+      accountable: cloneMember(plan.responsibility.accountable),
+      contributors: Object.freeze(plan.responsibility.contributors.map(cloneMember)),
+      humanSponsor: plan.responsibility.humanSponsor === null
+        ? null
+        : cloneMember(plan.responsibility.humanSponsor),
+      acceptor: cloneMember(plan.responsibility.acceptor),
+    }),
+    taskGuids: Object.freeze([...plan.taskGuids]),
+  })
+  const cloneTask = (task: ProjectTaskProjection): ProjectTaskProjection => Object.freeze({
+    ...task,
+    assignees: Object.freeze(task.assignees.map(member => Object.freeze({ ...member }))),
+    followers: Object.freeze(task.followers.map(member => Object.freeze({ ...member }))),
+    comments: Object.freeze(task.comments.map(comment => Object.freeze({
+      ...comment,
+      creator: comment.creator === null ? null : Object.freeze({ ...comment.creator }),
+    }))),
+  })
+  const deliverables = Object.freeze(value.deliverables.map(deliverable => Object.freeze({
+    ...deliverable,
+    plan: clonePlan(deliverable.plan),
+    calendar: cloneCalendar(deliverable.calendar),
+    tasks: Object.freeze(deliverable.tasks.map(link => Object.freeze({
+      ...link,
+      task: link.task === null ? null : cloneTask(link.task),
+    }))),
+    acceptanceRequests: Object.freeze(deliverable.acceptanceRequests.map(request => Object.freeze({
+      ...request,
+      plan: clonePlan(request.plan),
+      calendar: cloneCalendar(request.calendar),
+      taskGuids: Object.freeze([...request.taskGuids]),
+      candidateVersions: Object.freeze(request.candidateVersions.map(cloneArtifact)),
+      decision: request.decision === null ? null : Object.freeze({
+        ...request.decision,
+        actor: Object.freeze({ ...request.decision.actor }),
+        designatedAcceptor: cloneMember(request.decision.designatedAcceptor),
+        criteria: Object.freeze(request.decision.criteria.map(item => Object.freeze({ ...item }))),
+        receipt: Object.freeze({ ...request.decision.receipt }),
+      }),
+      allowedDecisions: Object.freeze([...request.allowedDecisions]),
+    }))),
+    finalRelease: deliverable.finalRelease === null ? null : Object.freeze({
+      ...deliverable.finalRelease,
+      versions: Object.freeze(deliverable.finalRelease.versions.map(cloneArtifact)),
+    }),
+  })))
+  return Object.freeze({
+    ...value,
+    calendarBinding: value.calendarBinding === null ? null : Object.freeze({
+      ...value.calendarBinding,
+      identity: Object.freeze({ ...value.calendarBinding.identity }),
+    }),
+    memberOptions: Object.freeze(value.memberOptions.map(option => Object.freeze({ ...option }))),
+    taskOptions: Object.freeze(value.taskOptions.map(cloneTask)),
+    deliverables,
+    activity: Object.freeze(value.activity.map(entry => Object.freeze({
+      ...entry,
+      source: Object.freeze({ ...entry.source }),
+    }))),
+  })
+}
+
+/** Detach one target-specific Deliverable Acceptance Review Center page. */
+export function deliverableAcceptanceReviewCenterProjection(
+  value: DeliverableAcceptanceReviewCenterProjection,
+): DeliverableAcceptanceReviewCenterProjection {
+  const cloneMember = (member: import('./client.ts').DeliverableMemberSnapshot) =>
+    Object.freeze({ ...member })
+  const cloneCalendar = (calendar: import('./client.ts').DeliverableCalendarProjection) =>
+    Object.freeze({ ...calendar, schedule: Object.freeze({ ...calendar.schedule }) })
+  const cloneArtifact = (artifact: DeliverableArtifactVersionProjection) =>
+    Object.freeze({ ...artifact })
+  const clonePlan = (plan: DeliverablePlanProjection): DeliverablePlanProjection => Object.freeze({
+    ...plan,
+    criteria: Object.freeze(plan.criteria.map(criterion => Object.freeze({ ...criterion }))),
+    responsibility: Object.freeze({
+      accountable: cloneMember(plan.responsibility.accountable),
+      contributors: Object.freeze(plan.responsibility.contributors.map(cloneMember)),
+      humanSponsor: plan.responsibility.humanSponsor === null
+        ? null
+        : cloneMember(plan.responsibility.humanSponsor),
+      acceptor: cloneMember(plan.responsibility.acceptor),
+    }),
+    taskGuids: Object.freeze([...plan.taskGuids]),
+  })
+  const cloneTask = (task: ProjectTaskProjection): ProjectTaskProjection => Object.freeze({
+    ...task,
+    assignees: Object.freeze(task.assignees.map(member => Object.freeze({ ...member }))),
+    followers: Object.freeze(task.followers.map(member => Object.freeze({ ...member }))),
+    comments: Object.freeze(task.comments.map(comment => Object.freeze({
+      ...comment,
+      creator: comment.creator === null ? null : Object.freeze({ ...comment.creator }),
+    }))),
+  })
+  return Object.freeze({
+    reviewKind: 'deliverable-acceptance',
+    projectId: value.projectId,
+    deliverablesRevision: value.deliverablesRevision,
+    items: Object.freeze(value.items.map(item => Object.freeze({
+      ...item,
+      currentCalendar: cloneCalendar(item.currentCalendar),
+      currentTasks: Object.freeze(item.currentTasks.map(link => Object.freeze({
+        ...link,
+        task: link.task === null ? null : cloneTask(link.task),
+      }))),
+      request: Object.freeze({
+        ...item.request,
+        plan: clonePlan(item.request.plan),
+        calendar: cloneCalendar(item.request.calendar),
+        taskGuids: Object.freeze([...item.request.taskGuids]),
+        candidateVersions: Object.freeze(item.request.candidateVersions.map(cloneArtifact)),
+        decision: item.request.decision === null ? null : Object.freeze({
+          ...item.request.decision,
+          actor: Object.freeze({ ...item.request.decision.actor }),
+          designatedAcceptor: cloneMember(item.request.decision.designatedAcceptor),
+          criteria: Object.freeze(item.request.decision.criteria.map(criterion =>
+            Object.freeze({ ...criterion }))),
+          receipt: Object.freeze({ ...item.request.decision.receipt }),
+        }),
+        allowedDecisions: Object.freeze([...item.request.allowedDecisions]),
+      }),
+      finalRelease: item.finalRelease === null ? null : Object.freeze({
+        ...item.finalRelease,
+        versions: Object.freeze(item.finalRelease.versions.map(cloneArtifact)),
+      }),
+    }))),
+    nextBeforeSequence: value.nextBeforeSequence,
   })
 }
 

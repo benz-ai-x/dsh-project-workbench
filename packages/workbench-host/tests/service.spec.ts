@@ -101,6 +101,10 @@ describe('WorkbenchService', () => {
       { method: 'setProjectMemberStatus', invocation: { kind: 'direct' } },
       { method: 'setProjectResponsibility', invocation: { kind: 'direct' } },
       { method: 'reviewCenter', invocation: { kind: 'direct' } },
+      { method: 'projectDeliverables', invocation: { kind: 'direct' } },
+      { method: 'createProjectDeliverable', invocation: { kind: 'direct' } },
+      { method: 'requestDeliverableAcceptance', invocation: { kind: 'direct' } },
+      { method: 'decideDeliverableAcceptance', invocation: { kind: 'direct' } },
       { method: 'proposeProjectResponsibilityChange', invocation: { kind: 'direct' } },
       { method: 'decideSuggestedChange', invocation: { kind: 'direct' } },
     ])
@@ -188,6 +192,23 @@ describe('WorkbenchService', () => {
     }, new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })
+    await expect(ctx.workbench.projectDeliverables({
+      projectId: 'project-secret',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.createProjectDeliverable(
+      {} as never,
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.requestDeliverableAcceptance(
+      {} as never,
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.decideDeliverableAcceptance(
+      {} as never,
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(ctx.workbench.proposeProjectResponsibilityChange({
       projectId: 'project-secret',
       candidate: {

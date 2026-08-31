@@ -17,10 +17,14 @@ import type {
   ConfigureFeishuTaskWorkflowResult,
   CreateProjectMilestoneRequest,
   CreateProjectMilestoneResult,
+  CreateProjectDeliverableRequest,
+  CreateProjectDeliverableResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  DecideDeliverableAcceptanceRequest,
+  DecideDeliverableAcceptanceResult,
   DiscoverFeishuCalendarEventsRequest,
   DiscoverFeishuCalendarsRequest,
   DiscoverFeishuTaskListsRequest,
@@ -32,6 +36,8 @@ import type {
   FeishuTaskWorkflowFieldDiscoveryProjection,
   FeishuConnectionCenterProjection,
   ProjectDetailProjection,
+  ProjectDeliverablesProjection,
+  ProjectDeliverablesQuery,
   ProjectMilestonesProjection,
   ProjectMilestonesQuery,
   ProjectQuery,
@@ -50,8 +56,10 @@ import type {
   ReconcileProjectCalendarResult,
   ReferenceFeishuTaskRequest,
   ReferenceFeishuTaskResult,
-  ReviewCenterFilter,
-  ReviewCenterProjection,
+  RequestDeliverableAcceptanceRequest,
+  RequestDeliverableAcceptanceResult,
+  ReviewCenterQuery,
+  ReviewCenterResultProjection,
   SetProjectMemberStatusRequest,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityRequest,
@@ -582,10 +590,46 @@ export class WorkbenchService extends TypertRemoteService {
   /** Read one Project's proposal context and Host-filtered Review page. */
   @Remote
   reviewCenter(
-    filter: ReviewCenterFilter,
+    filter: ReviewCenterQuery,
     signal: AbortSignal,
-  ): Promise<ReviewCenterProjection | null> {
+  ): Promise<ReviewCenterResultProjection | null> {
     return this.scenario.reviewCenter(filter, signal)
+  }
+
+  /** Read one Project's complete Deliverables workspace and replay chain. */
+  @Remote
+  projectDeliverables(
+    query: ProjectDeliverablesQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectDeliverablesProjection | null> {
+    return this.scenario.projectDeliverables(query, signal)
+  }
+
+  /** Create one Deliverable with its immutable plan and formal Calendar commitment. */
+  @Remote
+  createProjectDeliverable(
+    request: CreateProjectDeliverableRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult> {
+    return this.scenario.createProjectDeliverable(request, signal)
+  }
+
+  /** Freeze one exact artifact-version candidate set for formal acceptance. */
+  @Remote
+  requestDeliverableAcceptance(
+    request: RequestDeliverableAcceptanceRequest,
+    signal: AbortSignal,
+  ): Promise<RequestDeliverableAcceptanceResult> {
+    return this.scenario.requestDeliverableAcceptance(request, signal)
+  }
+
+  /** Apply one fully authorized Deliverable Acceptance decision. */
+  @Remote
+  decideDeliverableAcceptance(
+    request: DecideDeliverableAcceptanceRequest,
+    signal: AbortSignal,
+  ): Promise<DecideDeliverableAcceptanceResult> {
+    return this.scenario.decideDeliverableAcceptance(request, signal)
   }
 
   /** Propose one complete Project Responsibility candidate against an exact Team base. */

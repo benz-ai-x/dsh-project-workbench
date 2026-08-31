@@ -10,9 +10,21 @@ import type {
   BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteResult,
   ConfigureFeishuTaskWorkflowResult,
+  CreateProjectDeliverableResult,
   CreateProjectResult,
   CreateProjectMilestoneResult,
   DecideSuggestedChangeResult,
+  DecideDeliverableAcceptanceResult,
+  DeliverableAcceptanceDecisionProjection,
+  DeliverableAcceptanceRequestProjection,
+  DeliverableAcceptanceReviewCenterProjection,
+  DeliverableArtifactVersionProjection,
+  DeliverableCalendarProjection,
+  DeliverableCalendarMutationEffectProjection,
+  DeliverableCriterionDecisionProjection,
+  DeliverableFinalReleaseProjection,
+  DeliverableMemberSnapshot,
+  DeliverablePlanProjection,
   FEISHU_CONNECTION_ID,
   FeishuConnectionIssue,
   FeishuCalendarEventResult,
@@ -39,6 +51,9 @@ import type {
   OutcomeMetricDirection,
   OutcomeProjection,
   ProjectDetailProjection,
+  ProjectDeliverableConflict,
+  ProjectDeliverableProjection,
+  ProjectDeliverablesProjection,
   ProjectCalendarSchedule,
   ProjectMilestoneProjection,
   ProjectMilestonesProjection,
@@ -58,7 +73,9 @@ import type {
   ReconcileProjectTasksResult,
   ReconcileProjectCalendarResult,
   ReferenceFeishuTaskResult,
+  RequestDeliverableAcceptanceResult,
   ReviewCenterProjection,
+  ReviewCenterResultProjection,
   SetStatusResult,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityResult,
@@ -100,6 +117,8 @@ import {
 import {
   projectTeamCommandResult,
   projectTeamProjection,
+  deliverableAcceptanceReviewCenterProjection,
+  projectDeliverablesProjection,
   projectMilestonesProjection,
   projectTasksProjection,
   reviewCenterProjection,
@@ -143,6 +162,14 @@ import {
   type WorkbenchFeishuCalendarReconciliationFailureMutation,
   type WorkbenchFeishuCalendarReconciliationMutation,
   type WorkbenchFeishuCalendarReconciliationTarget,
+  type WorkbenchDeliverableAcceptanceDecisionMutation,
+  type WorkbenchDeliverableAcceptanceRequestMutation,
+  type WorkbenchDeliverableCalendarCreationReservation,
+  type WorkbenchDeliverableCalendarCreationReservationMutation,
+  type WorkbenchDeliverableCalendarCreationSettlement,
+  type WorkbenchProjectDeliverableMutation,
+  type WorkbenchProjectDeliverableReplayQuery,
+  type WorkbenchProjectDeliverablesReadQuery,
   type WorkbenchProjectMilestoneMutation,
   type WorkbenchProjectMilestoneReplayQuery,
   type WorkbenchProjectMilestonesReadQuery,
@@ -181,7 +208,7 @@ import {
   workflowTransitionAllowed,
 } from './feishu-task-workflow.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 9
+export const WORKBENCH_SCHEMA_VERSION = 10
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -299,6 +326,26 @@ const FEISHU_MILESTONE_OBJECT_TYPE = 'project-milestone'
 const FEISHU_CALENDAR_BIND_OUTBOX_TOPIC = 'workbench.project-calendar.bound.v1'
 const FEISHU_MILESTONE_CREATE_OUTBOX_TOPIC = 'workbench.project-milestone.created.v1'
 const FEISHU_MILESTONE_DATE_OUTBOX_TOPIC = 'workbench.project-milestone.date-update.v1'
+const DELIVERABLE_CREATE_COMMAND_TYPE = 'workbench.project-deliverable.create'
+const DELIVERABLE_REQUEST_COMMAND_TYPE = 'workbench.deliverable-acceptance.request'
+const DELIVERABLE_APPROVE_COMMAND_TYPE = 'workbench.deliverable-acceptance.approve'
+const DELIVERABLE_REJECT_COMMAND_TYPE = 'workbench.deliverable-acceptance.reject'
+const DELIVERABLE_NEEDS_CHANGES_COMMAND_TYPE = 'workbench.deliverable-acceptance.needs-changes'
+const DELIVERABLE_CREATE_AUDIT_ACTION = 'workbench.project-deliverable.created'
+const DELIVERABLE_REQUEST_AUDIT_ACTION = 'workbench.deliverable-acceptance.requested'
+const DELIVERABLE_APPROVE_AUDIT_ACTION = 'workbench.deliverable-acceptance.approved'
+const DELIVERABLE_REJECT_AUDIT_ACTION = 'workbench.deliverable-acceptance.rejected'
+const DELIVERABLE_NEEDS_CHANGES_AUDIT_ACTION = 'workbench.deliverable-acceptance.needs-changes'
+const DELIVERABLE_CREATE_SUMMARY = 'project-deliverable-created'
+const DELIVERABLE_REQUEST_SUMMARY = 'deliverable-acceptance-requested'
+const DELIVERABLE_APPROVE_SUMMARY = 'deliverable-acceptance-approved'
+const DELIVERABLE_REJECT_SUMMARY = 'deliverable-acceptance-rejected'
+const DELIVERABLE_NEEDS_CHANGES_SUMMARY = 'deliverable-acceptance-needs-changes'
+const DELIVERABLE_OBJECT_TYPE = 'project-deliverable'
+const DELIVERABLE_REQUEST_OBJECT_TYPE = 'deliverable-acceptance-request'
+const DELIVERABLE_CREATE_OUTBOX_TOPIC = 'workbench.project-deliverable.created.v1'
+const DELIVERABLE_REQUEST_OUTBOX_TOPIC = 'workbench.deliverable-acceptance.requested.v1'
+const DELIVERABLE_DECISION_OUTBOX_TOPIC = 'workbench.deliverable-acceptance.decided.v1'
 const MAX_REVIEW_CENTER_LIMIT = 50
 const MAX_SUGGESTED_CHANGE_EVIDENCE = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
@@ -325,6 +372,11 @@ const MAX_FEISHU_TASK_TEXT_LENGTH = 3_000
 const MAX_FEISHU_TASK_MEMBER_NAME_LENGTH = 200
 const MAX_PROJECT_MILESTONES = 100
 const MAX_PROJECT_SCHEDULE_CHANGES = 50
+const MAX_PROJECT_DELIVERABLES = 100
+const MAX_DELIVERABLE_CRITERIA = 20
+const MAX_DELIVERABLE_TASKS = 50
+const MAX_DELIVERABLE_CANDIDATES = 20
+const MAX_DELIVERABLE_ACTIVITY_LIMIT = 100
 
 export type WorkbenchJournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
@@ -675,8 +727,11 @@ interface ProjectScheduleChangeRow {
   readonly id: string
   readonly project_id: string
   readonly project_revision: number
-  readonly milestone_id: string
-  readonly milestone_revision: number
+  readonly target_kind: string
+  readonly target_id: string
+  readonly target_revision: number
+  readonly milestone_id: string | null
+  readonly milestone_revision: number | null
   readonly source: string
   readonly changed_fields_json: string
   readonly before_schedule_json: string | null
@@ -713,6 +768,186 @@ interface FeishuCalendarEffectRow {
   readonly created_at: string
   readonly updated_at: string
 }
+
+interface ProjectDeliverableHeadRow {
+  readonly project_id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly revision: number
+  readonly updated_at: string
+}
+
+interface ProjectDeliverableRow {
+  readonly sequence: number
+  readonly id: string
+  readonly project_id: string
+  readonly revision: number
+  readonly state: string
+  readonly plan_snapshot_id: string
+  readonly plan_json: string
+  readonly plan_digest: string
+  readonly event_id: string
+  readonly event_app_link: string
+  readonly schedule_json: string
+  readonly remote_status: string
+  readonly remote_observation_version: string
+  readonly sync_state: string
+  readonly last_observed_at: string
+  readonly creation_command_id: string
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface DeliverableAcceptanceRequestRow {
+  readonly sequence: number
+  readonly id: string
+  readonly project_id: string
+  readonly deliverable_id: string
+  readonly round_sequence: number
+  readonly revision: number
+  readonly deliverable_revision: number
+  readonly plan_snapshot_id: string
+  readonly plan_json: string
+  readonly calendar_json: string
+  readonly task_guids_json: string
+  readonly candidate_versions_json: string
+  readonly candidates_digest: string
+  readonly persisted_state: string
+  readonly decision_id: string | null
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly outbox_id: string
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface DeliverableCandidateVersionRow {
+  readonly acceptance_request_id: string
+  readonly ordinal: number
+  readonly kind: string
+  readonly source: string
+  readonly resource_id: string
+  readonly version_id: string
+  readonly display_name: string
+  readonly canonical_url: string | null
+  readonly content_digest: string | null
+  readonly reference_digest: string
+}
+
+interface DeliverableAcceptanceDecisionRow {
+  readonly id: string
+  readonly project_id: string
+  readonly deliverable_id: string
+  readonly acceptance_request_id: string
+  readonly request_revision: number
+  readonly outcome: string
+  readonly actor_kind: string
+  readonly actor_id: string
+  readonly designated_acceptor_json: string
+  readonly criteria_json: string
+  readonly feedback: string
+  readonly causation_id: string
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly outbox_id: string
+  readonly decided_at: string
+}
+
+interface DeliverableFinalReleaseRow {
+  readonly id: string
+  readonly project_id: string
+  readonly deliverable_id: string
+  readonly acceptance_request_id: string
+  readonly versions_json: string
+  readonly versions_digest: string
+  readonly created_at: string
+}
+
+interface DeliverableActivityRow {
+  readonly sequence: number
+  readonly id: string
+  readonly project_id: string
+  readonly deliverable_id: string
+  readonly deliverable_revision: number
+  readonly action: string
+  readonly source_kind: string
+  readonly source_id: string
+  readonly plan_snapshot_id: string
+  readonly acceptance_request_id: string | null
+  readonly decision_id: string | null
+  readonly occurred_at: string
+}
+
+interface DeliverableCalendarEffectRow {
+  readonly id: string
+  readonly project_id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly actor_id: string
+  readonly deliverable_id: string
+  readonly operation: string
+  readonly intent_json: string
+  readonly expected_deliverables_revision: number
+  readonly expected_team_revision: number
+  readonly expected_task_revision: number
+  readonly expected_schedule_revision: number
+  readonly request_hash: string
+  readonly idempotency_key_hash: string
+  readonly provider_idempotency_key: string
+  readonly route_kind: string
+  readonly route_generation: number
+  readonly app_id: string
+  readonly open_id: string
+  readonly tenant_key: string | null
+  readonly state: string
+  readonly issue_json: string | null
+  readonly local_conflict_code: string | null
+  readonly attempt_count: number
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly outbox_id: string
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+type DeliverableCalendarLocalConflictCode = Extract<
+  ProjectDeliverableConflict['code'],
+  | 'calendar-unbound'
+  | 'deliverables-revision-conflict'
+  | 'team-revision-conflict'
+  | 'task-projection-revision-conflict'
+  | 'project-schedule-revision-conflict'
+  | 'member-not-found'
+  | 'member-inactive'
+  | 'accountable-also-contributor'
+  | 'human-sponsor-required'
+  | 'human-sponsor-invalid'
+  | 'human-sponsor-forbidden'
+  | 'acceptor-invalid'
+  | 'task-not-in-project'
+  | 'event-already-used'
+  | 'deliverable-limit-reached'
+  | 'remote-outcome-unknown'
+>
+
+const DELIVERABLE_CALENDAR_LOCAL_CONFLICT_CODES = new Set<DeliverableCalendarLocalConflictCode>([
+  'calendar-unbound',
+  'deliverables-revision-conflict',
+  'team-revision-conflict',
+  'task-projection-revision-conflict',
+  'project-schedule-revision-conflict',
+  'member-not-found',
+  'member-inactive',
+  'accountable-also-contributor',
+  'human-sponsor-required',
+  'human-sponsor-invalid',
+  'human-sponsor-forbidden',
+  'acceptor-invalid',
+  'task-not-in-project',
+  'event-already-used',
+  'deliverable-limit-reached',
+  'remote-outcome-unknown',
+])
 
 interface TemplateVersionRow {
   readonly template_id: string
@@ -959,6 +1194,26 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_feishu_calendar_inbox_no_delete',
   'workbench_feishu_calendar_effect_intent_no_update',
   'workbench_feishu_calendar_effect_no_delete',
+  'workbench_calendar_commitment_no_update',
+  'workbench_calendar_commitment_no_delete',
+  'workbench_project_deliverable_plan_no_update',
+  'workbench_project_deliverable_no_delete',
+  'workbench_project_deliverable_member_no_update',
+  'workbench_project_deliverable_member_no_delete',
+  'workbench_deliverable_request_snapshot_no_update',
+  'workbench_deliverable_request_no_delete',
+  'workbench_deliverable_candidate_version_no_update',
+  'workbench_deliverable_candidate_version_no_delete',
+  'workbench_deliverable_decision_no_update',
+  'workbench_deliverable_decision_no_delete',
+  'workbench_deliverable_final_release_no_update',
+  'workbench_deliverable_final_release_no_delete',
+  'workbench_deliverable_final_release_version_no_update',
+  'workbench_deliverable_final_release_version_no_delete',
+  'workbench_deliverable_activity_no_update',
+  'workbench_deliverable_activity_no_delete',
+  'workbench_deliverable_calendar_effect_intent_no_update',
+  'workbench_deliverable_calendar_effect_no_delete',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -1627,7 +1882,8 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         })
       }
       if (mutation.status === 'inactive'
-        && isMemberInCurrentResponsibility(database, head, mutation.memberId)) {
+        && (isMemberInCurrentResponsibility(database, head, mutation.memberId)
+          || isMemberInOpenDeliverable(database, mutation.projectId, mutation.memberId))) {
         database.exec('ROLLBACK')
         began = false
         return projectTeamCommandResult({
@@ -1795,7 +2051,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
   async readReviewCenter(
     query: WorkbenchReviewCenterQuery,
     signal: AbortSignal,
-  ): Promise<ReviewCenterProjection | null> {
+  ): Promise<ReviewCenterResultProjection | null> {
     throwIfAborted(signal)
     validateReviewCenterQuery(query)
     const database = this.requireDatabase()
@@ -1804,7 +2060,9 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       database.exec('BEGIN')
       began = true
       assertValidLedger(database)
-      const projection = readReviewCenterSync(database, query)
+      const projection = isDeliverableReviewFilter(query.filter)
+        ? readDeliverableReviewCenterSync(database, query)
+        : readReviewCenterSync(database, query)
       throwIfAborted(signal)
       database.exec('COMMIT')
       began = false
@@ -4385,7 +4643,10 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     throwIfAborted(signal)
     validateBoundedReference(effectId, 'Feishu Calendar effect id')
     canonicalInstant(claimedAt, 'Feishu Calendar effect claimedAt')
-    return claimCalendarEffect(this.requireDatabase(), effectId, claimedAt, signal)
+    const database = this.requireDatabase()
+    return readDeliverableEffect(database, effectId) === null
+      ? claimCalendarEffect(database, effectId, claimedAt, signal)
+      : claimDeliverableEffect(database, effectId, claimedAt, signal)
   }
 
   async settleFeishuCalendarBinding(
@@ -4512,6 +4773,65 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     throwIfAborted(signal)
     validateCalendarEventMutation(mutation)
     return commitCalendarEventHint(this.requireDatabase(), mutation, signal)
+  }
+
+  async readProjectDeliverables(
+    query: WorkbenchProjectDeliverablesReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectDeliverablesProjection | null> {
+    throwIfAborted(signal)
+    const value = readProjectDeliverablesProjection(this.requireDatabase(), query)
+    throwIfAborted(signal)
+    return value === null ? null : projectDeliverablesProjection(value)
+  }
+
+  async replayProjectDeliverableCreation(
+    query: WorkbenchProjectDeliverableReplayQuery,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult | null> {
+    throwIfAborted(signal)
+    return replayDeliverableCreation(this.requireDatabase(), query, signal)
+  }
+
+  async commitProjectDeliverable(
+    mutation: WorkbenchProjectDeliverableMutation,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult> {
+    throwIfAborted(signal)
+    return commitExistingDeliverable(this.requireDatabase(), mutation, signal)
+  }
+
+  async reserveDeliverableCalendarCreation(
+    mutation: WorkbenchDeliverableCalendarCreationReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchDeliverableCalendarCreationReservation> {
+    throwIfAborted(signal)
+    return reserveDeliverableCalendarCreation(this.requireDatabase(), mutation, signal)
+  }
+
+  async settleDeliverableCalendarCreation(
+    effectId: string,
+    settlement: WorkbenchDeliverableCalendarCreationSettlement,
+    signal: AbortSignal,
+  ): Promise<CreateProjectDeliverableResult> {
+    throwIfAborted(signal)
+    return settleDeliverableCalendarCreation(this.requireDatabase(), effectId, settlement, signal)
+  }
+
+  async commitDeliverableAcceptanceRequest(
+    mutation: WorkbenchDeliverableAcceptanceRequestMutation,
+    signal: AbortSignal,
+  ): Promise<RequestDeliverableAcceptanceResult> {
+    throwIfAborted(signal)
+    return commitDeliverableAcceptanceRequest(this.requireDatabase(), mutation, signal)
+  }
+
+  async commitDeliverableAcceptanceDecision(
+    mutation: WorkbenchDeliverableAcceptanceDecisionMutation,
+    signal: AbortSignal,
+  ): Promise<DecideDeliverableAcceptanceResult> {
+    throwIfAborted(signal)
+    return commitDeliverableAcceptanceDecision(this.requireDatabase(), mutation, signal)
   }
 
   async readActivity(
@@ -4793,6 +5113,26 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     }
     return value.toISOString()
   }
+}
+
+function isMemberInOpenDeliverable(
+  database: DatabaseSync,
+  projectId: string,
+  memberId: string,
+): boolean {
+  const row = database.prepare(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM workbench_project_deliverable_member AS relation
+      INNER JOIN workbench_project_deliverable AS deliverable
+        ON deliverable.project_id = relation.project_id
+        AND deliverable.id = relation.deliverable_id
+      WHERE relation.project_id = ? AND relation.member_id = ?
+        AND deliverable.state <> 'accepted'
+    ) AS present
+  `).get(projectId, memberId) as { readonly present: 0 | 1 } | undefined
+  if (row === undefined) throw new Error('Workbench Deliverable member-use query failed')
+  return row.present === 1
 }
 
 interface FeishuRouteVocabulary {
@@ -5961,6 +6301,7 @@ function prepareLedger(database: DatabaseSync, observedAt: string): void {
     began = true
     expireOutboxClaims(database, observedAt)
     recoverInflightCalendarEffects(database, observedAt)
+    recoverInflightDeliverableEffects(database, observedAt)
     assertValidLedger(database)
     database.exec('COMMIT')
     began = false
@@ -7274,6 +7615,395 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     `)
     return
   }
+  if (targetVersion === 10) {
+    database.exec(`
+      CREATE TABLE workbench_project_deliverable_head (
+        project_id TEXT PRIMARY KEY CHECK (length(project_id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (project_id, organization_id, team_id),
+        FOREIGN KEY (project_id, organization_id, team_id)
+          REFERENCES workbench_project_team_head (project_id, organization_id, team_id)
+      ) STRICT;
+
+      INSERT INTO workbench_project_deliverable_head (
+        project_id, organization_id, team_id, revision, updated_at
+      ) SELECT id, organization_id, team_id, 0, created_at FROM workbench_project;
+
+      CREATE TABLE workbench_project_deliverable (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        state TEXT NOT NULL CHECK (state IN ('planned', 'in-review', 'accepted')),
+        plan_snapshot_id TEXT NOT NULL UNIQUE CHECK (length(plan_snapshot_id) BETWEEN 1 AND 128),
+        plan_json TEXT NOT NULL CHECK (length(plan_json) > 0),
+        plan_digest TEXT NOT NULL CHECK (length(plan_digest) = 71 AND substr(plan_digest, 1, 7) = 'sha256:'),
+        event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 1 AND 256),
+        event_app_link TEXT NOT NULL CHECK (length(event_app_link) BETWEEN 1 AND 2048),
+        schedule_json TEXT NOT NULL CHECK (length(schedule_json) > 0),
+        remote_status TEXT NOT NULL CHECK (remote_status IN ('confirmed', 'cancelled', 'unknown')),
+        remote_observation_version TEXT NOT NULL
+          CHECK (length(remote_observation_version) = 71
+            AND substr(remote_observation_version, 1, 7) = 'sha256:'),
+        sync_state TEXT NOT NULL CHECK (sync_state IN ('healthy', 'attention', 'unknown')),
+        last_observed_at TEXT NOT NULL CHECK (length(last_observed_at) > 0),
+        creation_command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (project_id, id),
+        UNIQUE (project_id, sequence),
+        FOREIGN KEY (project_id) REFERENCES workbench_project_deliverable_head (project_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_project_deliverable_member (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        deliverable_id TEXT NOT NULL CHECK (length(deliverable_id) BETWEEN 1 AND 128),
+        role TEXT NOT NULL CHECK (role IN ('accountable', 'contributor', 'human-sponsor', 'acceptor')),
+        ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+        member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 1 AND 128),
+        PRIMARY KEY (project_id, deliverable_id, role, ordinal),
+        UNIQUE (project_id, deliverable_id, role, member_id),
+        FOREIGN KEY (project_id, deliverable_id)
+          REFERENCES workbench_project_deliverable (project_id, id),
+        FOREIGN KEY (member_id) REFERENCES workbench_project_member (id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE workbench_deliverable_acceptance_request (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        deliverable_id TEXT NOT NULL CHECK (length(deliverable_id) BETWEEN 1 AND 128),
+        round_sequence INTEGER NOT NULL CHECK (round_sequence > 0),
+        revision INTEGER NOT NULL CHECK (revision IN (1, 2)),
+        deliverable_revision INTEGER NOT NULL CHECK (deliverable_revision > 0),
+        plan_snapshot_id TEXT NOT NULL CHECK (length(plan_snapshot_id) BETWEEN 1 AND 128),
+        plan_json TEXT NOT NULL CHECK (length(plan_json) > 0),
+        calendar_json TEXT NOT NULL CHECK (length(calendar_json) > 0),
+        task_guids_json TEXT NOT NULL CHECK (length(task_guids_json) > 0),
+        candidate_versions_json TEXT NOT NULL CHECK (length(candidate_versions_json) > 0),
+        candidates_digest TEXT NOT NULL
+          CHECK (length(candidates_digest) = 71 AND substr(candidates_digest, 1, 7) = 'sha256:'),
+        persisted_state TEXT NOT NULL
+          CHECK (persisted_state IN ('pending', 'approved', 'rejected', 'needs_changes')),
+        decision_id TEXT,
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        audit_event_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        outbox_id TEXT NOT NULL UNIQUE REFERENCES workbench_outbox (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (project_id, deliverable_id, round_sequence),
+        UNIQUE (project_id, deliverable_id, id),
+        FOREIGN KEY (project_id, deliverable_id)
+          REFERENCES workbench_project_deliverable (project_id, id)
+      ) STRICT;
+
+      CREATE UNIQUE INDEX workbench_deliverable_one_pending_request
+        ON workbench_deliverable_acceptance_request (project_id, deliverable_id)
+        WHERE persisted_state = 'pending';
+
+      CREATE TABLE workbench_deliverable_candidate_version (
+        acceptance_request_id TEXT NOT NULL CHECK (length(acceptance_request_id) BETWEEN 1 AND 128),
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND ${MAX_DELIVERABLE_CANDIDATES}),
+        kind TEXT NOT NULL CHECK (kind = 'declared-file-version'),
+        source TEXT NOT NULL CHECK (source IN ('managed', 'local', 'feishu')),
+        resource_id TEXT NOT NULL CHECK (length(resource_id) BETWEEN 1 AND 256),
+        version_id TEXT NOT NULL CHECK (length(version_id) BETWEEN 1 AND 256),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
+        canonical_url TEXT CHECK (canonical_url IS NULL OR length(canonical_url) BETWEEN 1 AND 2048),
+        content_digest TEXT CHECK (content_digest IS NULL OR
+          (length(content_digest) = 71 AND substr(content_digest, 1, 7) = 'sha256:')),
+        reference_digest TEXT NOT NULL
+          CHECK (length(reference_digest) = 71 AND substr(reference_digest, 1, 7) = 'sha256:'),
+        PRIMARY KEY (acceptance_request_id, ordinal),
+        UNIQUE (acceptance_request_id, reference_digest),
+        UNIQUE (acceptance_request_id, ordinal, reference_digest),
+        FOREIGN KEY (acceptance_request_id)
+          REFERENCES workbench_deliverable_acceptance_request (id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE workbench_deliverable_acceptance_decision (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        deliverable_id TEXT NOT NULL CHECK (length(deliverable_id) BETWEEN 1 AND 128),
+        acceptance_request_id TEXT NOT NULL UNIQUE CHECK (length(acceptance_request_id) BETWEEN 1 AND 128),
+        request_revision INTEGER NOT NULL CHECK (request_revision = 2),
+        outcome TEXT NOT NULL CHECK (outcome IN ('approved', 'rejected', 'needs_changes')),
+        actor_kind TEXT NOT NULL CHECK (actor_kind = 'owner'),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        designated_acceptor_json TEXT NOT NULL CHECK (length(designated_acceptor_json) > 0),
+        criteria_json TEXT NOT NULL CHECK (length(criteria_json) > 0),
+        feedback TEXT NOT NULL CHECK (length(feedback) BETWEEN 1 AND 2000),
+        causation_id TEXT NOT NULL CHECK (length(causation_id) BETWEEN 1 AND 128),
+        command_id TEXT NOT NULL UNIQUE CHECK (length(command_id) BETWEEN 1 AND 128),
+        audit_event_id TEXT NOT NULL UNIQUE CHECK (length(audit_event_id) BETWEEN 1 AND 128),
+        outbox_id TEXT NOT NULL UNIQUE CHECK (length(outbox_id) BETWEEN 1 AND 128),
+        decided_at TEXT NOT NULL CHECK (length(decided_at) > 0),
+        FOREIGN KEY (project_id, deliverable_id, acceptance_request_id)
+          REFERENCES workbench_deliverable_acceptance_request (project_id, deliverable_id, id),
+        FOREIGN KEY (command_id) REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (audit_event_id) REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (outbox_id) REFERENCES workbench_outbox (id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_deliverable_final_release (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        deliverable_id TEXT NOT NULL UNIQUE CHECK (length(deliverable_id) BETWEEN 1 AND 128),
+        acceptance_request_id TEXT NOT NULL UNIQUE CHECK (length(acceptance_request_id) BETWEEN 1 AND 128),
+        versions_json TEXT NOT NULL CHECK (length(versions_json) > 0),
+        versions_digest TEXT NOT NULL
+          CHECK (length(versions_digest) = 71 AND substr(versions_digest, 1, 7) = 'sha256:'),
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        UNIQUE (id, acceptance_request_id),
+        FOREIGN KEY (project_id, deliverable_id)
+          REFERENCES workbench_project_deliverable (project_id, id),
+        FOREIGN KEY (acceptance_request_id)
+          REFERENCES workbench_deliverable_acceptance_request (id)
+      ) STRICT;
+
+      CREATE TABLE workbench_deliverable_final_release_version (
+        final_release_id TEXT NOT NULL CHECK (length(final_release_id) BETWEEN 1 AND 128),
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND ${MAX_DELIVERABLE_CANDIDATES}),
+        acceptance_request_id TEXT NOT NULL CHECK (length(acceptance_request_id) BETWEEN 1 AND 128),
+        candidate_ordinal INTEGER NOT NULL
+          CHECK (candidate_ordinal BETWEEN 1 AND ${MAX_DELIVERABLE_CANDIDATES}),
+        reference_digest TEXT NOT NULL
+          CHECK (length(reference_digest) = 71 AND substr(reference_digest, 1, 7) = 'sha256:'),
+        PRIMARY KEY (final_release_id, ordinal),
+        UNIQUE (final_release_id, candidate_ordinal),
+        FOREIGN KEY (final_release_id, acceptance_request_id)
+          REFERENCES workbench_deliverable_final_release (id, acceptance_request_id),
+        FOREIGN KEY (acceptance_request_id, candidate_ordinal, reference_digest)
+          REFERENCES workbench_deliverable_candidate_version (
+            acceptance_request_id, ordinal, reference_digest
+          )
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE workbench_deliverable_activity (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        deliverable_id TEXT NOT NULL CHECK (length(deliverable_id) BETWEEN 1 AND 128),
+        deliverable_revision INTEGER NOT NULL CHECK (deliverable_revision > 0),
+        action TEXT NOT NULL CHECK (action IN (
+          'deliverable-created', 'acceptance-requested', 'acceptance-approved',
+          'acceptance-rejected', 'acceptance-needs-changes', 'calendar-observed'
+        )),
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('audit-event', 'schedule-change')),
+        source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 128),
+        plan_snapshot_id TEXT NOT NULL CHECK (length(plan_snapshot_id) BETWEEN 1 AND 128),
+        acceptance_request_id TEXT,
+        decision_id TEXT,
+        occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
+        FOREIGN KEY (project_id, deliverable_id)
+          REFERENCES workbench_project_deliverable (project_id, id)
+      ) STRICT;
+
+      CREATE TABLE workbench_deliverable_calendar_effect (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        deliverable_id TEXT NOT NULL CHECK (length(deliverable_id) BETWEEN 1 AND 128),
+        operation TEXT NOT NULL CHECK (operation = 'event-create'),
+        intent_json TEXT NOT NULL CHECK (length(intent_json) > 0),
+        expected_deliverables_revision INTEGER NOT NULL CHECK (expected_deliverables_revision >= 0),
+        expected_team_revision INTEGER NOT NULL CHECK (expected_team_revision >= 0),
+        expected_task_revision INTEGER NOT NULL CHECK (expected_task_revision >= 0),
+        expected_schedule_revision INTEGER NOT NULL CHECK (expected_schedule_revision >= 0),
+        request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+        idempotency_key_hash TEXT NOT NULL CHECK (length(idempotency_key_hash) = 64),
+        provider_idempotency_key TEXT NOT NULL CHECK (length(provider_idempotency_key) BETWEEN 1 AND 128),
+        route_kind TEXT NOT NULL CHECK (route_kind IN ('bot', 'user')),
+        route_generation INTEGER NOT NULL CHECK (route_generation > 0),
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND ${MAX_FEISHU_APP_ID_LENGTH}),
+        open_id TEXT NOT NULL CHECK (length(open_id) BETWEEN 1 AND ${MAX_FEISHU_OPEN_ID_LENGTH}),
+        tenant_key TEXT CHECK (tenant_key IS NULL OR length(tenant_key) BETWEEN 1 AND 128),
+        state TEXT NOT NULL CHECK (state IN ('prepared', 'inflight', 'delivered', 'unknown', 'failed', 'conflict')),
+        issue_json TEXT,
+        local_conflict_code TEXT CHECK (local_conflict_code IS NULL OR local_conflict_code IN (
+          'calendar-unbound', 'deliverables-revision-conflict', 'team-revision-conflict',
+          'task-projection-revision-conflict', 'project-schedule-revision-conflict',
+          'member-not-found', 'member-inactive', 'accountable-also-contributor',
+          'human-sponsor-required', 'human-sponsor-invalid', 'human-sponsor-forbidden',
+          'acceptor-invalid', 'task-not-in-project', 'event-already-used',
+          'deliverable-limit-reached', 'remote-outcome-unknown'
+        )),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 1),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        audit_event_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        outbox_id TEXT NOT NULL UNIQUE REFERENCES workbench_outbox (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        CHECK ((state = 'conflict') = (local_conflict_code IS NOT NULL)),
+        UNIQUE (organization_id, actor_id, idempotency_key_hash),
+        FOREIGN KEY (project_id, organization_id, team_id)
+          REFERENCES workbench_project_deliverable_head (project_id, organization_id, team_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_calendar_commitment (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        calendar_id TEXT NOT NULL CHECK (length(calendar_id) BETWEEN 1 AND 256),
+        event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 1 AND 256),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('milestone', 'deliverable')),
+        target_id TEXT NOT NULL CHECK (length(target_id) BETWEEN 1 AND 128),
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        PRIMARY KEY (project_id, target_kind, target_id),
+        UNIQUE (calendar_id, event_id),
+        FOREIGN KEY (project_id) REFERENCES workbench_project_calendar_binding (project_id)
+      ) STRICT, WITHOUT ROWID;
+
+      INSERT INTO workbench_calendar_commitment (
+        project_id, calendar_id, event_id, target_kind, target_id, created_at
+      ) SELECT milestone.project_id, binding.calendar_id, milestone.event_id,
+          'milestone', milestone.id, milestone.created_at
+        FROM workbench_project_milestone AS milestone
+        INNER JOIN workbench_project_calendar_binding AS binding
+          ON binding.project_id = milestone.project_id;
+
+      DROP TRIGGER workbench_project_schedule_change_no_update;
+      DROP TRIGGER workbench_project_schedule_change_no_delete;
+      DROP INDEX workbench_project_schedule_change_recent;
+      ALTER TABLE workbench_project_schedule_change RENAME TO workbench_project_schedule_change_v9;
+
+      CREATE TABLE workbench_project_schedule_change (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        project_revision INTEGER NOT NULL CHECK (project_revision > 0),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('milestone', 'deliverable')),
+        target_id TEXT NOT NULL CHECK (length(target_id) BETWEEN 1 AND 128),
+        target_revision INTEGER NOT NULL CHECK (target_revision > 0),
+        milestone_id TEXT CHECK (milestone_id IS NULL OR length(milestone_id) BETWEEN 1 AND 128),
+        milestone_revision INTEGER CHECK (milestone_revision IS NULL OR milestone_revision > 0),
+        source TEXT NOT NULL CHECK (source IN ('workbench', 'feishu')),
+        changed_fields_json TEXT NOT NULL CHECK (length(changed_fields_json) > 0),
+        before_schedule_json TEXT,
+        after_schedule_json TEXT NOT NULL CHECK (length(after_schedule_json) > 0),
+        occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
+        UNIQUE (project_id, project_revision),
+        CHECK ((target_kind = 'milestone') = (milestone_id IS NOT NULL)),
+        CHECK ((target_kind = 'milestone') = (milestone_revision IS NOT NULL)),
+        CHECK (target_kind <> 'milestone' OR (target_id = milestone_id AND target_revision = milestone_revision)),
+        FOREIGN KEY (project_id, milestone_id)
+          REFERENCES workbench_project_milestone (project_id, id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      INSERT INTO workbench_project_schedule_change (
+        sequence, id, project_id, project_revision, target_kind, target_id,
+        target_revision, milestone_id, milestone_revision, source,
+        changed_fields_json, before_schedule_json, after_schedule_json, occurred_at
+      ) SELECT sequence, id, project_id, project_revision, 'milestone', milestone_id,
+          milestone_revision, milestone_id, milestone_revision, source,
+          changed_fields_json, before_schedule_json, after_schedule_json, occurred_at
+        FROM workbench_project_schedule_change_v9;
+      DROP TABLE workbench_project_schedule_change_v9;
+
+      CREATE INDEX workbench_project_schedule_change_recent
+        ON workbench_project_schedule_change (project_id, project_revision DESC);
+      CREATE INDEX workbench_project_deliverable_project
+        ON workbench_project_deliverable (project_id, sequence);
+      CREATE INDEX workbench_deliverable_acceptance_recent
+        ON workbench_deliverable_acceptance_request (project_id, sequence DESC);
+      CREATE INDEX workbench_deliverable_activity_recent
+        ON workbench_deliverable_activity (project_id, sequence DESC);
+      CREATE INDEX workbench_deliverable_member_use
+        ON workbench_project_deliverable_member (project_id, member_id, deliverable_id);
+
+      CREATE TRIGGER workbench_calendar_commitment_no_update
+        BEFORE UPDATE ON workbench_calendar_commitment
+      BEGIN SELECT RAISE(ABORT, 'workbench Calendar commitments are immutable'); END;
+      CREATE TRIGGER workbench_calendar_commitment_no_delete
+        BEFORE DELETE ON workbench_calendar_commitment
+      BEGIN SELECT RAISE(ABORT, 'workbench Calendar commitments cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_deliverable_plan_no_update BEFORE UPDATE OF
+        id, project_id, sequence, plan_snapshot_id, plan_json, plan_digest,
+        event_id, creation_command_id, created_at ON workbench_project_deliverable
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable plan and event binding are immutable'); END;
+      CREATE TRIGGER workbench_project_deliverable_no_delete
+        BEFORE DELETE ON workbench_project_deliverable
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverables cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_deliverable_member_no_update
+        BEFORE UPDATE ON workbench_project_deliverable_member
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable responsibility is immutable'); END;
+      CREATE TRIGGER workbench_project_deliverable_member_no_delete
+        BEFORE DELETE ON workbench_project_deliverable_member
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable responsibility cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_request_snapshot_no_update BEFORE UPDATE OF
+        id, project_id, deliverable_id, round_sequence, deliverable_revision,
+        plan_snapshot_id, plan_json, calendar_json, task_guids_json,
+        candidate_versions_json, candidates_digest, command_id, audit_event_id,
+        outbox_id, created_at
+        ON workbench_deliverable_acceptance_request
+      BEGIN SELECT RAISE(ABORT, 'workbench Acceptance Request snapshot is immutable'); END;
+      CREATE TRIGGER workbench_deliverable_request_no_delete
+        BEFORE DELETE ON workbench_deliverable_acceptance_request
+      BEGIN SELECT RAISE(ABORT, 'workbench Acceptance Requests cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_candidate_version_no_update
+        BEFORE UPDATE ON workbench_deliverable_candidate_version
+      BEGIN SELECT RAISE(ABORT, 'workbench candidate versions are append-only'); END;
+      CREATE TRIGGER workbench_deliverable_candidate_version_no_delete
+        BEFORE DELETE ON workbench_deliverable_candidate_version
+      BEGIN SELECT RAISE(ABORT, 'workbench candidate versions cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_decision_no_update
+        BEFORE UPDATE ON workbench_deliverable_acceptance_decision
+      BEGIN SELECT RAISE(ABORT, 'workbench acceptance decisions are append-only'); END;
+      CREATE TRIGGER workbench_deliverable_decision_no_delete
+        BEFORE DELETE ON workbench_deliverable_acceptance_decision
+      BEGIN SELECT RAISE(ABORT, 'workbench acceptance decisions cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_final_release_no_update
+        BEFORE UPDATE ON workbench_deliverable_final_release
+      BEGIN SELECT RAISE(ABORT, 'workbench Final Releases are immutable'); END;
+      CREATE TRIGGER workbench_deliverable_final_release_no_delete
+        BEFORE DELETE ON workbench_deliverable_final_release
+      BEGIN SELECT RAISE(ABORT, 'workbench Final Releases cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_final_release_version_no_update
+        BEFORE UPDATE ON workbench_deliverable_final_release_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Final Release versions are append-only'); END;
+      CREATE TRIGGER workbench_deliverable_final_release_version_no_delete
+        BEFORE DELETE ON workbench_deliverable_final_release_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Final Release versions cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_activity_no_update
+        BEFORE UPDATE ON workbench_deliverable_activity
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable Activity is append-only'); END;
+      CREATE TRIGGER workbench_deliverable_activity_no_delete
+        BEFORE DELETE ON workbench_deliverable_activity
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable Activity cannot be deleted'); END;
+      CREATE TRIGGER workbench_deliverable_calendar_effect_intent_no_update BEFORE UPDATE OF
+        id, project_id, organization_id, team_id, actor_id, deliverable_id,
+        operation, intent_json, expected_deliverables_revision, expected_team_revision,
+        expected_task_revision, expected_schedule_revision, request_hash,
+        idempotency_key_hash, provider_idempotency_key, route_kind, route_generation,
+        app_id, open_id, tenant_key, command_id, audit_event_id, outbox_id, created_at
+        ON workbench_deliverable_calendar_effect
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable Calendar effect intent is immutable'); END;
+      CREATE TRIGGER workbench_deliverable_calendar_effect_no_delete
+        BEFORE DELETE ON workbench_deliverable_calendar_effect
+      BEGIN SELECT RAISE(ABORT, 'workbench Deliverable Calendar effects cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_schedule_change_no_update
+        BEFORE UPDATE ON workbench_project_schedule_change
+      BEGIN SELECT RAISE(ABORT, 'workbench Project schedule changes are append-only'); END;
+      CREATE TRIGGER workbench_project_schedule_change_no_delete
+        BEFORE DELETE ON workbench_project_schedule_change
+      BEGIN SELECT RAISE(ABORT, 'workbench Project schedule changes cannot be deleted'); END
+    `)
+    return
+  }
   throw new Error(`missing Workbench migration ${targetVersion}`)
 }
 
@@ -7418,6 +8148,51 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare(`
     SELECT id, project_id, operation, state, attempt_count, command_id
     FROM workbench_feishu_calendar_effect LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, calendar_id, event_id, target_kind, target_id
+    FROM workbench_calendar_commitment LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, organization_id, team_id, revision
+    FROM workbench_project_deliverable_head LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, project_id, revision, state, plan_snapshot_id, event_id
+    FROM workbench_project_deliverable LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, deliverable_id, role, ordinal, member_id
+    FROM workbench_project_deliverable_member LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, project_id, deliverable_id, round_sequence, revision, persisted_state,
+      command_id, audit_event_id, outbox_id
+    FROM workbench_deliverable_acceptance_request LIMIT 1
+  `)
+  database.prepare(`
+    SELECT acceptance_request_id, ordinal, source, resource_id, version_id, reference_digest
+    FROM workbench_deliverable_candidate_version LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, acceptance_request_id, outcome, command_id
+    FROM workbench_deliverable_acceptance_decision LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, deliverable_id, acceptance_request_id, versions_digest
+    FROM workbench_deliverable_final_release LIMIT 1
+  `)
+  database.prepare(`
+    SELECT final_release_id, ordinal, acceptance_request_id, candidate_ordinal, reference_digest
+    FROM workbench_deliverable_final_release_version LIMIT 1
+  `)
+  database.prepare(`
+    SELECT sequence, id, deliverable_id, action, source_kind, source_id
+    FROM workbench_deliverable_activity LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, deliverable_id, state, issue_json, local_conflict_code, attempt_count, command_id
+    FROM workbench_deliverable_calendar_effect LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
@@ -7600,6 +8375,15 @@ function insertProjectDomain(
   `).run(mutation.projectId, organizationId, teamId, mutation.createdAt)
   if (insertedTeam.changes !== 1) {
     throw new Error('Workbench Project Team head was not inserted exactly once')
+  }
+
+  const insertedDeliverableHead = database.prepare(`
+    INSERT INTO workbench_project_deliverable_head (
+      project_id, organization_id, team_id, revision, updated_at
+    ) VALUES (?, ?, ?, 0, ?)
+  `).run(mutation.projectId, organizationId, teamId, mutation.createdAt)
+  if (insertedDeliverableHead.changes !== 1) {
+    throw new Error('Workbench Project Deliverable head was not inserted exactly once')
   }
 
   const insertedSnapshot = database.prepare(`
@@ -8629,6 +9413,91 @@ function readReviewCenterSync(
     items,
     nextBeforeSequence: hasMore ? items.at(-1)?.sequence ?? null : null,
   })
+}
+
+function readDeliverableReviewCenterSync(
+  database: DatabaseSync,
+  query: WorkbenchReviewCenterQuery,
+): DeliverableAcceptanceReviewCenterProjection | null {
+  if (!isDeliverableReviewFilter(query.filter)) {
+    throw new Error('Workbench Deliverable Review query lost its target discriminator')
+  }
+  const filter = query.filter
+  const project = readProjectScopeRow(
+    database,
+    query.organizationId,
+    query.teamId,
+    filter.projectId,
+  )
+  if (project === null) return null
+  const head = readDeliverableHead(database, filter.projectId)
+  const tasks = readProjectTasksProjection(database, {
+    organizationId: query.organizationId,
+    teamId: query.teamId,
+    projectId: filter.projectId,
+  })
+  if (head === null || tasks === null) {
+    throw new Error('Workbench Deliverable Review lost an aggregate dependency')
+  }
+  const where = ['request.project_id = ?']
+  const parameters: Array<string | number> = [filter.projectId]
+  if (filter.beforeSequence !== undefined) {
+    where.push('request.sequence < ?')
+    parameters.push(filter.beforeSequence)
+  }
+  if (filter.status !== undefined) {
+    where.push(`CASE
+      WHEN request.persisted_state = 'pending'
+        AND deliverable.revision <> request.deliverable_revision THEN 'stale'
+      ELSE request.persisted_state END = ?`)
+    parameters.push(filter.status)
+  }
+  const limit = filter.limit ?? 20
+  parameters.push(limit + 1)
+  const rows = database.prepare(`
+    SELECT request.sequence, request.id, request.project_id, request.deliverable_id,
+      request.round_sequence, request.revision, request.deliverable_revision,
+      request.plan_snapshot_id, request.plan_json, request.calendar_json,
+      request.task_guids_json, request.candidate_versions_json,
+      request.candidates_digest, request.persisted_state, request.decision_id,
+      request.command_id, request.audit_event_id, request.outbox_id,
+      request.created_at, request.updated_at
+    FROM workbench_deliverable_acceptance_request AS request
+    INNER JOIN workbench_project_deliverable AS deliverable
+      ON deliverable.project_id = request.project_id
+      AND deliverable.id = request.deliverable_id
+    WHERE ${where.join(' AND ')}
+    ORDER BY request.sequence DESC
+    LIMIT ?
+  `).all(...parameters) as unknown as DeliverableAcceptanceRequestRow[]
+  const hasMore = rows.length > limit
+  const visible = hasMore ? rows.slice(0, limit) : rows
+  const items = visible.map((row) => {
+    const deliverable = readDeliverableRow(database, row.project_id, row.deliverable_id)
+    if (deliverable === null) throw new Error('Workbench Deliverable Review lost its target')
+    const current = projectDeliverableFromRow(database, deliverable, tasks.tasks)
+    const request = acceptanceRequestFromRow(database, row, deliverable.revision)
+    const finalRelease = current.finalRelease?.acceptanceRequestId === row.id
+      ? current.finalRelease
+      : null
+    return Object.freeze({
+      deliverableId: current.deliverableId,
+      deliverableName: current.plan.name,
+      currentDeliverableRevision: current.revision,
+      currentState: current.state,
+      currentCalendar: current.calendar,
+      currentTasks: current.tasks,
+      request,
+      finalRelease,
+    })
+  })
+  return deliverableAcceptanceReviewCenterProjection(Object.freeze({
+    reviewKind: 'deliverable-acceptance',
+    projectId: filter.projectId,
+    deliverablesRevision: head.revision,
+    items: Object.freeze(items),
+    nextBeforeSequence: hasMore ? visible.at(-1)?.sequence ?? null : null,
+  }))
 }
 
 function suggestedChangeProjectionFromRow(
@@ -10043,6 +10912,36 @@ function auditEventFromRow(row: AuditRow): AuditEvent {
       },
     }
   }
+  const deliverableVocabulary = storedDeliverableVocabulary(row.command_type)
+  if (deliverableVocabulary !== null) {
+    const projectId = nullableString(row.project_id, 'Audit Project id')
+    if (projectId === null
+      || row.action !== deliverableVocabulary.auditAction
+      || row.reason_code !== deliverableVocabulary.reason
+      || row.object_type !== deliverableVocabulary.objectType
+      || row.summary_code !== deliverableVocabulary.summaryCode
+      || changedFields.length !== deliverableVocabulary.changedFields.length
+      || changedFields.some((field, index) =>
+        field !== deliverableVocabulary.changedFields[index])) {
+      throw new Error('Workbench database contains unsupported Deliverable audit fields')
+    }
+    return {
+      ...common,
+      action: deliverableVocabulary.auditAction,
+      scope: { organizationId, teamId, projectId },
+      reason: { code: deliverableVocabulary.reason },
+      object: {
+        type: deliverableVocabulary.objectType,
+        id: objectId,
+        version: objectVersion,
+      },
+      command: { id: commandId, type: deliverableVocabulary.commandType },
+      summary: {
+        code: deliverableVocabulary.summaryCode,
+        changedFields: Object.freeze([...deliverableVocabulary.changedFields]),
+      },
+    }
+  }
   throw new Error('Workbench database contains an unsupported audit command type')
 }
 
@@ -10989,7 +11888,40 @@ function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrity
     assertValidSuggestedChangeReceipt(database, row)
     return
   }
+  if (storedDeliverableVocabulary(row.command_type) !== null) {
+    assertValidDeliverableReceipt(row)
+    return
+  }
   throw new Error('Workbench command receipt has an unsupported command type')
+}
+
+function assertValidDeliverableReceipt(row: ReceiptIntegrityRow): void {
+  const vocabulary = storedDeliverableVocabulary(row.command_type)
+  if (vocabulary === null || row.audit_project_id === null
+    || row.audit_action !== vocabulary.auditAction
+    || row.audit_reason_code !== vocabulary.reason
+    || row.audit_object_type !== vocabulary.objectType
+    || row.audit_summary_code !== vocabulary.summaryCode
+    || row.outbox_topic !== vocabulary.outboxTopic
+    || row.outbox_project_id !== row.audit_project_id
+    || row.outbox_object_type !== vocabulary.objectType
+    || row.result_json !== canonicalizeJson({ schemaVersion: 1, state: 'accepted' })) {
+    throw new Error('Workbench Deliverable receipt has mismatched durable vocabulary')
+  }
+  const expectedPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    requestHash: row.request_hash,
+    projectId: row.audit_project_id,
+    objectType: row.audit_object_type,
+    objectId: row.audit_object_id,
+    objectVersion: row.audit_object_version,
+    causationId: row.audit_causation_id,
+  })
+  if (row.outbox_payload_json !== expectedPayload) {
+    throw new Error('Workbench Deliverable receipt does not match its privacy-safe Outbox intent')
+  }
 }
 
 function assertValidStatusReceipt(row: ReceiptIntegrityRow): void {
@@ -12264,20 +13196,37 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
         objectType: FEISHU_CONNECTION_OBJECT_TYPE,
       }
     } else {
-    const suggestedVocabulary = storedSuggestedChangeVocabulary(row.command_type)
-    if (suggestedVocabulary === null
-      || row.action !== suggestedVocabulary.auditAction
-      || row.reason_code !== suggestedVocabulary.reason
-      || row.object_type !== SUGGESTED_CHANGE_OBJECT_TYPE
-      || row.summary_code !== suggestedVocabulary.summaryCode
-      || projectId === null) {
-      throw new Error('Workbench database contains an unsupported Activity command type')
-    }
-    vocabulary = {
-      action: suggestedVocabulary.auditAction,
-      reason: suggestedVocabulary.reason,
-      summaryCode: suggestedVocabulary.summaryCode,
-      objectType: SUGGESTED_CHANGE_OBJECT_TYPE,
+    const deliverableVocabulary = storedDeliverableVocabulary(row.command_type)
+    if (deliverableVocabulary !== null) {
+      if (row.action !== deliverableVocabulary.auditAction
+        || row.reason_code !== deliverableVocabulary.reason
+        || row.object_type !== deliverableVocabulary.objectType
+        || row.summary_code !== deliverableVocabulary.summaryCode
+        || projectId === null) {
+        throw new Error('Workbench database contains an unsupported Deliverable Activity row')
+      }
+      vocabulary = {
+        action: deliverableVocabulary.auditAction,
+        reason: deliverableVocabulary.reason,
+        summaryCode: deliverableVocabulary.summaryCode,
+        objectType: deliverableVocabulary.objectType,
+      }
+    } else {
+      const suggestedVocabulary = storedSuggestedChangeVocabulary(row.command_type)
+      if (suggestedVocabulary === null
+        || row.action !== suggestedVocabulary.auditAction
+        || row.reason_code !== suggestedVocabulary.reason
+        || row.object_type !== SUGGESTED_CHANGE_OBJECT_TYPE
+        || row.summary_code !== suggestedVocabulary.summaryCode
+        || projectId === null) {
+        throw new Error('Workbench database contains an unsupported Activity command type')
+      }
+      vocabulary = {
+        action: suggestedVocabulary.auditAction,
+        reason: suggestedVocabulary.reason,
+        summaryCode: suggestedVocabulary.summaryCode,
+        objectType: SUGGESTED_CHANGE_OBJECT_TYPE,
+      }
     }
     }
     }
@@ -12664,6 +13613,26 @@ function validateReviewCenterQuery(query: WorkbenchReviewCenterQuery): void {
   validateBoundedReference(query.organizationId, 'Review Center organization id')
   validateBoundedReference(query.teamId, 'Review Center team id')
   validateBoundedReference(query.filter.projectId, 'Review Center Project id')
+  if (isDeliverableReviewFilter(query.filter)) {
+    if (query.filter.status !== undefined
+      && query.filter.status !== 'pending'
+      && query.filter.status !== 'approved'
+      && query.filter.status !== 'rejected'
+      && query.filter.status !== 'needs_changes'
+      && query.filter.status !== 'stale') {
+      throw new TypeError('Deliverable Acceptance Review status filter is unsupported')
+    }
+    if (query.filter.beforeSequence !== undefined
+      && (!Number.isSafeInteger(query.filter.beforeSequence)
+        || query.filter.beforeSequence < 1)) {
+      throw new TypeError('Review Center beforeSequence must be a positive safe integer')
+    }
+    const limit = query.filter.limit ?? 20
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_REVIEW_CENTER_LIMIT) {
+      throw new TypeError(`Review Center limit must be an integer from 1 to ${MAX_REVIEW_CENTER_LIMIT}`)
+    }
+    return
+  }
   if (query.filter.status !== undefined
     && query.filter.status !== 'pending'
     && query.filter.status !== 'deferred'
@@ -12686,6 +13655,12 @@ function validateReviewCenterQuery(query: WorkbenchReviewCenterQuery): void {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_REVIEW_CENTER_LIMIT) {
     throw new TypeError(`Review Center limit must be an integer from 1 to ${MAX_REVIEW_CENTER_LIMIT}`)
   }
+}
+
+function isDeliverableReviewFilter(
+  filter: import('./client.ts').ReviewCenterQuery,
+): filter is import('./client.ts').DeliverableAcceptanceReviewCenterFilter {
+  return Reflect.get(filter, 'reviewKind') === 'deliverable-acceptance'
 }
 
 function validateSuggestedResponsibilityCandidate(
@@ -17202,10 +18177,12 @@ function readScheduleChanges(
   projectId: string,
 ): readonly ProjectScheduleChangeProjection[] {
   const rows = database.prepare(`
-    SELECT sequence, id, project_id, project_revision, milestone_id,
+    SELECT sequence, id, project_id, project_revision, target_kind, target_id,
+      target_revision, milestone_id,
       milestone_revision, source, changed_fields_json, before_schedule_json,
       after_schedule_json, occurred_at
-    FROM workbench_project_schedule_change WHERE project_id = ?
+    FROM workbench_project_schedule_change
+    WHERE project_id = ? AND target_kind = 'milestone'
     ORDER BY project_revision DESC LIMIT ${MAX_PROJECT_SCHEDULE_CHANGES}
   `).all(projectId) as unknown as ProjectScheduleChangeRow[]
   return Object.freeze(rows.map(scheduleChangeFromRow))
@@ -17214,6 +18191,11 @@ function readScheduleChanges(
 function scheduleChangeFromRow(row: ProjectScheduleChangeRow): ProjectScheduleChangeProjection {
   positiveInteger(row.sequence, 'Stored schedule change sequence')
   positiveInteger(row.project_revision, 'Stored schedule change Project revision')
+  if (row.target_kind !== 'milestone' || row.milestone_id === null
+    || row.milestone_revision === null || row.target_id !== row.milestone_id
+    || row.target_revision !== row.milestone_revision) {
+    throw new Error('Stored Milestone schedule change target is invalid')
+  }
   positiveInteger(row.milestone_revision, 'Stored schedule change Milestone revision')
   if (row.source !== 'workbench' && row.source !== 'feishu') {
     throw new Error('Stored schedule change source is invalid')
@@ -17719,7 +18701,7 @@ function validateCalendarReconciliationMutation(
 ): void {
   validateBoundedReference(mutation.projectId, 'Calendar reconciliation Project id')
   positiveInteger(mutation.expectedRevision, 'Calendar reconciliation expected revision', true)
-  if (mutation.observations.length > MAX_PROJECT_MILESTONES) {
+  if (mutation.observations.length > MAX_PROJECT_MILESTONES + MAX_PROJECT_DELIVERABLES) {
     throw new TypeError('Calendar reconciliation contains too many observations')
   }
   const ids = new Set<string>()
@@ -18035,6 +19017,18 @@ function insertMilestone(
     input.commandId,
   )
   if (inserted.changes !== 1) throw new Error('Workbench Milestone was not inserted')
+  const commitment = database.prepare(`
+    INSERT INTO workbench_calendar_commitment (
+      project_id, calendar_id, event_id, target_kind, target_id, created_at
+    ) VALUES (?, ?, ?, 'milestone', ?, ?)
+  `).run(
+    input.projectId,
+    input.event.calendarId,
+    input.event.eventId,
+    input.milestoneId,
+    input.createdAt,
+  )
+  if (commitment.changes !== 1) throw new Error('Workbench Milestone commitment was not inserted')
 }
 
 function appendScheduleChange(
@@ -18054,13 +19048,16 @@ function appendScheduleChange(
 ): void {
   const inserted = database.prepare(`
     INSERT INTO workbench_project_schedule_change (
-      id, project_id, project_revision, milestone_id, milestone_revision,
+      id, project_id, project_revision, target_kind, target_id, target_revision,
+      milestone_id, milestone_revision,
       source, changed_fields_json, before_schedule_json, after_schedule_json, occurred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, 'milestone', ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.changeId,
     input.projectId,
     input.projectRevision,
+    input.milestoneId,
+    input.milestoneRevision,
     input.milestoneId,
     input.milestoneRevision,
     input.source,
@@ -18976,8 +19973,9 @@ function commitExistingProjectMilestone(
       return calendarFailure('event-not-selectable', 'Calendar event must be non-recurring and organized by the bound Calendar')
     }
     const used = database.prepare(`
-      SELECT project_id FROM workbench_project_milestone WHERE event_id = ?
-    `).get(mutation.event.eventId) as { readonly project_id: string } | undefined
+      SELECT project_id FROM workbench_calendar_commitment
+      WHERE calendar_id = ? AND event_id = ?
+    `).get(binding.calendar_id, mutation.event.eventId) as { readonly project_id: string } | undefined
     if (used !== undefined) {
       database.exec('ROLLBACK')
       began = false
@@ -19252,9 +20250,12 @@ function settleCalendarEventCreation(
         throw new Error('Feishu delivered a non-selectable event')
       }
       const used = database.prepare(`
-        SELECT project_id FROM workbench_project_milestone WHERE event_id = ?
-      `).get(settlement.event.eventId) as { readonly project_id: string } | undefined
-      if (used !== undefined) throw new Error('Feishu created an event already used by a Milestone')
+        SELECT project_id FROM workbench_calendar_commitment
+        WHERE calendar_id = ? AND event_id = ?
+      `).get(binding.calendar_id, settlement.event.eventId) as {
+        readonly project_id: string
+      } | undefined
+      if (used !== undefined) throw new Error('Feishu created an event already used by a Calendar commitment')
       const nextRevision = incrementRevision(head.revision, 'Project schedule')
       insertMilestone(database, {
         milestoneId: effect.milestone_id,
@@ -19538,6 +20539,209 @@ function applyCalendarObservationFailure(
   )
   const nextHead = readCalendarHead(database, head.project_id)
   if (nextHead === null) throw new Error('Workbench Calendar failure update disappeared')
+  return Object.freeze({ head: nextHead, changed: true })
+}
+
+function deliverableCalendarIdentityMatches(
+  event: WorkbenchFeishuCalendarEventSnapshot,
+  binding: ProjectCalendarBindingRow,
+  deliverable: ProjectDeliverableRow,
+): boolean {
+  return event.calendarId === binding.calendar_id
+    && event.organizerCalendarId === binding.calendar_id
+    && event.eventId === deliverable.event_id
+    && !event.recurring
+    && !event.exception
+}
+
+function changedDeliverableCalendarFields(
+  deliverable: ProjectDeliverableRow,
+  event: WorkbenchFeishuCalendarEventSnapshot,
+  forceAttention = false,
+): readonly ('schedule' | 'remote-status' | 'event-link' | 'remote-eligibility')[] {
+  const changed: Array<'schedule' | 'remote-status' | 'event-link' | 'remote-eligibility'> = []
+  if (!calendarSchedulesEqual(decodeCalendarSchedule(deliverable.schedule_json), event.schedule)) {
+    changed.push('schedule')
+  }
+  if (deliverable.remote_status !== event.status) changed.push('remote-status')
+  if (deliverable.event_app_link !== event.appLink) changed.push('event-link')
+  const nextSync = !forceAttention && event.status === 'confirmed' ? 'healthy' : 'attention'
+  if (deliverable.sync_state !== nextSync
+    || (forceAttention && deliverable.remote_observation_version !== event.remoteObservationVersion)) {
+    changed.push('remote-eligibility')
+  }
+  return Object.freeze(changed)
+}
+
+function deliverableCalendarActivityId(changeId: string): string {
+  return `deliverable-activity-${digest(changeId).slice(0, 32)}`
+}
+
+function applyDeliverableCalendarAuthority(
+  database: DatabaseSync,
+  head: ProjectCalendarHeadRow,
+  deliverable: ProjectDeliverableRow,
+  event: WorkbenchFeishuCalendarEventSnapshot,
+  changeId: string,
+  occurredAt: string,
+  forceAttention = false,
+): Readonly<{ head: ProjectCalendarHeadRow; changed: boolean }> {
+  const changedFields = changedDeliverableCalendarFields(deliverable, event, forceAttention)
+  const changed = changedFields.length > 0
+  const deliverableRevision = changed
+    ? incrementRevision(deliverable.revision, 'Deliverable')
+    : deliverable.revision
+  const projectRevision = changed
+    ? incrementRevision(head.revision, 'Project schedule')
+    : head.revision
+  const syncState = !forceAttention && event.status === 'confirmed' ? 'healthy' : 'attention'
+  const updated = database.prepare(`
+    UPDATE workbench_project_deliverable SET event_app_link = ?, schedule_json = ?,
+      remote_status = ?, remote_observation_version = ?, sync_state = ?, revision = ?,
+      updated_at = ?, last_observed_at = ?
+    WHERE project_id = ? AND id = ? AND revision = ?
+  `).run(
+    event.appLink,
+    canonicalizeJson(event.schedule),
+    event.status,
+    event.remoteObservationVersion,
+    syncState,
+    deliverableRevision,
+    occurredAt,
+    event.observedAt,
+    deliverable.project_id,
+    deliverable.id,
+    deliverable.revision,
+  )
+  if (updated.changes !== 1) throw new Error('Workbench Deliverable Calendar update lost its CAS')
+  if (changed) {
+    appendDeliverableScheduleChange(database, {
+      changeId,
+      projectId: deliverable.project_id,
+      projectRevision,
+      deliverableId: deliverable.id,
+      deliverableRevision,
+      source: 'feishu',
+      changedFields,
+      beforeSchedule: decodeCalendarSchedule(deliverable.schedule_json),
+      afterSchedule: event.schedule,
+      occurredAt,
+    })
+    const deliverableHead = readDeliverableHead(database, deliverable.project_id)
+    if (deliverableHead === null) throw new Error('Workbench Deliverable Calendar lost its head')
+    updateDeliverableHead(
+      database,
+      deliverableHead,
+      incrementRevision(deliverableHead.revision, 'Deliverables'),
+      occurredAt,
+    )
+    const plan = decodeDeliverablePlan(deliverable.plan_json, deliverable.plan_digest)
+    insertDeliverableActivity(database, {
+      activityId: deliverableCalendarActivityId(changeId),
+      projectId: deliverable.project_id,
+      deliverableId: deliverable.id,
+      deliverableRevision,
+      action: 'calendar-observed',
+      sourceKind: 'schedule-change',
+      sourceId: changeId,
+      planSnapshotId: plan.planSnapshotId,
+      acceptanceRequestId: null,
+      decisionId: null,
+      occurredAt,
+    })
+    updateCalendarHead(
+      database,
+      head,
+      projectRevision,
+      syncState,
+      syncState === 'healthy' ? null : ambiguousCalendarIssue(),
+      occurredAt,
+      Object.freeze({ lastAttemptAt: occurredAt }),
+    )
+  } else if (forceAttention) {
+    updateCalendarHead(
+      database,
+      head,
+      head.revision,
+      'attention',
+      ambiguousCalendarIssue(),
+      occurredAt,
+      Object.freeze({ lastAttemptAt: occurredAt }),
+    )
+  }
+  const nextHead = readCalendarHead(database, head.project_id)
+  if (nextHead === null) throw new Error('Workbench Deliverable Calendar head disappeared')
+  return Object.freeze({ head: nextHead, changed })
+}
+
+function applyDeliverableCalendarFailure(
+  database: DatabaseSync,
+  head: ProjectCalendarHeadRow,
+  deliverable: ProjectDeliverableRow,
+  changeId: string,
+  issue: FeishuConnectionIssue,
+  occurredAt: string,
+): Readonly<{ head: ProjectCalendarHeadRow; changed: boolean }> {
+  if (deliverable.sync_state === 'attention') return Object.freeze({ head, changed: false })
+  const schedule = decodeCalendarSchedule(deliverable.schedule_json)
+  const deliverableRevision = incrementRevision(deliverable.revision, 'Deliverable')
+  const projectRevision = incrementRevision(head.revision, 'Project schedule')
+  const updated = database.prepare(`
+    UPDATE workbench_project_deliverable SET sync_state = 'attention', revision = ?, updated_at = ?
+    WHERE project_id = ? AND id = ? AND revision = ?
+  `).run(
+    deliverableRevision,
+    occurredAt,
+    deliverable.project_id,
+    deliverable.id,
+    deliverable.revision,
+  )
+  if (updated.changes !== 1) throw new Error('Workbench Deliverable Calendar failure lost its CAS')
+  appendDeliverableScheduleChange(database, {
+    changeId,
+    projectId: deliverable.project_id,
+    projectRevision,
+    deliverableId: deliverable.id,
+    deliverableRevision,
+    source: 'feishu',
+    changedFields: Object.freeze(['remote-eligibility']),
+    beforeSchedule: schedule,
+    afterSchedule: schedule,
+    occurredAt,
+  })
+  const deliverableHead = readDeliverableHead(database, deliverable.project_id)
+  if (deliverableHead === null) throw new Error('Workbench Deliverable Calendar failure lost its head')
+  updateDeliverableHead(
+    database,
+    deliverableHead,
+    incrementRevision(deliverableHead.revision, 'Deliverables'),
+    occurredAt,
+  )
+  const plan = decodeDeliverablePlan(deliverable.plan_json, deliverable.plan_digest)
+  insertDeliverableActivity(database, {
+    activityId: deliverableCalendarActivityId(changeId),
+    projectId: deliverable.project_id,
+    deliverableId: deliverable.id,
+    deliverableRevision,
+    action: 'calendar-observed',
+    sourceKind: 'schedule-change',
+    sourceId: changeId,
+    planSnapshotId: plan.planSnapshotId,
+    acceptanceRequestId: null,
+    decisionId: null,
+    occurredAt,
+  })
+  updateCalendarHead(
+    database,
+    head,
+    projectRevision,
+    'attention',
+    issue,
+    occurredAt,
+    Object.freeze({ lastAttemptAt: occurredAt }),
+  )
+  const nextHead = readCalendarHead(database, head.project_id)
+  if (nextHead === null) throw new Error('Workbench Deliverable Calendar failure head disappeared')
   return Object.freeze({ head: nextHead, changed: true })
 }
 
@@ -19963,17 +21167,51 @@ function readCalendarTarget(
   if (binding.organization_id !== query.organizationId || binding.team_id !== query.teamId) {
     throw new Error('Workbench Calendar target escaped its authorized scope')
   }
+  const commitmentRows = database.prepare(`
+    SELECT target_kind, target_id, event_id
+    FROM workbench_calendar_commitment
+    WHERE project_id = ? AND calendar_id = ?
+    ORDER BY target_kind, target_id
+  `).all(query.projectId, binding.calendar_id) as unknown as readonly {
+    readonly target_kind: string
+    readonly target_id: string
+    readonly event_id: string
+  }[]
+  const commitments = Object.freeze(commitmentRows.map((commitment) => {
+    if (commitment.target_kind === 'milestone') {
+      const row = readMilestone(database, query.projectId, commitment.target_id)
+      if (row === null || row.event_id !== commitment.event_id) {
+        throw new Error('Workbench Milestone Calendar commitment lost its target')
+      }
+      return Object.freeze({
+        kind: 'milestone' as const,
+        targetId: row.id,
+        targetRevision: row.revision,
+        eventId: row.event_id,
+        remoteObservationVersion: row.remote_observation_version,
+      })
+    }
+    if (commitment.target_kind === 'deliverable') {
+      const row = readDeliverableRow(database, query.projectId, commitment.target_id)
+      if (row === null || row.event_id !== commitment.event_id) {
+        throw new Error('Workbench Deliverable Calendar commitment lost its target')
+      }
+      return Object.freeze({
+        kind: 'deliverable' as const,
+        targetId: row.id,
+        targetRevision: row.revision,
+        eventId: row.event_id,
+        remoteObservationVersion: row.remote_observation_version,
+      })
+    }
+    throw new Error('Workbench Calendar commitment target kind is invalid')
+  }))
   return Object.freeze({
     projectId: query.projectId,
     revision: head.revision,
     calendarId: binding.calendar_id,
     route: calendarRouteFromBinding(database, binding),
-    milestones: Object.freeze(readMilestoneRows(database, query.projectId).map(row => Object.freeze({
-      milestoneId: row.id,
-      milestoneRevision: row.revision,
-      eventId: row.event_id,
-      remoteObservationVersion: row.remote_observation_version,
-    }))),
+    commitments,
   })
 }
 
@@ -20044,13 +21282,20 @@ function commitCalendarReconciliation(
       began = false
       return result
     }
-    const milestones = readMilestoneRows(database, mutation.projectId)
+    const commitments = database.prepare(`
+      SELECT target_kind, target_id, event_id FROM workbench_calendar_commitment
+      WHERE project_id = ? AND calendar_id = ? ORDER BY target_kind, target_id
+    `).all(mutation.projectId, binding.calendar_id) as unknown as readonly {
+      readonly target_kind: string
+      readonly target_id: string
+      readonly event_id: string
+    }[]
     const observations = new Map(mutation.observations.map(item => [
       'event' in item ? item.event.eventId : item.eventId,
       item,
     ] as const))
-    if (observations.size !== milestones.length
-      || milestones.some(milestone => !observations.has(milestone.event_id))) {
+    if (observations.size !== commitments.length
+      || commitments.some(commitment => !observations.has(commitment.event_id))) {
       throw new Error('Calendar reconciliation must cover every bound event exactly once')
     }
     let unknownDateEffects = readUnknownCalendarEffects(
@@ -20059,9 +21304,61 @@ function commitCalendarReconciliation(
       'event-date-update',
     )
     let reconciliationIssue: FeishuConnectionIssue | null = null
-    for (const milestone of milestones) {
-      const observation = observations.get(milestone.event_id)
+    for (const commitment of commitments) {
+      const observation = observations.get(commitment.event_id)
       if (observation === undefined) throw new Error('Calendar reconciliation lost an observation')
+      if (commitment.target_kind === 'deliverable') {
+        const deliverable = readDeliverableRow(database, mutation.projectId, commitment.target_id)
+        if (deliverable === null || deliverable.event_id !== commitment.event_id) {
+          throw new Error('Calendar reconciliation lost its Deliverable commitment')
+        }
+        if (!('event' in observation)) {
+          const applied = applyDeliverableCalendarFailure(
+            database,
+            head,
+            deliverable,
+            observation.changeId,
+            observation.issue,
+            mutation.attemptedAt,
+          )
+          head = applied.head
+          reconciliationIssue ??= observation.issue
+          continue
+        }
+        if (!deliverableCalendarIdentityMatches(observation.event, binding, deliverable)) {
+          const issue = invalidCalendarObservationIssue()
+          const applied = applyDeliverableCalendarFailure(
+            database,
+            head,
+            deliverable,
+            observation.changeId,
+            issue,
+            mutation.attemptedAt,
+          )
+          head = applied.head
+          reconciliationIssue ??= issue
+          continue
+        }
+        const authorityDrift = observation.event.status !== 'confirmed'
+        const applied = applyDeliverableCalendarAuthority(
+          database,
+          head,
+          deliverable,
+          observation.event,
+          observation.changeId,
+          mutation.attemptedAt,
+          authorityDrift,
+        )
+        head = applied.head
+        continue
+      }
+      if (commitment.target_kind !== 'milestone') {
+        throw new Error('Calendar reconciliation encountered an invalid commitment kind')
+      }
+      const milestone = readMilestone(database, mutation.projectId, commitment.target_id)
+      if (milestone === null || milestone.event_id !== commitment.event_id) {
+        throw new Error('Calendar reconciliation lost its Milestone commitment')
+      }
       if (!('event' in observation)) {
         const applied = applyCalendarObservationFailure(
           database,
@@ -20114,6 +21411,10 @@ function commitCalendarReconciliation(
       const resolvedIds = new Set(resolvedUnknownDates.map(effect => effect.id))
       unknownDateEffects = unknownDateEffects.filter(effect => !resolvedIds.has(effect.id))
     }
+    const unresolvedDeliverableEffect = database.prepare(`
+      SELECT issue_json FROM workbench_deliverable_calendar_effect
+      WHERE project_id = ? AND state = 'unknown' ORDER BY created_at, id LIMIT 1
+    `).get(mutation.projectId) as { readonly issue_json: string | null } | undefined
     const hasUnknownEffect = hasUnknownCalendarEffect(database, mutation.projectId)
     const remainingUnknownEffect = hasUnknownEffect
       ? readUnknownCalendarEffects(database, mutation.projectId)[0] ?? null
@@ -20122,14 +21423,19 @@ function commitCalendarReconciliation(
       throw new Error('Workbench Calendar unknown effect disappeared')
     }
     const attention = readMilestoneRows(database, mutation.projectId).some(row => row.sync_state !== 'healthy')
-    const syncState = remainingUnknownEffect !== null
+      || readDeliverableRows(database, mutation.projectId).some(row => row.sync_state !== 'healthy')
+    const syncState = remainingUnknownEffect !== null || unresolvedDeliverableEffect !== undefined
       ? 'unknown' as const
       : attention ? 'attention' as const : 'healthy' as const
-    const syncIssue = remainingUnknownEffect === null
+    const syncIssue = remainingUnknownEffect === null && unresolvedDeliverableEffect === undefined
       ? (attention ? reconciliationIssue ?? ambiguousCalendarIssue() : null)
-      : remainingUnknownEffect.issue_json === null
-        ? ambiguousCalendarIssue()
-        : decodeFeishuIssue(remainingUnknownEffect.issue_json)
+      : remainingUnknownEffect !== null
+        ? remainingUnknownEffect.issue_json === null
+          ? ambiguousCalendarIssue()
+          : decodeFeishuIssue(remainingUnknownEffect.issue_json)
+        : unresolvedDeliverableEffect?.issue_json === null
+          ? ambiguousCalendarIssue()
+          : decodeFeishuIssue(unresolvedDeliverableEffect?.issue_json ?? canonicalizeJson(ambiguousCalendarIssue()))
     updateCalendarHead(
       database,
       head,
@@ -20275,6 +21581,2565 @@ function commitCalendarEventHint(
     database.exec('COMMIT')
     began = false
     return Object.freeze({ outcome, projectId, revision: head?.revision ?? null })
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function readDeliverableHead(
+  database: DatabaseSync,
+  projectId: string,
+): ProjectDeliverableHeadRow | null {
+  const row = database.prepare(`
+    SELECT project_id, organization_id, team_id, revision, updated_at
+    FROM workbench_project_deliverable_head WHERE project_id = ?
+  `).get(projectId) as ProjectDeliverableHeadRow | undefined
+  return row ?? null
+}
+
+function readDeliverableRow(
+  database: DatabaseSync,
+  projectId: string,
+  deliverableId: string,
+): ProjectDeliverableRow | null {
+  const row = database.prepare(`
+    SELECT sequence, id, project_id, revision, state, plan_snapshot_id,
+      plan_json, plan_digest, event_id, event_app_link, schedule_json,
+      remote_status, remote_observation_version, sync_state,
+      last_observed_at, creation_command_id, created_at, updated_at
+    FROM workbench_project_deliverable WHERE project_id = ? AND id = ?
+  `).get(projectId, deliverableId) as ProjectDeliverableRow | undefined
+  return row ?? null
+}
+
+function readDeliverableRows(
+  database: DatabaseSync,
+  projectId: string,
+): readonly ProjectDeliverableRow[] {
+  return database.prepare(`
+    SELECT sequence, id, project_id, revision, state, plan_snapshot_id,
+      plan_json, plan_digest, event_id, event_app_link, schedule_json,
+      remote_status, remote_observation_version, sync_state,
+      last_observed_at, creation_command_id, created_at, updated_at
+    FROM workbench_project_deliverable WHERE project_id = ?
+    ORDER BY sequence, id LIMIT ${MAX_PROJECT_DELIVERABLES + 1}
+  `).all(projectId) as unknown as readonly ProjectDeliverableRow[]
+}
+
+function decodeDeliverablePlan(value: string, expectedDigest: string): DeliverablePlanProjection {
+  const parsed = parseCanonicalJson(value, 'Stored Deliverable Plan')
+  const plan = objectValue(parsed, 'Stored Deliverable Plan') as unknown as DeliverablePlanProjection
+  if (typeof plan.planSnapshotId !== 'string' || typeof plan.name !== 'string'
+    || (plan.description !== null && typeof plan.description !== 'string')
+    || !Array.isArray(plan.criteria) || !Array.isArray(plan.taskGuids)
+    || typeof plan.digest !== 'string' || plan.digest !== expectedDigest
+    || !CALENDAR_OBSERVATION_VERSION_PATTERN.test(plan.digest)
+    || typeof plan.createdAt !== 'string' || typeof plan.responsibility !== 'object'
+    || plan.responsibility === null) {
+    throw new Error('Stored Deliverable Plan is invalid')
+  }
+  return plan
+}
+
+function decodeStoredArray<T>(value: string, label: string): readonly T[] {
+  const parsed = parseCanonicalJson(value, label)
+  if (!Array.isArray(parsed)) throw new Error(`${label} is not an array`)
+  return Object.freeze(parsed as T[])
+}
+
+function deliverableCalendarFromRow(row: ProjectDeliverableRow): DeliverableCalendarProjection {
+  return Object.freeze({
+    eventId: row.event_id,
+    eventAppLink: row.event_app_link,
+    schedule: decodeCalendarSchedule(row.schedule_json),
+    remoteStatus: row.remote_status as DeliverableCalendarProjection['remoteStatus'],
+    remoteObservationVersion: row.remote_observation_version,
+    syncState: row.sync_state as DeliverableCalendarProjection['syncState'],
+    lastObservedAt: canonicalInstant(row.last_observed_at, 'Stored Deliverable lastObservedAt'),
+  })
+}
+
+function readAcceptanceDecision(
+  database: DatabaseSync,
+  decisionId: string | null,
+): DeliverableAcceptanceDecisionProjection | null {
+  if (decisionId === null) return null
+  const row = database.prepare(`
+    SELECT id, project_id, deliverable_id, acceptance_request_id,
+      request_revision, outcome, actor_kind, actor_id,
+      designated_acceptor_json, criteria_json, feedback, causation_id,
+      command_id, audit_event_id, outbox_id, decided_at
+    FROM workbench_deliverable_acceptance_decision WHERE id = ?
+  `).get(decisionId) as DeliverableAcceptanceDecisionRow | undefined
+  if (row === undefined || row.actor_kind !== 'owner') {
+    throw new Error('Stored Deliverable acceptance decision is invalid')
+  }
+  const acceptor = parseCanonicalJson(
+    row.designated_acceptor_json,
+    'Stored Deliverable designated Acceptor',
+  ) as DeliverableMemberSnapshot
+  const criteria = decodeStoredArray<DeliverableCriterionDecisionProjection>(
+    row.criteria_json,
+    'Stored Deliverable criterion decisions',
+  )
+  return Object.freeze({
+    decisionId: row.id,
+    requestRevision: row.request_revision,
+    outcome: row.outcome as DeliverableAcceptanceDecisionProjection['outcome'],
+    actor: Object.freeze({ kind: 'owner', id: row.actor_id }),
+    designatedAcceptor: Object.freeze({ ...acceptor }),
+    criteria: Object.freeze(criteria.map(item => Object.freeze({ ...item }))),
+    feedback: row.feedback,
+    causationId: row.causation_id,
+    receipt: Object.freeze({
+      commandId: row.command_id,
+      auditEventId: row.audit_event_id,
+      outboxId: row.outbox_id,
+    }),
+    decidedAt: row.decided_at,
+  })
+}
+
+function acceptanceRequestFromRow(
+  database: DatabaseSync,
+  row: DeliverableAcceptanceRequestRow,
+  currentDeliverableRevision: number,
+): DeliverableAcceptanceRequestProjection {
+  const plan = decodeDeliverablePlan(row.plan_json, objectValue(
+    parseCanonicalJson(row.plan_json, 'Stored Deliverable request Plan'),
+    'Stored Deliverable request Plan',
+  ).digest as string)
+  const calendar = parseCanonicalJson(
+    row.calendar_json,
+    'Stored Deliverable request Calendar',
+  ) as DeliverableCalendarProjection
+  const taskGuids = decodeStoredArray<string>(row.task_guids_json, 'Stored Deliverable request tasks')
+  const candidates = readCandidateVersions(database, row)
+  const effectiveStatus = row.persisted_state === 'pending'
+    && currentDeliverableRevision !== row.deliverable_revision
+    ? 'stale' as const
+    : row.persisted_state as DeliverableAcceptanceRequestProjection['effectiveStatus']
+  const allowedDecisions = row.persisted_state !== 'pending'
+    ? Object.freeze([])
+    : effectiveStatus === 'stale'
+      ? Object.freeze(['reject', 'request-changes'] as const)
+      : Object.freeze(['approve', 'reject', 'request-changes'] as const)
+  return Object.freeze({
+    acceptanceRequestId: row.id,
+    sequence: row.round_sequence,
+    revision: row.revision,
+    deliverableRevision: row.deliverable_revision,
+    plan,
+    calendar: Object.freeze({ ...calendar, schedule: Object.freeze({ ...calendar.schedule }) }),
+    taskGuids: Object.freeze([...taskGuids]),
+    candidateVersions: Object.freeze(candidates.map(candidate => Object.freeze({ ...candidate }))),
+    candidatesDigest: row.candidates_digest,
+    persistedState: row.persisted_state as DeliverableAcceptanceRequestProjection['persistedState'],
+    effectiveStatus,
+    decision: readAcceptanceDecision(database, row.decision_id),
+    allowedDecisions,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function candidateVersionFromRow(
+  row: DeliverableCandidateVersionRow,
+): DeliverableArtifactVersionProjection {
+  if (row.kind !== 'declared-file-version'
+    || (row.source !== 'managed' && row.source !== 'local' && row.source !== 'feishu')) {
+    throw new Error('Stored Deliverable candidate version vocabulary is invalid')
+  }
+  const reference = Object.freeze({
+    kind: 'declared-file-version' as const,
+    source: row.source,
+    resourceId: row.resource_id,
+    versionId: row.version_id,
+    displayName: row.display_name,
+    canonicalUrl: row.canonical_url,
+    contentDigest: row.content_digest,
+  })
+  if (contentDigest(canonicalizeJson(reference)) !== row.reference_digest) {
+    throw new Error('Stored Deliverable candidate reference digest is invalid')
+  }
+  return Object.freeze({
+    ...reference,
+    referenceDigest: row.reference_digest as DeliverableArtifactVersionProjection['referenceDigest'],
+    resolution: 'declared',
+  })
+}
+
+function readCandidateVersionRows(
+  database: DatabaseSync,
+  acceptanceRequestId: string,
+): readonly DeliverableCandidateVersionRow[] {
+  return database.prepare(`
+    SELECT acceptance_request_id, ordinal, kind, source, resource_id, version_id,
+      display_name, canonical_url, content_digest, reference_digest
+    FROM workbench_deliverable_candidate_version
+    WHERE acceptance_request_id = ? ORDER BY ordinal
+  `).all(acceptanceRequestId) as unknown as DeliverableCandidateVersionRow[]
+}
+
+function readCandidateVersions(
+  database: DatabaseSync,
+  request: Pick<DeliverableAcceptanceRequestRow,
+    'id' | 'candidate_versions_json' | 'candidates_digest'>,
+): readonly DeliverableArtifactVersionProjection[] {
+  const rows = readCandidateVersionRows(database, request.id)
+  if (rows.length < 1 || rows.length > MAX_DELIVERABLE_CANDIDATES
+    || rows.some((row, index) => row.ordinal !== index + 1)) {
+    throw new Error('Stored Deliverable candidate version rows are incomplete')
+  }
+  const versions = Object.freeze(rows.map(candidateVersionFromRow))
+  const canonical = canonicalizeJson(versions)
+  if (canonical !== request.candidate_versions_json
+    || contentDigest(canonical) !== request.candidates_digest) {
+    throw new Error('Stored Deliverable candidate version rows disagree with their envelope')
+  }
+  return versions
+}
+
+function insertCandidateVersions(
+  database: DatabaseSync,
+  acceptanceRequestId: string,
+  versions: readonly DeliverableArtifactVersionProjection[],
+): void {
+  const insert = database.prepare(`
+    INSERT INTO workbench_deliverable_candidate_version (
+      acceptance_request_id, ordinal, kind, source, resource_id, version_id,
+      display_name, canonical_url, content_digest, reference_digest
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  versions.forEach((version, index) => {
+    const inserted = insert.run(
+      acceptanceRequestId,
+      index + 1,
+      version.kind,
+      version.source,
+      version.resourceId,
+      version.versionId,
+      version.displayName,
+      version.canonicalUrl,
+      version.contentDigest,
+      version.referenceDigest,
+    )
+    if (inserted.changes !== 1) throw new Error('Workbench candidate version row was not inserted')
+  })
+}
+
+function readAcceptanceRequests(
+  database: DatabaseSync,
+  deliverable: ProjectDeliverableRow,
+): readonly DeliverableAcceptanceRequestProjection[] {
+  const rows = database.prepare(`
+    SELECT sequence, id, project_id, deliverable_id, round_sequence, revision,
+      deliverable_revision, plan_snapshot_id, plan_json, calendar_json,
+      task_guids_json, candidate_versions_json, candidates_digest,
+      persisted_state, decision_id, command_id, audit_event_id, outbox_id,
+      created_at, updated_at
+    FROM workbench_deliverable_acceptance_request
+    WHERE project_id = ? AND deliverable_id = ? ORDER BY round_sequence
+  `).all(deliverable.project_id, deliverable.id) as unknown as DeliverableAcceptanceRequestRow[]
+  return Object.freeze(rows.map(row => acceptanceRequestFromRow(database, row, deliverable.revision)))
+}
+
+function readFinalRelease(
+  database: DatabaseSync,
+  deliverable: ProjectDeliverableRow,
+): DeliverableFinalReleaseProjection | null {
+  const row = database.prepare(`
+    SELECT id, project_id, deliverable_id, acceptance_request_id,
+      versions_json, versions_digest, created_at
+    FROM workbench_deliverable_final_release WHERE project_id = ? AND deliverable_id = ?
+  `).get(deliverable.project_id, deliverable.id) as DeliverableFinalReleaseRow | undefined
+  if (row === undefined) return null
+  const versionRows = database.prepare(`
+    SELECT candidate.acceptance_request_id, candidate.ordinal, candidate.kind,
+      candidate.source, candidate.resource_id, candidate.version_id,
+      candidate.display_name, candidate.canonical_url, candidate.content_digest,
+      candidate.reference_digest
+    FROM workbench_deliverable_final_release_version AS release_version
+    INNER JOIN workbench_deliverable_candidate_version AS candidate
+      ON candidate.acceptance_request_id = release_version.acceptance_request_id
+      AND candidate.ordinal = release_version.candidate_ordinal
+      AND candidate.reference_digest = release_version.reference_digest
+    WHERE release_version.final_release_id = ?
+    ORDER BY release_version.ordinal
+  `).all(row.id) as unknown as DeliverableCandidateVersionRow[]
+  if (versionRows.length < 1 || versionRows.length > MAX_DELIVERABLE_CANDIDATES
+    || versionRows.some((version, index) => version.ordinal !== index + 1)) {
+    throw new Error('Stored Final Release version rows are incomplete')
+  }
+  const versions = Object.freeze(versionRows.map(candidateVersionFromRow))
+  const canonical = canonicalizeJson(versions)
+  if (canonical !== row.versions_json || contentDigest(canonical) !== row.versions_digest) {
+    throw new Error('Stored Final Release version rows disagree with their immutable envelope')
+  }
+  return Object.freeze({
+    finalReleaseId: row.id,
+    acceptanceRequestId: row.acceptance_request_id,
+    versions: Object.freeze(versions.map(version => Object.freeze({ ...version }))),
+    versionsDigest: row.versions_digest,
+    createdAt: row.created_at,
+  })
+}
+
+function projectDeliverableFromRow(
+  database: DatabaseSync,
+  row: ProjectDeliverableRow,
+  currentTasks: readonly ProjectTaskProjection[],
+): ProjectDeliverableProjection {
+  const plan = decodeDeliverablePlan(row.plan_json, row.plan_digest)
+  const tasks = Object.freeze(plan.taskGuids.map((taskGuid) => {
+    const task = currentTasks.find(candidate => candidate.taskGuid === taskGuid) ?? null
+    return Object.freeze({
+      taskGuid,
+      availability: task === null ? 'unavailable' as const : 'available' as const,
+      task,
+    })
+  }))
+  return Object.freeze({
+    deliverableId: row.id,
+    sequence: row.sequence,
+    revision: row.revision,
+    state: row.state as ProjectDeliverableProjection['state'],
+    plan,
+    calendar: deliverableCalendarFromRow(row),
+    tasks,
+    acceptanceRequests: readAcceptanceRequests(database, row),
+    finalRelease: readFinalRelease(database, row),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function readDeliverableActivity(
+  database: DatabaseSync,
+  query: WorkbenchProjectDeliverablesReadQuery,
+): Readonly<{
+  items: ProjectDeliverablesProjection['activity']
+  nextBeforeActivitySequence: number | null
+}> {
+  const limit = query.activityLimit ?? 50
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_DELIVERABLE_ACTIVITY_LIMIT) {
+    throw new TypeError('Deliverable Activity limit must be an integer from 1 to 100')
+  }
+  const before = query.beforeActivitySequence
+  if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) {
+    throw new TypeError('Deliverable Activity cursor must be a positive safe integer')
+  }
+  const rows = database.prepare(`
+    SELECT sequence, id, project_id, deliverable_id, deliverable_revision,
+      action, source_kind, source_id, plan_snapshot_id,
+      acceptance_request_id, decision_id, occurred_at
+    FROM workbench_deliverable_activity
+    WHERE project_id = ? AND (? IS NULL OR sequence < ?)
+    ORDER BY sequence DESC LIMIT ?
+  `).all(query.projectId, before ?? null, before ?? null, limit + 1) as unknown as DeliverableActivityRow[]
+  const hasMore = rows.length > limit
+  const visible = hasMore ? rows.slice(0, limit) : rows
+  const items = Object.freeze(visible.map(row => Object.freeze({
+    sequence: row.sequence,
+    activityId: row.id,
+    deliverableId: row.deliverable_id,
+    deliverableRevision: row.deliverable_revision,
+    action: row.action as ProjectDeliverablesProjection['activity'][number]['action'],
+    source: row.source_kind === 'audit-event'
+      ? Object.freeze({ kind: 'audit-event' as const, auditEventId: row.source_id })
+      : Object.freeze({ kind: 'schedule-change' as const, scheduleChangeId: row.source_id }),
+    planSnapshotId: row.plan_snapshot_id,
+    acceptanceRequestId: row.acceptance_request_id,
+    decisionId: row.decision_id,
+    occurredAt: row.occurred_at,
+  })))
+  return Object.freeze({
+    items,
+    nextBeforeActivitySequence: hasMore ? items.at(-1)?.sequence ?? null : null,
+  })
+}
+
+function readProjectDeliverablesProjection(
+  database: DatabaseSync,
+  query: WorkbenchProjectDeliverablesReadQuery,
+): ProjectDeliverablesProjection | null {
+  const project = readProjectScopeRow(database, query.organizationId, query.teamId, query.projectId)
+  if (project === null) return null
+  const deliverableHead = readDeliverableHead(database, query.projectId)
+  const teamHead = readProjectTeamHead(database, query)
+  const scheduleHead = readCalendarHead(database, query.projectId)
+  if (deliverableHead === null || teamHead === null || scheduleHead === null) {
+    throw new Error('Workbench Project lost a Deliverable dependency head')
+  }
+  const taskProjection = readProjectTasksProjection(database, query)
+  const calendarProjection = readProjectMilestonesProjection(database, query)
+  if (taskProjection === null || calendarProjection === null) {
+    throw new Error('Workbench Project dependency projection disappeared')
+  }
+  const deliverableRows = readDeliverableRows(database, query.projectId)
+  if (deliverableRows.length > MAX_PROJECT_DELIVERABLES) {
+    throw new Error('Workbench Project exceeds its Deliverable limit')
+  }
+  const members = database.prepare(`
+    SELECT id, organization_id, team_id, project_id, kind, display_name, status,
+      identity_type, feishu_app_id, feishu_open_id, external_method,
+      external_value, revision, created_at, updated_at
+    FROM workbench_project_member WHERE project_id = ? ORDER BY created_at, id
+  `).all(query.projectId) as unknown as ProjectMemberRow[]
+  const activity = readDeliverableActivity(database, query)
+  return projectDeliverablesProjection(Object.freeze({
+    projectId: query.projectId,
+    revision: deliverableHead.revision,
+    teamRevision: teamHead.team_revision,
+    taskRevision: taskProjection.revision,
+    scheduleRevision: scheduleHead.revision,
+    calendarBinding: calendarProjection.binding,
+    memberOptions: Object.freeze(members.map((row) => {
+      const member = projectMemberFromRow(row)
+      return Object.freeze({
+        memberId: member.memberId,
+        displayName: member.displayName,
+        kind: member.kind,
+        status: member.status,
+        requiresHumanSponsor: member.kind === 'agent'
+          || (member.kind === 'human' && member.identity.type === 'external'),
+        canBeHumanSponsor: member.kind === 'human' && member.status === 'active',
+        canAccept: member.kind === 'human' && member.status === 'active',
+      })
+    })),
+    taskOptions: taskProjection.tasks,
+    deliverables: Object.freeze(deliverableRows.map(row =>
+      projectDeliverableFromRow(database, row, taskProjection.tasks))),
+    activity: activity.items,
+    nextBeforeActivitySequence: activity.nextBeforeActivitySequence,
+  }))
+}
+
+function deliverableFailure<T>(
+  code: ProjectDeliverableConflict['code'],
+  message: string,
+  details: Omit<ProjectDeliverableConflict, 'code' | 'message'> = {},
+): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code, message, ...details }),
+  }) as T
+}
+
+function deliverableProjectMissing<T>(projectId: string): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found' as const,
+      message: `Workbench Project ${projectId} was not found`,
+      projectId,
+    }),
+  }) as T
+}
+
+function deliverableIdempotencyConflict(): Extract<
+CreateProjectDeliverableResult,
+{ readonly ok: false; readonly error: { readonly code: 'idempotency-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict' as const,
+      message: 'Idempotency key was already used for a different Workbench command',
+    }),
+  })
+}
+
+type DeliverableCommandType =
+  | typeof DELIVERABLE_CREATE_COMMAND_TYPE
+  | typeof DELIVERABLE_REQUEST_COMMAND_TYPE
+  | typeof DELIVERABLE_APPROVE_COMMAND_TYPE
+  | typeof DELIVERABLE_REJECT_COMMAND_TYPE
+  | typeof DELIVERABLE_NEEDS_CHANGES_COMMAND_TYPE
+
+function storedDeliverableVocabulary(commandType: string): Readonly<{
+  commandType: DeliverableCommandType
+  auditAction:
+    | typeof DELIVERABLE_CREATE_AUDIT_ACTION
+    | typeof DELIVERABLE_REQUEST_AUDIT_ACTION
+    | typeof DELIVERABLE_APPROVE_AUDIT_ACTION
+    | typeof DELIVERABLE_REJECT_AUDIT_ACTION
+    | typeof DELIVERABLE_NEEDS_CHANGES_AUDIT_ACTION
+  reason: WorkbenchCommandMetadata['reason']
+  summaryCode:
+    | typeof DELIVERABLE_CREATE_SUMMARY
+    | typeof DELIVERABLE_REQUEST_SUMMARY
+    | typeof DELIVERABLE_APPROVE_SUMMARY
+    | typeof DELIVERABLE_REJECT_SUMMARY
+    | typeof DELIVERABLE_NEEDS_CHANGES_SUMMARY
+  objectType: typeof DELIVERABLE_OBJECT_TYPE | typeof DELIVERABLE_REQUEST_OBJECT_TYPE
+  changedFields: readonly string[]
+  outboxTopic: string
+}> | null {
+  switch (commandType) {
+    case DELIVERABLE_CREATE_COMMAND_TYPE: return Object.freeze({
+      commandType,
+      auditAction: DELIVERABLE_CREATE_AUDIT_ACTION,
+      reason: 'owner-project-deliverable-create',
+      summaryCode: DELIVERABLE_CREATE_SUMMARY,
+      objectType: DELIVERABLE_OBJECT_TYPE,
+      changedFields: Object.freeze(['plan', 'calendarCommitment']),
+      outboxTopic: DELIVERABLE_CREATE_OUTBOX_TOPIC,
+    })
+    case DELIVERABLE_REQUEST_COMMAND_TYPE: return Object.freeze({
+      commandType,
+      auditAction: DELIVERABLE_REQUEST_AUDIT_ACTION,
+      reason: 'owner-deliverable-acceptance-request',
+      summaryCode: DELIVERABLE_REQUEST_SUMMARY,
+      objectType: DELIVERABLE_REQUEST_OBJECT_TYPE,
+      changedFields: Object.freeze(['acceptanceRequest', 'deliverableState']),
+      outboxTopic: DELIVERABLE_REQUEST_OUTBOX_TOPIC,
+    })
+    case DELIVERABLE_APPROVE_COMMAND_TYPE: return Object.freeze({
+      commandType,
+      auditAction: DELIVERABLE_APPROVE_AUDIT_ACTION,
+      reason: 'owner-deliverable-acceptance-approve',
+      summaryCode: DELIVERABLE_APPROVE_SUMMARY,
+      objectType: DELIVERABLE_REQUEST_OBJECT_TYPE,
+      changedFields: Object.freeze(['acceptanceDecision', 'deliverableState']),
+      outboxTopic: DELIVERABLE_DECISION_OUTBOX_TOPIC,
+    })
+    case DELIVERABLE_REJECT_COMMAND_TYPE: return Object.freeze({
+      commandType,
+      auditAction: DELIVERABLE_REJECT_AUDIT_ACTION,
+      reason: 'owner-deliverable-acceptance-reject',
+      summaryCode: DELIVERABLE_REJECT_SUMMARY,
+      objectType: DELIVERABLE_REQUEST_OBJECT_TYPE,
+      changedFields: Object.freeze(['acceptanceDecision', 'deliverableState']),
+      outboxTopic: DELIVERABLE_DECISION_OUTBOX_TOPIC,
+    })
+    case DELIVERABLE_NEEDS_CHANGES_COMMAND_TYPE: return Object.freeze({
+      commandType,
+      auditAction: DELIVERABLE_NEEDS_CHANGES_AUDIT_ACTION,
+      reason: 'owner-deliverable-acceptance-needs-changes',
+      summaryCode: DELIVERABLE_NEEDS_CHANGES_SUMMARY,
+      objectType: DELIVERABLE_REQUEST_OBJECT_TYPE,
+      changedFields: Object.freeze(['acceptanceDecision', 'deliverableState']),
+      outboxTopic: DELIVERABLE_DECISION_OUTBOX_TOPIC,
+    })
+    default: return null
+  }
+}
+
+interface DeliverableLedgerInput {
+  readonly command: WorkbenchCommandMetadata
+  readonly requestHash: string
+  readonly commandType: DeliverableCommandType
+  readonly auditAction:
+    | typeof DELIVERABLE_CREATE_AUDIT_ACTION
+    | typeof DELIVERABLE_REQUEST_AUDIT_ACTION
+    | typeof DELIVERABLE_APPROVE_AUDIT_ACTION
+    | typeof DELIVERABLE_REJECT_AUDIT_ACTION
+    | typeof DELIVERABLE_NEEDS_CHANGES_AUDIT_ACTION
+  readonly summaryCode:
+    | typeof DELIVERABLE_CREATE_SUMMARY
+    | typeof DELIVERABLE_REQUEST_SUMMARY
+    | typeof DELIVERABLE_APPROVE_SUMMARY
+    | typeof DELIVERABLE_REJECT_SUMMARY
+    | typeof DELIVERABLE_NEEDS_CHANGES_SUMMARY
+  readonly objectType: typeof DELIVERABLE_OBJECT_TYPE | typeof DELIVERABLE_REQUEST_OBJECT_TYPE
+  readonly objectId: string
+  readonly objectVersion: number
+  readonly projectId: string
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+}
+
+function appendDeliverableLedger(database: DatabaseSync, input: DeliverableLedgerInput): void {
+  // This payload deliberately contains no plan/member/task/event/artifact/criterion/feedback facts.
+  const payload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: input.command.commandId,
+    auditEventId: input.command.auditEventId,
+    requestHash: input.requestHash,
+    projectId: input.projectId,
+    objectType: input.objectType,
+    objectId: input.objectId,
+    objectVersion: input.objectVersion,
+    causationId: input.command.causationId,
+  })
+  const outbox = database.prepare(`
+    INSERT INTO workbench_outbox (
+      id, command_id, organization_id, topic, effect_key, project_id,
+      object_type, object_id, object_version, causation_id, payload_json,
+      state, attempt_count, created_at, updated_at, error_code
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
+  `).run(
+    input.command.outboxId,
+    input.command.commandId,
+    input.command.actor.organizationId,
+    input.outboxTopic,
+    `workbench:${input.command.outboxId}`,
+    input.projectId,
+    input.objectType,
+    input.objectId,
+    input.objectVersion,
+    input.command.causationId,
+    payload,
+    input.command.occurredAt,
+    input.command.occurredAt,
+  )
+  if (outbox.changes !== 1) throw new Error('Workbench Deliverable Outbox was not inserted')
+  const head = readAuditHead(database)
+  const sequence = incrementRevision(head.sequence, 'Workbench audit sequence')
+  const event = createAuditEvent({
+    sequence: String(sequence),
+    previousHash: auditHash(head.head_hash),
+    auditId: input.command.auditEventId,
+    occurredAt: input.command.occurredAt,
+    actor: { kind: input.command.actor.kind, id: input.command.actor.id },
+    action: input.auditAction,
+    scope: {
+      organizationId: input.command.actor.organizationId,
+      teamId: input.command.actor.teamId,
+      projectId: input.projectId,
+    },
+    reason: { code: input.command.reason },
+    object: { type: input.objectType, id: input.objectId, version: String(input.objectVersion) },
+    command: { id: input.command.commandId, type: input.commandType },
+    causation: { id: input.command.causationId },
+    outbox: { id: input.command.outboxId, state: 'pending' },
+    outcome: 'committed',
+    summary: { code: input.summaryCode, changedFields: input.changedFields },
+  })
+  insertAuditEvent(database, event)
+  const advanced = database.prepare(`
+    UPDATE workbench_audit_head SET sequence = ?, head_hash = ?
+    WHERE singleton = 1 AND sequence = ? AND head_hash = ?
+  `).run(sequence, event.eventHash, head.sequence, head.head_hash)
+  if (advanced.changes !== 1) throw new Error('Workbench Deliverable audit head did not advance')
+  const receipt = database.prepare(`
+    INSERT INTO workbench_command_receipt (
+      organization_id, actor_id, idempotency_key_hash, command_type,
+      request_hash, command_id, audit_event_id, outbox_id, result_json, committed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.command.actor.organizationId,
+    input.command.actor.id,
+    idempotencyKeyHash(input.command.idempotencyKey),
+    input.commandType,
+    input.requestHash,
+    input.command.commandId,
+    input.command.auditEventId,
+    input.command.outboxId,
+    canonicalizeJson({ schemaVersion: 1, state: 'accepted' }),
+    input.command.occurredAt,
+  )
+  if (receipt.changes !== 1) throw new Error('Workbench Deliverable receipt was not inserted')
+}
+
+function deliverableReceipt(command: Pick<WorkbenchCommandMetadata,
+  'commandId' | 'auditEventId' | 'outboxId'> | Pick<ReceiptRow,
+    'command_id' | 'audit_event_id' | 'outbox_id'>) {
+  const commandId = 'commandId' in command ? command.commandId : command.command_id
+  const auditEventId = 'auditEventId' in command ? command.auditEventId : command.audit_event_id
+  const outboxId = 'outboxId' in command ? command.outboxId : command.outbox_id
+  return Object.freeze({
+    commandId,
+    auditEventId,
+    outboxId,
+  })
+}
+
+function deliverableCreationSemantic(
+  value: WorkbenchProjectDeliverableReplayQuery
+    | WorkbenchProjectDeliverableMutation
+    | WorkbenchDeliverableCalendarCreationReservationMutation,
+) {
+  if ('plan' in value) {
+    return {
+      projectId: value.projectId,
+      name: value.plan.name,
+      description: value.plan.description,
+      criteria: value.plan.criteria.map(criterion => criterion.statement),
+      accountableMemberId: value.memberIds.accountableMemberId,
+      contributorMemberIds: value.memberIds.contributorMemberIds,
+      humanSponsorMemberId: value.memberIds.humanSponsorMemberId,
+      acceptorMemberId: value.memberIds.acceptorMemberId,
+      taskGuids: value.plan.taskGuids,
+      event: value.eventIntent,
+      expectedDeliverablesRevision: value.expectedDeliverablesRevision,
+      expectedDeliverableRevision: null,
+      expectedTeamRevision: value.expectedTeamRevision,
+      expectedTaskRevision: value.expectedTaskRevision,
+      expectedScheduleRevision: value.expectedScheduleRevision,
+      idempotencyKey: value.command.idempotencyKey,
+      causationId: value.command.causationId,
+      reason: value.command.reason,
+      organizationId: value.command.actor.organizationId,
+      teamId: value.command.actor.teamId,
+    }
+  }
+  return {
+    projectId: value.projectId,
+    name: value.name,
+    description: value.description,
+    criteria: value.criteria,
+    accountableMemberId: value.accountableMemberId,
+    contributorMemberIds: value.contributorMemberIds,
+    humanSponsorMemberId: value.humanSponsorMemberId,
+    acceptorMemberId: value.acceptorMemberId,
+    taskGuids: value.taskGuids,
+    event: value.event,
+    expectedDeliverablesRevision: value.expectedDeliverablesRevision,
+    expectedDeliverableRevision: null,
+    expectedTeamRevision: value.expectedTeamRevision,
+    expectedTaskRevision: value.expectedTaskRevision,
+    expectedScheduleRevision: value.expectedScheduleRevision,
+    idempotencyKey: value.idempotencyKey,
+    causationId: value.causationId,
+    reason: value.reason,
+    organizationId: value.organizationId,
+    teamId: value.teamId,
+  }
+}
+
+function deliverableCreationRequestHash(
+  value: WorkbenchProjectDeliverableReplayQuery
+    | WorkbenchProjectDeliverableMutation
+    | WorkbenchDeliverableCalendarCreationReservationMutation,
+): string {
+  return digest(canonicalizeJson({
+    commandType: DELIVERABLE_CREATE_COMMAND_TYPE,
+    target: DELIVERABLE_OBJECT_TYPE,
+    ...deliverableCreationSemantic(value),
+  }))
+}
+
+function acceptanceRequestHash(mutation: WorkbenchDeliverableAcceptanceRequestMutation): string {
+  return digest(canonicalizeJson({
+    commandType: DELIVERABLE_REQUEST_COMMAND_TYPE,
+    target: DELIVERABLE_REQUEST_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    deliverableId: mutation.deliverableId,
+    candidateVersions: mutation.candidateVersions,
+    expectedDeliverablesRevision: mutation.expectedDeliverablesRevision,
+    expectedDeliverableRevision: mutation.expectedDeliverableRevision,
+    expectedTeamRevision: mutation.expectedTeamRevision,
+    expectedTaskRevision: mutation.expectedTaskRevision,
+    expectedScheduleRevision: mutation.expectedScheduleRevision,
+    expectedRemoteObservationVersion: mutation.expectedRemoteObservationVersion,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+function decisionCommandType(mode: WorkbenchDeliverableAcceptanceDecisionMutation['mode']): DeliverableCommandType {
+  if (mode === 'approve') return DELIVERABLE_APPROVE_COMMAND_TYPE
+  if (mode === 'reject') return DELIVERABLE_REJECT_COMMAND_TYPE
+  return DELIVERABLE_NEEDS_CHANGES_COMMAND_TYPE
+}
+
+function acceptanceDecisionHash(mutation: WorkbenchDeliverableAcceptanceDecisionMutation): string {
+  return digest(canonicalizeJson({
+    commandType: decisionCommandType(mutation.mode),
+    target: DELIVERABLE_REQUEST_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    deliverableId: mutation.deliverableId,
+    acceptanceRequestId: mutation.acceptanceRequestId,
+    mode: mutation.mode,
+    criteria: mutation.criteria,
+    feedback: mutation.feedback,
+    expectedDeliverablesRevision: mutation.expectedDeliverablesRevision,
+    expectedDeliverableRevision: mutation.expectedDeliverableRevision,
+    expectedAcceptanceRequestRevision: mutation.expectedAcceptanceRequestRevision,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+function scopedDeliverablesProjection(
+  database: DatabaseSync,
+  projectId: string,
+  organizationId: string,
+  teamId: string,
+): ProjectDeliverablesProjection {
+  const value = readProjectDeliverablesProjection(database, { projectId, organizationId, teamId })
+  if (value === null) throw new Error('Workbench Deliverables projection escaped its Project scope')
+  return value
+}
+
+function deliverableMemberSnapshot(row: ProjectMemberRow): DeliverableMemberSnapshot {
+  return Object.freeze({
+    memberId: row.id,
+    displayName: row.display_name,
+    kind: row.kind as DeliverableMemberSnapshot['kind'],
+  })
+}
+
+function validateDeliverableResponsibility(
+  database: DatabaseSync,
+  mutation: Pick<WorkbenchProjectDeliverableMutation, 'projectId' | 'memberIds' | 'plan'>,
+): ProjectDeliverableConflict | null {
+  const ids = mutation.memberIds
+  if (ids.contributorMemberIds.includes(ids.accountableMemberId)) {
+    return Object.freeze({
+      code: 'accountable-also-contributor',
+      message: 'Deliverable Accountable cannot also be a Contributor',
+      memberId: ids.accountableMemberId,
+    })
+  }
+  const distinctContributors = new Set(ids.contributorMemberIds)
+  if (distinctContributors.size !== ids.contributorMemberIds.length) {
+    return Object.freeze({
+      code: 'accountable-also-contributor',
+      message: 'Deliverable Contributors must be distinct',
+    })
+  }
+  const requestedIds = new Set([
+    ids.accountableMemberId,
+    ...ids.contributorMemberIds,
+    ...(ids.humanSponsorMemberId === null ? [] : [ids.humanSponsorMemberId]),
+    ids.acceptorMemberId,
+  ])
+  const members = new Map<string, ProjectMemberRow>()
+  for (const memberId of requestedIds) {
+    const member = readProjectMember(database, mutation.projectId, memberId)
+    if (member === null) {
+      return Object.freeze({
+        code: 'member-not-found',
+        message: `Workbench ProjectMember ${memberId} was not found`,
+        memberId,
+      })
+    }
+    if (member.status !== 'active') {
+      return Object.freeze({
+        code: 'member-inactive',
+        message: `Workbench ProjectMember ${memberId} is inactive`,
+        memberId,
+      })
+    }
+    members.set(memberId, member)
+  }
+  const accountable = members.get(ids.accountableMemberId)
+  const acceptor = members.get(ids.acceptorMemberId)
+  if (accountable === undefined || acceptor === undefined) {
+    throw new Error('Workbench Deliverable responsibility member disappeared')
+  }
+  const sponsorRequired = accountable.kind === 'agent' || accountable.identity_type === 'external'
+  const sponsor = ids.humanSponsorMemberId === null
+    ? null
+    : members.get(ids.humanSponsorMemberId) ?? null
+  if (sponsorRequired && sponsor === null) {
+    return Object.freeze({
+      code: 'human-sponsor-required',
+      message: 'Deliverable Accountable requires a Human Sponsor',
+      memberId: ids.accountableMemberId,
+    })
+  }
+  if (!sponsorRequired && sponsor !== null) {
+    return Object.freeze({
+      code: 'human-sponsor-forbidden',
+      message: 'A declared-Feishu human Accountable cannot have a Human Sponsor',
+      memberId: ids.accountableMemberId,
+    })
+  }
+  if (sponsor !== null && sponsor.kind !== 'human') {
+    return Object.freeze({
+      code: 'human-sponsor-invalid',
+      message: 'Deliverable Human Sponsor must be an active human',
+      memberId: sponsor.id,
+    })
+  }
+  if (acceptor.kind !== 'human') {
+    return Object.freeze({
+      code: 'acceptor-invalid',
+      message: 'Deliverable Acceptor must be an active human',
+      memberId: acceptor.id,
+    })
+  }
+  const responsibility = mutation.plan.responsibility
+  const expected = canonicalizeJson({
+    accountable: deliverableMemberSnapshot(accountable),
+    contributors: ids.contributorMemberIds.map((id) => {
+      const member = members.get(id)
+      if (member === undefined) throw new Error('Workbench Deliverable Contributor disappeared')
+      return deliverableMemberSnapshot(member)
+    }),
+    humanSponsor: sponsor === null ? null : deliverableMemberSnapshot(sponsor),
+    acceptor: deliverableMemberSnapshot(acceptor),
+  })
+  if (canonicalizeJson(responsibility) !== expected) {
+    throw new Error('Workbench Deliverable responsibility snapshot disagrees with current Team truth')
+  }
+  return null
+}
+
+function deliverableCreationPreflight(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectDeliverableMutation
+    | WorkbenchDeliverableCalendarCreationReservationMutation,
+  ignoreActiveEffectId: string | null = null,
+): CreateProjectDeliverableResult | null {
+  if (mutation.plan.criteria.length < 1
+    || mutation.plan.criteria.length > MAX_DELIVERABLE_CRITERIA
+    || mutation.plan.taskGuids.length < 1
+    || mutation.plan.taskGuids.length > MAX_DELIVERABLE_TASKS) {
+    throw new TypeError('Workbench Deliverable Plan exceeds its closed collection bounds')
+  }
+  const organizationId = mutation.command.actor.organizationId
+  const teamId = mutation.command.actor.teamId
+  if (readProjectScopeRow(database, organizationId, teamId, mutation.projectId) === null) {
+    return deliverableProjectMissing(mutation.projectId)
+  }
+  const head = readDeliverableHead(database, mutation.projectId)
+  const team = readProjectTeamHead(database, {
+    projectId: mutation.projectId,
+    organizationId,
+    teamId,
+  })
+  const schedule = readCalendarHead(database, mutation.projectId)
+  const binding = readCalendarBinding(database, mutation.projectId)
+  const tasks = readProjectTasksProjection(database, {
+    projectId: mutation.projectId,
+    organizationId,
+    teamId,
+  })
+  if (head === null || team === null || schedule === null || tasks === null) {
+    throw new Error('Workbench Deliverable dependency head disappeared')
+  }
+  const current = scopedDeliverablesProjection(database, mutation.projectId, organizationId, teamId)
+  if (binding === null) {
+    return deliverableFailure('calendar-unbound', 'Project has no bound Calendar', { current })
+  }
+  if (head.revision !== mutation.expectedDeliverablesRevision) {
+    return deliverableFailure('deliverables-revision-conflict', 'Deliverables revision changed', { current })
+  }
+  if (team.team_revision !== mutation.expectedTeamRevision) {
+    return deliverableFailure('team-revision-conflict', 'Project Team revision changed', { current })
+  }
+  if (tasks.revision !== mutation.expectedTaskRevision) {
+    return deliverableFailure('task-projection-revision-conflict', 'Project task projection changed', { current })
+  }
+  if (schedule.revision !== mutation.expectedScheduleRevision) {
+    return deliverableFailure('project-schedule-revision-conflict', 'Project schedule revision changed', { current })
+  }
+  if (readDeliverableRows(database, mutation.projectId).length >= MAX_PROJECT_DELIVERABLES) {
+    return deliverableFailure('deliverable-limit-reached', 'Project already has 100 Deliverables', { current })
+  }
+  const responsibilityError = validateDeliverableResponsibility(database, mutation)
+  if (responsibilityError !== null) return Object.freeze({ ok: false, error: responsibilityError })
+  for (const taskGuid of mutation.plan.taskGuids) {
+    if (!tasks.tasks.some(task => task.taskGuid === taskGuid)) {
+      return deliverableFailure('task-not-in-project', 'Deliverable task is not visible in this Project', {
+        taskGuid,
+        current,
+      })
+    }
+  }
+  const activeEffect = database.prepare(`
+    SELECT id FROM workbench_deliverable_calendar_effect
+    WHERE project_id = ? AND state IN ('prepared', 'inflight', 'unknown')
+      AND (? IS NULL OR id <> ?)
+    LIMIT 1
+  `).get(
+    mutation.projectId,
+    ignoreActiveEffectId,
+    ignoreActiveEffectId,
+  ) as { readonly id: string } | undefined
+  if (activeEffect !== undefined) {
+    return deliverableFailure('remote-outcome-unknown', 'A Deliverable event creation requires reconciliation', {
+      current,
+    })
+  }
+  return null
+}
+
+function updateDeliverableHead(
+  database: DatabaseSync,
+  head: ProjectDeliverableHeadRow,
+  revision: number,
+  updatedAt: string,
+): void {
+  const updated = database.prepare(`
+    UPDATE workbench_project_deliverable_head SET revision = ?, updated_at = ?
+    WHERE project_id = ? AND revision = ?
+  `).run(revision, updatedAt, head.project_id, head.revision)
+  if (updated.changes !== 1) throw new Error('Workbench Deliverable head update lost its CAS')
+}
+
+function insertDeliverableActivity(
+  database: DatabaseSync,
+  input: Readonly<{
+    activityId: string
+    projectId: string
+    deliverableId: string
+    deliverableRevision: number
+    action: DeliverableActivityRow['action']
+    sourceKind: 'audit-event' | 'schedule-change'
+    sourceId: string
+    planSnapshotId: string
+    acceptanceRequestId: string | null
+    decisionId: string | null
+    occurredAt: string
+  }>,
+): void {
+  const inserted = database.prepare(`
+    INSERT INTO workbench_deliverable_activity (
+      id, project_id, deliverable_id, deliverable_revision, action,
+      source_kind, source_id, plan_snapshot_id, acceptance_request_id,
+      decision_id, occurred_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.activityId,
+    input.projectId,
+    input.deliverableId,
+    input.deliverableRevision,
+    input.action,
+    input.sourceKind,
+    input.sourceId,
+    input.planSnapshotId,
+    input.acceptanceRequestId,
+    input.decisionId,
+    input.occurredAt,
+  )
+  if (inserted.changes !== 1) throw new Error('Workbench Deliverable Activity was not appended')
+}
+
+function appendDeliverableScheduleChange(
+  database: DatabaseSync,
+  input: Readonly<{
+    changeId: string
+    projectId: string
+    projectRevision: number
+    deliverableId: string
+    deliverableRevision: number
+    source: 'workbench' | 'feishu'
+    changedFields: readonly ('schedule' | 'remote-status' | 'event-link' | 'remote-eligibility')[]
+    beforeSchedule: ProjectCalendarSchedule | null
+    afterSchedule: ProjectCalendarSchedule
+    occurredAt: string
+  }>,
+): void {
+  const inserted = database.prepare(`
+    INSERT INTO workbench_project_schedule_change (
+      id, project_id, project_revision, target_kind, target_id, target_revision,
+      milestone_id, milestone_revision, source, changed_fields_json,
+      before_schedule_json, after_schedule_json, occurred_at
+    ) VALUES (?, ?, ?, 'deliverable', ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+  `).run(
+    input.changeId,
+    input.projectId,
+    input.projectRevision,
+    input.deliverableId,
+    input.deliverableRevision,
+    input.source,
+    canonicalizeJson(input.changedFields),
+    input.beforeSchedule === null ? null : canonicalizeJson(input.beforeSchedule),
+    canonicalizeJson(input.afterSchedule),
+    input.occurredAt,
+  )
+  if (inserted.changes !== 1) throw new Error('Workbench Deliverable schedule change was not appended')
+}
+
+function insertProjectDeliverable(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectDeliverableMutation,
+): ProjectDeliverableRow {
+  const binding = readCalendarBinding(database, mutation.projectId)
+  const scheduleHead = readCalendarHead(database, mutation.projectId)
+  const deliverableHead = readDeliverableHead(database, mutation.projectId)
+  if (binding === null || scheduleHead === null || deliverableHead === null) {
+    throw new Error('Workbench Deliverable lost its Calendar or aggregate head')
+  }
+  if (!calendarEventSnapshotSelectable(mutation.event, binding.calendar_id)) {
+    throw new Error('Workbench Deliverable event is not selectable')
+  }
+  const used = database.prepare(`
+    SELECT target_kind, target_id FROM workbench_calendar_commitment
+    WHERE calendar_id = ? AND event_id = ?
+  `).get(binding.calendar_id, mutation.event.eventId) as {
+    readonly target_kind: string
+    readonly target_id: string
+  } | undefined
+  if (used !== undefined) throw new Error('Workbench Deliverable event is already committed')
+  const inserted = database.prepare(`
+    INSERT INTO workbench_project_deliverable (
+      id, project_id, revision, state, plan_snapshot_id, plan_json, plan_digest,
+      event_id, event_app_link, schedule_json, remote_status,
+      remote_observation_version, sync_state, last_observed_at,
+      creation_command_id, created_at, updated_at
+    ) VALUES (?, ?, 1, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, 'healthy', ?, ?, ?, ?)
+  `).run(
+    mutation.deliverableId,
+    mutation.projectId,
+    mutation.plan.planSnapshotId,
+    canonicalizeJson(mutation.plan),
+    mutation.plan.digest,
+    mutation.event.eventId,
+    mutation.event.appLink,
+    canonicalizeJson(mutation.event.schedule),
+    mutation.event.status,
+    mutation.event.remoteObservationVersion,
+    mutation.event.observedAt,
+    mutation.command.commandId,
+    mutation.createdAt,
+    mutation.createdAt,
+  )
+  if (inserted.changes !== 1) throw new Error('Workbench Deliverable was not inserted')
+  const roles: Array<readonly [string, number, string]> = [
+    ['accountable', 1, mutation.memberIds.accountableMemberId],
+    ...mutation.memberIds.contributorMemberIds.map((id, index) =>
+      ['contributor', index + 1, id] as const),
+    ...(mutation.memberIds.humanSponsorMemberId === null
+      ? []
+      : [['human-sponsor', 1, mutation.memberIds.humanSponsorMemberId] as const]),
+    ['acceptor', 1, mutation.memberIds.acceptorMemberId],
+  ]
+  const insertRole = database.prepare(`
+    INSERT INTO workbench_project_deliverable_member (
+      project_id, deliverable_id, role, ordinal, member_id
+    ) VALUES (?, ?, ?, ?, ?)
+  `)
+  for (const [role, ordinal, memberId] of roles) {
+    if (insertRole.run(mutation.projectId, mutation.deliverableId, role, ordinal, memberId).changes !== 1) {
+      throw new Error('Workbench Deliverable responsibility role was not inserted')
+    }
+  }
+  const commitment = database.prepare(`
+    INSERT INTO workbench_calendar_commitment (
+      project_id, calendar_id, event_id, target_kind, target_id, created_at
+    ) VALUES (?, ?, ?, 'deliverable', ?, ?)
+  `).run(
+    mutation.projectId,
+    binding.calendar_id,
+    mutation.event.eventId,
+    mutation.deliverableId,
+    mutation.createdAt,
+  )
+  if (commitment.changes !== 1) throw new Error('Workbench Deliverable commitment was not inserted')
+  const nextScheduleRevision = incrementRevision(scheduleHead.revision, 'Project schedule')
+  appendDeliverableScheduleChange(database, {
+    changeId: mutation.changeId,
+    projectId: mutation.projectId,
+    projectRevision: nextScheduleRevision,
+    deliverableId: mutation.deliverableId,
+    deliverableRevision: 1,
+    source: 'workbench',
+    changedFields: Object.freeze(['schedule']),
+    beforeSchedule: null,
+    afterSchedule: mutation.event.schedule,
+    occurredAt: mutation.createdAt,
+  })
+  updateCalendarHead(database, scheduleHead, nextScheduleRevision, 'healthy', null, mutation.createdAt)
+  updateDeliverableHead(
+    database,
+    deliverableHead,
+    incrementRevision(deliverableHead.revision, 'Deliverables'),
+    mutation.createdAt,
+  )
+  insertDeliverableActivity(database, {
+    activityId: mutation.activityId,
+    projectId: mutation.projectId,
+    deliverableId: mutation.deliverableId,
+    deliverableRevision: 1,
+    action: 'deliverable-created',
+    sourceKind: 'audit-event',
+    sourceId: mutation.command.auditEventId,
+    planSnapshotId: mutation.plan.planSnapshotId,
+    acceptanceRequestId: null,
+    decisionId: null,
+    occurredAt: mutation.createdAt,
+  })
+  const row = readDeliverableRow(database, mutation.projectId, mutation.deliverableId)
+  if (row === null) throw new Error('Workbench inserted Deliverable disappeared')
+  return row
+}
+
+function deliverableCreateSuccess(
+  database: DatabaseSync,
+  row: ProjectDeliverableRow,
+  organizationId: string,
+  teamId: string,
+  receipt: ReturnType<typeof deliverableReceipt>,
+  effect: DeliverableCalendarMutationEffectProjection | null,
+): CreateProjectDeliverableResult {
+  const value = scopedDeliverablesProjection(database, row.project_id, organizationId, teamId)
+  const deliverable = value.deliverables.find(item => item.deliverableId === row.id)
+  if (deliverable === undefined) throw new Error('Workbench Deliverable success lost its projection')
+  return Object.freeze({ ok: true, value, deliverable, effect, receipt })
+}
+
+function commitExistingDeliverable(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectDeliverableMutation,
+  signal: AbortSignal,
+): CreateProjectDeliverableResult {
+  const requestHash = deliverableCreationRequestHash(mutation)
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const receipt = readCalendarReceipt(
+      database,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.id,
+      mutation.command.idempotencyKey,
+    )
+    if (receipt !== undefined) {
+      if (receipt.command_type !== DELIVERABLE_CREATE_COMMAND_TYPE
+        || receipt.request_hash !== requestHash) {
+        database.exec('ROLLBACK')
+        began = false
+        return deliverableIdempotencyConflict()
+      }
+      const existing = readDeliverableByCommand(database, receipt.command_id)
+      if (existing === null) throw new Error('Workbench Deliverable receipt lost its projection')
+      const result = deliverableCreateSuccess(
+        database,
+        existing,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        deliverableReceipt(receipt),
+        null,
+      )
+      database.exec('COMMIT')
+      began = false
+      return result
+    }
+    assertValidLedger(database)
+    const preflight = deliverableCreationPreflight(database, mutation)
+    if (preflight !== null) {
+      database.exec('ROLLBACK')
+      began = false
+      return preflight
+    }
+    const binding = readCalendarBinding(database, mutation.projectId)
+    if (binding === null) throw new Error('Workbench Deliverable binding disappeared')
+    if (!calendarEventSnapshotSelectable(mutation.event, binding.calendar_id)
+      || mutation.event.eventId !== mutation.eventIntent.eventId) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('event-not-selectable', 'Calendar event is not selectable')
+    }
+    const used = database.prepare(`
+      SELECT target_kind, target_id FROM workbench_calendar_commitment
+      WHERE calendar_id = ? AND event_id = ?
+    `).get(binding.calendar_id, mutation.event.eventId) as object | undefined
+    if (used !== undefined) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('event-already-used', 'Calendar event already backs a commitment')
+    }
+    appendDeliverableLedger(database, {
+      command: mutation.command,
+      requestHash,
+      commandType: DELIVERABLE_CREATE_COMMAND_TYPE,
+      auditAction: DELIVERABLE_CREATE_AUDIT_ACTION,
+      summaryCode: DELIVERABLE_CREATE_SUMMARY,
+      objectType: DELIVERABLE_OBJECT_TYPE,
+      objectId: mutation.deliverableId,
+      objectVersion: 1,
+      projectId: mutation.projectId,
+      changedFields: ['plan', 'calendarCommitment'],
+      outboxTopic: DELIVERABLE_CREATE_OUTBOX_TOPIC,
+    })
+    const row = insertProjectDeliverable(database, mutation)
+    const result = deliverableCreateSuccess(
+      database,
+      row,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+      deliverableReceipt(mutation.command),
+      null,
+    )
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function readDeliverableByCommand(database: DatabaseSync, commandId: string): ProjectDeliverableRow | null {
+  const row = database.prepare(`
+    SELECT sequence, id, project_id, revision, state, plan_snapshot_id,
+      plan_json, plan_digest, event_id, event_app_link, schedule_json,
+      remote_status, remote_observation_version, sync_state,
+      last_observed_at, creation_command_id, created_at, updated_at
+    FROM workbench_project_deliverable WHERE creation_command_id = ?
+  `).get(commandId) as ProjectDeliverableRow | undefined
+  return row ?? null
+}
+
+function readDeliverableEffect(
+  database: DatabaseSync,
+  effectId: string,
+): DeliverableCalendarEffectRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id, deliverable_id,
+      operation, intent_json, expected_deliverables_revision,
+      expected_team_revision, expected_task_revision, expected_schedule_revision,
+      request_hash, idempotency_key_hash, provider_idempotency_key,
+      route_kind, route_generation, app_id, open_id, tenant_key, state,
+      issue_json, local_conflict_code, attempt_count, command_id, audit_event_id, outbox_id,
+      created_at, updated_at
+    FROM workbench_deliverable_calendar_effect WHERE id = ?
+  `).get(effectId) as DeliverableCalendarEffectRow | undefined
+  return row ?? null
+}
+
+function readDeliverableEffectByCommand(
+  database: DatabaseSync,
+  commandId: string,
+): DeliverableCalendarEffectRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id, deliverable_id,
+      operation, intent_json, expected_deliverables_revision,
+      expected_team_revision, expected_task_revision, expected_schedule_revision,
+      request_hash, idempotency_key_hash, provider_idempotency_key,
+      route_kind, route_generation, app_id, open_id, tenant_key, state,
+      issue_json, local_conflict_code, attempt_count, command_id, audit_event_id, outbox_id,
+      created_at, updated_at
+    FROM workbench_deliverable_calendar_effect WHERE command_id = ?
+  `).get(commandId) as DeliverableCalendarEffectRow | undefined
+  return row ?? null
+}
+
+function deliverableEffectProjection(
+  row: DeliverableCalendarEffectRow,
+): DeliverableCalendarMutationEffectProjection {
+  return Object.freeze({
+    effectId: row.id,
+    operation: 'event-create',
+    deliverableId: row.deliverable_id,
+    state: (row.state === 'inflight' ? 'prepared' : row.state) as
+      DeliverableCalendarMutationEffectProjection['state'],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function deliverableCalendarLocalConflictCode(
+  value: unknown,
+): DeliverableCalendarLocalConflictCode {
+  if (typeof value !== 'string'
+    || !DELIVERABLE_CALENDAR_LOCAL_CONFLICT_CODES.has(
+      value as DeliverableCalendarLocalConflictCode,
+    )) {
+    throw new Error('Workbench Deliverable effect has an invalid local conflict code')
+  }
+  return value as DeliverableCalendarLocalConflictCode
+}
+
+function routeFromDeliverableEffect(
+  database: DatabaseSync,
+  effect: DeliverableCalendarEffectRow,
+): WorkbenchFeishuCalendarRoute {
+  const binding = readCalendarBinding(database, effect.project_id)
+  if (binding === null || binding.route_kind !== effect.route_kind
+    || binding.route_generation !== effect.route_generation || binding.app_id !== effect.app_id
+    || binding.open_id !== effect.open_id || binding.tenant_key !== effect.tenant_key) {
+    throw new Error('Workbench Deliverable effect lost its exact Calendar route')
+  }
+  return calendarRouteFromBinding(database, binding)
+}
+
+interface StoredDeliverableCreationIntent {
+  readonly plan: DeliverablePlanProjection
+  readonly memberIds: WorkbenchProjectDeliverableMutation['memberIds']
+  readonly activityId: string
+  readonly changeId: string
+  readonly schedule: ProjectCalendarSchedule
+  readonly calendarId: string
+}
+
+function decodeDeliverableCreationIntent(
+  effect: DeliverableCalendarEffectRow,
+): StoredDeliverableCreationIntent {
+  const value = objectValue(
+    parseCanonicalJson(effect.intent_json, 'Stored Deliverable event creation intent'),
+    'Stored Deliverable event creation intent',
+  )
+  const planValue = value.plan
+  if (typeof planValue !== 'object' || planValue === null || Array.isArray(planValue)) {
+    throw new Error('Stored Deliverable event creation Plan is invalid')
+  }
+  const planDigest = Reflect.get(planValue, 'digest')
+  if (typeof planDigest !== 'string') throw new Error('Stored Deliverable event creation Plan digest is invalid')
+  const plan = decodeDeliverablePlan(canonicalizeJson(planValue), planDigest)
+  const memberIds = value.memberIds as WorkbenchProjectDeliverableMutation['memberIds']
+  return Object.freeze({
+    plan,
+    memberIds,
+    activityId: boundedReference(value.activityId, 'Stored Deliverable Activity id'),
+    changeId: boundedReference(value.changeId, 'Stored Deliverable schedule change id'),
+    schedule: decodeCalendarSchedule(canonicalizeJson(value.schedule)),
+    calendarId: boundedReference(value.calendarId, 'Stored Deliverable Calendar id'),
+  })
+}
+
+function deliverableResultFromEffect(
+  database: DatabaseSync,
+  effect: DeliverableCalendarEffectRow,
+): CreateProjectDeliverableResult {
+  const projectedEffect = deliverableEffectProjection(effect)
+  if (effect.state === 'delivered') {
+    const row = readDeliverableByCommand(database, effect.command_id)
+    if (row === null) throw new Error('Delivered Deliverable effect lost its projection')
+    return deliverableCreateSuccess(
+      database,
+      row,
+      effect.organization_id,
+      effect.team_id,
+      deliverableReceipt(effect),
+      projectedEffect,
+    )
+  }
+  const current = scopedDeliverablesProjection(
+    database,
+    effect.project_id,
+    effect.organization_id,
+    effect.team_id,
+  )
+  if (effect.state === 'conflict') {
+    const code = deliverableCalendarLocalConflictCode(effect.local_conflict_code)
+    return deliverableFailure(
+      code,
+      'Feishu created the event, but local Workbench authority changed before settlement',
+      { current },
+    )
+  }
+  const issue = effect.issue_json === null ? ambiguousCalendarIssue() : decodeFeishuIssue(effect.issue_json)
+  return deliverableFailure(
+    effect.state === 'unknown' || effect.state === 'prepared' || effect.state === 'inflight'
+      ? 'remote-outcome-unknown'
+      : 'remote-rejected',
+    effect.state === 'unknown' || effect.state === 'prepared' || effect.state === 'inflight'
+      ? 'Feishu Deliverable event creation outcome is unknown; reconcile before retrying'
+      : 'Feishu rejected Deliverable event creation',
+    { current, issue: cloneFeishuIssue(issue) },
+  )
+}
+
+function replayDeliverableCreation(
+  database: DatabaseSync,
+  query: WorkbenchProjectDeliverableReplayQuery,
+  signal: AbortSignal,
+): CreateProjectDeliverableResult | null {
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const receipt = readCalendarReceipt(database, query.organizationId, query.actorId, query.idempotencyKey)
+    if (receipt === undefined) {
+      database.exec('COMMIT')
+      began = false
+      return null
+    }
+    if (receipt.command_type !== DELIVERABLE_CREATE_COMMAND_TYPE
+      || receipt.request_hash !== deliverableCreationRequestHash(query)) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableIdempotencyConflict()
+    }
+    assertValidLedger(database)
+    const effect = readDeliverableEffectByCommand(database, receipt.command_id)
+    if (effect !== null) {
+      if (effect.state === 'prepared') {
+        database.exec('COMMIT')
+        began = false
+        return null
+      }
+      const result = deliverableResultFromEffect(database, effect)
+      database.exec('COMMIT')
+      began = false
+      return result
+    }
+    const row = readDeliverableByCommand(database, receipt.command_id)
+    if (row === null || row.project_id !== query.projectId) {
+      throw new Error('Workbench Deliverable receipt lost its projection')
+    }
+    const result = deliverableCreateSuccess(
+      database,
+      row,
+      query.organizationId,
+      query.teamId,
+      deliverableReceipt(receipt),
+      null,
+    )
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function reserveDeliverableCalendarCreation(
+  database: DatabaseSync,
+  mutation: WorkbenchDeliverableCalendarCreationReservationMutation,
+  signal: AbortSignal,
+): WorkbenchDeliverableCalendarCreationReservation {
+  const requestHash = deliverableCreationRequestHash(mutation)
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const receipt = readCalendarReceipt(
+      database,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.id,
+      mutation.command.idempotencyKey,
+    )
+    if (receipt !== undefined) {
+      if (receipt.command_type !== DELIVERABLE_CREATE_COMMAND_TYPE
+        || receipt.request_hash !== requestHash) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({ state: 'rejected', result: deliverableIdempotencyConflict() })
+      }
+      const effect = readDeliverableEffectByCommand(database, receipt.command_id)
+      if (effect === null) throw new Error('Workbench Deliverable event receipt lost its effect')
+      if (effect.state === 'prepared') {
+        const intent = decodeDeliverableCreationIntent(effect)
+        const value = Object.freeze({
+          state: 'deliver' as const,
+          effectId: effect.id,
+          route: routeFromDeliverableEffect(database, effect),
+          calendarId: intent.calendarId,
+          providerIdempotencyKey: effect.provider_idempotency_key,
+          effect: deliverableEffectProjection(effect),
+          receipt: deliverableReceipt(effect),
+        })
+        database.exec('COMMIT')
+        began = false
+        return value
+      }
+      const result = deliverableResultFromEffect(database, effect)
+      database.exec('COMMIT')
+      began = false
+      return Object.freeze({ state: 'replay', result })
+    }
+    assertValidLedger(database)
+    const preflight = deliverableCreationPreflight(database, mutation)
+    if (preflight !== null) {
+      database.exec('ROLLBACK')
+      began = false
+      return Object.freeze({ state: 'rejected', result: preflight })
+    }
+    const binding = readCalendarBinding(database, mutation.projectId)
+    if (binding === null) throw new Error('Workbench Deliverable event lost its Calendar')
+    const route = calendarRouteFromBinding(database, binding)
+    const inserted = database.prepare(`
+      INSERT INTO workbench_deliverable_calendar_effect (
+        id, project_id, organization_id, team_id, actor_id, deliverable_id,
+        operation, intent_json, expected_deliverables_revision,
+        expected_team_revision, expected_task_revision, expected_schedule_revision,
+        request_hash, idempotency_key_hash, provider_idempotency_key,
+        route_kind, route_generation, app_id, open_id, tenant_key,
+        state, issue_json, attempt_count, command_id, audit_event_id, outbox_id,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'event-create', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        'prepared', NULL, 0, ?, ?, ?, ?, ?)
+    `).run(
+      mutation.effectId,
+      mutation.projectId,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+      mutation.command.actor.id,
+      mutation.deliverableId,
+      canonicalizeJson({
+        plan: mutation.plan,
+        memberIds: mutation.memberIds,
+        activityId: mutation.activityId,
+        changeId: mutation.changeId,
+        schedule: mutation.eventIntent.schedule,
+        calendarId: binding.calendar_id,
+      }),
+      mutation.expectedDeliverablesRevision,
+      mutation.expectedTeamRevision,
+      mutation.expectedTaskRevision,
+      mutation.expectedScheduleRevision,
+      requestHash,
+      idempotencyKeyHash(mutation.command.idempotencyKey),
+      mutation.providerIdempotencyKey,
+      route.kind,
+      route.routeGeneration,
+      route.appId,
+      route.actor.openId,
+      route.actor.tenantKey,
+      mutation.command.commandId,
+      mutation.command.auditEventId,
+      mutation.command.outboxId,
+      mutation.preparedAt,
+      mutation.preparedAt,
+    )
+    if (inserted.changes !== 1) throw new Error('Workbench Deliverable event was not reserved')
+    appendDeliverableLedger(database, {
+      command: mutation.command,
+      requestHash,
+      commandType: DELIVERABLE_CREATE_COMMAND_TYPE,
+      auditAction: DELIVERABLE_CREATE_AUDIT_ACTION,
+      summaryCode: DELIVERABLE_CREATE_SUMMARY,
+      objectType: DELIVERABLE_OBJECT_TYPE,
+      objectId: mutation.deliverableId,
+      objectVersion: 1,
+      projectId: mutation.projectId,
+      changedFields: ['plan', 'calendarCommitment'],
+      outboxTopic: DELIVERABLE_CREATE_OUTBOX_TOPIC,
+    })
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return Object.freeze({
+      state: 'deliver',
+      effectId: mutation.effectId,
+      route,
+      calendarId: binding.calendar_id,
+      providerIdempotencyKey: mutation.providerIdempotencyKey,
+      effect: Object.freeze({
+        effectId: mutation.effectId,
+        operation: 'event-create',
+        deliverableId: mutation.deliverableId,
+        state: 'prepared',
+        createdAt: mutation.preparedAt,
+        updatedAt: mutation.preparedAt,
+      }),
+      receipt: deliverableReceipt(mutation.command),
+    })
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function claimDeliverableEffect(
+  database: DatabaseSync,
+  effectId: string,
+  claimedAt: string,
+  signal: AbortSignal,
+): boolean {
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const effect = readDeliverableEffect(database, effectId)
+    if (effect === null || effect.state !== 'prepared') {
+      database.exec('COMMIT')
+      began = false
+      return false
+    }
+    const changed = database.prepare(`
+      UPDATE workbench_deliverable_calendar_effect
+      SET state = 'inflight', attempt_count = 1, updated_at = ?
+      WHERE id = ? AND state = 'prepared' AND attempt_count = 0
+    `).run(claimedAt, effectId)
+    if (changed.changes !== 1) throw new Error('Workbench Deliverable effect claim lost its CAS')
+    const outbox = database.prepare(`
+      UPDATE workbench_outbox SET attempt_count = 1, updated_at = ?
+      WHERE id = ? AND state = 'pending' AND attempt_count = 0
+    `).run(claimedAt, effect.outbox_id)
+    if (outbox.changes !== 1) throw new Error('Workbench Deliverable Outbox claim lost its CAS')
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return true
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function settleDeliverableEffectState(
+  database: DatabaseSync,
+  effect: DeliverableCalendarEffectRow,
+  state: 'delivered' | 'unknown' | 'failed' | 'conflict',
+  issue: FeishuConnectionIssue | null,
+  settledAt: string,
+  localConflictCode: DeliverableCalendarLocalConflictCode | null = null,
+): void {
+  if ((state === 'conflict') !== (localConflictCode !== null)) {
+    throw new Error('Workbench Deliverable effect conflict settlement is incomplete')
+  }
+  const updated = database.prepare(`
+    UPDATE workbench_deliverable_calendar_effect
+    SET state = ?, issue_json = ?, local_conflict_code = ?, updated_at = ?
+    WHERE id = ? AND state = 'inflight' AND attempt_count = 1
+  `).run(
+    state,
+    issue === null ? null : canonicalizeJson(cloneFeishuIssue(issue)),
+    localConflictCode,
+    settledAt,
+    effect.id,
+  )
+  if (updated.changes !== 1) throw new Error('Workbench Deliverable effect settlement lost its CAS')
+  const outboxState = state === 'delivered' ? 'delivered' : state === 'unknown' ? 'unknown' : 'failed'
+  const error = state === 'delivered'
+    ? null
+    : state === 'unknown' ? 'transport-ambiguous' : 'definitive-rejection'
+  const outbox = database.prepare(`
+    UPDATE workbench_outbox SET state = ?, error_code = ?, updated_at = ?
+    WHERE id = ? AND state = 'pending' AND attempt_count = 1
+  `).run(outboxState, error, settledAt, effect.outbox_id)
+  if (outbox.changes !== 1) throw new Error('Workbench Deliverable Outbox settlement lost its CAS')
+}
+
+function deliverableEffectCommand(
+  database: DatabaseSync,
+  effect: DeliverableCalendarEffectRow,
+): WorkbenchProjectDeliverableMutation['command'] {
+  const audit = database.prepare(`
+    SELECT causation_id, occurred_at, reason_code FROM workbench_audit_event WHERE id = ?
+  `).get(effect.audit_event_id) as {
+    readonly causation_id: string
+    readonly occurred_at: string
+    readonly reason_code: string
+  } | undefined
+  if (audit === undefined || audit.reason_code !== 'owner-project-deliverable-create') {
+    throw new Error('Workbench Deliverable effect lost its creation audit')
+  }
+  return Object.freeze({
+    commandId: effect.command_id,
+    auditEventId: effect.audit_event_id,
+    outboxId: effect.outbox_id,
+    idempotencyKey: '<stored-by-hash>',
+    causationId: audit.causation_id,
+    reason: 'owner-project-deliverable-create',
+    actor: Object.freeze({
+      kind: 'owner',
+      id: effect.actor_id,
+      organizationId: effect.organization_id,
+      teamId: effect.team_id,
+    }),
+    occurredAt: audit.occurred_at,
+  })
+}
+
+function settleDeliverableCalendarCreation(
+  database: DatabaseSync,
+  effectId: string,
+  settlement: WorkbenchDeliverableCalendarCreationSettlement,
+  signal: AbortSignal,
+): CreateProjectDeliverableResult {
+  canonicalInstant(settlement.settledAt, 'Deliverable event creation settledAt')
+  if (settlement.state === 'delivered') validateCalendarEventSnapshotValue(settlement.event)
+  else safeFeishuIssue(settlement.issue, 'Deliverable event creation issue')
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const effect = readDeliverableEffect(database, effectId)
+    if (effect === null || effect.operation !== 'event-create') {
+      throw new Error('Workbench Deliverable event effect does not exist')
+    }
+    if (effect.state !== 'inflight') {
+      const result = deliverableResultFromEffect(database, effect)
+      database.exec('COMMIT')
+      began = false
+      return result
+    }
+    if (settlement.state === 'delivered') {
+      const intent = decodeDeliverableCreationIntent(effect)
+      const binding = readCalendarBinding(database, effect.project_id)
+      if (binding === null || binding.calendar_id !== intent.calendarId
+        || !calendarEventSnapshotSelectable(settlement.event, binding.calendar_id)) {
+        settleDeliverableEffectState(
+          database,
+          effect,
+          'failed',
+          invalidCalendarObservationIssue(),
+          settlement.settledAt,
+        )
+      } else {
+        const command = deliverableEffectCommand(database, effect)
+        const mutation: WorkbenchProjectDeliverableMutation = Object.freeze({
+          deliverableId: effect.deliverable_id,
+          activityId: intent.activityId,
+          changeId: intent.changeId,
+          projectId: effect.project_id,
+          plan: intent.plan,
+          memberIds: intent.memberIds,
+          eventIntent: Object.freeze({ mode: 'existing-event', eventId: settlement.event.eventId }),
+          event: settlement.event,
+          expectedDeliverablesRevision: effect.expected_deliverables_revision,
+          expectedDeliverableRevision: null,
+          expectedTeamRevision: effect.expected_team_revision,
+          expectedTaskRevision: effect.expected_task_revision,
+          expectedScheduleRevision: effect.expected_schedule_revision,
+          createdAt: effect.created_at,
+          command,
+        })
+        const preflight = deliverableCreationPreflight(database, mutation, effect.id)
+        const used = database.prepare(`
+          SELECT target_kind, target_id FROM workbench_calendar_commitment
+          WHERE calendar_id = ? AND event_id = ?
+        `).get(binding.calendar_id, settlement.event.eventId) as object | undefined
+        if (preflight !== null || used !== undefined) {
+          const localConflictCode = used !== undefined
+            ? 'event-already-used'
+            : deliverableCalendarLocalConflictCode(
+                preflight === null || preflight.ok ? null : preflight.error.code,
+              )
+          settleDeliverableEffectState(
+            database,
+            effect,
+            'conflict',
+            null,
+            settlement.settledAt,
+            localConflictCode,
+          )
+        } else {
+          insertProjectDeliverable(database, mutation)
+          settleDeliverableEffectState(database, effect, 'delivered', null, settlement.settledAt)
+        }
+      }
+    } else {
+      settleDeliverableEffectState(database, effect, settlement.state, settlement.issue, settlement.settledAt)
+      const head = readCalendarHead(database, effect.project_id)
+      if (head === null) throw new Error('Workbench Deliverable effect lost its Calendar head')
+      updateCalendarHead(
+        database,
+        head,
+        incrementRevision(head.revision, 'Project schedule'),
+        settlement.state === 'unknown' ? 'unknown' : 'attention',
+        settlement.issue,
+        settlement.settledAt,
+        Object.freeze({ lastAttemptAt: settlement.settledAt }),
+      )
+    }
+    const updated = readDeliverableEffect(database, effect.id)
+    if (updated === null) throw new Error('Workbench settled Deliverable effect disappeared')
+    const result = deliverableResultFromEffect(database, updated)
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function recoverInflightDeliverableEffects(database: DatabaseSync, recoveredAt: string): void {
+  const rows = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id, deliverable_id,
+      operation, intent_json, expected_deliverables_revision,
+      expected_team_revision, expected_task_revision, expected_schedule_revision,
+      request_hash, idempotency_key_hash, provider_idempotency_key,
+      route_kind, route_generation, app_id, open_id, tenant_key, state,
+      issue_json, local_conflict_code, attempt_count, command_id, audit_event_id, outbox_id,
+      created_at, updated_at
+    FROM workbench_deliverable_calendar_effect
+    WHERE state = 'inflight' ORDER BY created_at, id
+  `).all() as unknown as DeliverableCalendarEffectRow[]
+  for (const effect of rows) {
+    const issue = ambiguousCalendarIssue()
+    settleDeliverableEffectState(database, effect, 'unknown', issue, recoveredAt)
+    const head = readCalendarHead(database, effect.project_id)
+    if (head === null) throw new Error('Workbench recovered Deliverable effect lost its Calendar head')
+    updateCalendarHead(
+      database,
+      head,
+      incrementRevision(head.revision, 'Project schedule'),
+      'unknown',
+      issue,
+      recoveredAt,
+      Object.freeze({ lastAttemptAt: recoveredAt }),
+    )
+  }
+}
+
+function readAcceptanceRequestRow(
+  database: DatabaseSync,
+  projectId: string,
+  deliverableId: string,
+  acceptanceRequestId: string,
+): DeliverableAcceptanceRequestRow | null {
+  const row = database.prepare(`
+    SELECT sequence, id, project_id, deliverable_id, round_sequence, revision,
+      deliverable_revision, plan_snapshot_id, plan_json, calendar_json,
+      task_guids_json, candidate_versions_json, candidates_digest,
+      persisted_state, decision_id, command_id, audit_event_id, outbox_id,
+      created_at, updated_at
+    FROM workbench_deliverable_acceptance_request
+    WHERE project_id = ? AND deliverable_id = ? AND id = ?
+  `).get(projectId, deliverableId, acceptanceRequestId) as DeliverableAcceptanceRequestRow | undefined
+  return row ?? null
+}
+
+function readAcceptanceRequestByCommand(
+  database: DatabaseSync,
+  commandId: string,
+): DeliverableAcceptanceRequestRow | null {
+  const row = database.prepare(`
+    SELECT sequence, id, project_id, deliverable_id, round_sequence, revision,
+      deliverable_revision, plan_snapshot_id, plan_json, calendar_json,
+      task_guids_json, candidate_versions_json, candidates_digest,
+      persisted_state, decision_id, command_id, audit_event_id, outbox_id,
+      created_at, updated_at
+    FROM workbench_deliverable_acceptance_request WHERE command_id = ?
+  `).get(commandId) as DeliverableAcceptanceRequestRow | undefined
+  return row ?? null
+}
+
+function deliverableMembersEligible(
+  database: DatabaseSync,
+  projectId: string,
+  deliverableId: string,
+): ProjectDeliverableConflict | null {
+  const rows = database.prepare(`
+    SELECT relation.role, member.id, member.kind, member.status
+    FROM workbench_project_deliverable_member AS relation
+    INNER JOIN workbench_project_member AS member ON member.id = relation.member_id
+    WHERE relation.project_id = ? AND relation.deliverable_id = ?
+    ORDER BY relation.role, relation.ordinal
+  `).all(projectId, deliverableId) as unknown as readonly {
+    readonly role: string
+    readonly id: string
+    readonly kind: string
+    readonly status: string
+  }[]
+  if (rows.length < 2) throw new Error('Workbench Deliverable responsibility is incomplete')
+  for (const row of rows) {
+    if (row.status !== 'active') {
+      return Object.freeze({
+        code: 'member-inactive',
+        message: `Workbench ProjectMember ${row.id} is inactive`,
+        memberId: row.id,
+      })
+    }
+    if (row.role === 'acceptor' && row.kind !== 'human') {
+      return Object.freeze({
+        code: 'acceptor-invalid',
+        message: 'Deliverable Acceptor must be an active human',
+        memberId: row.id,
+      })
+    }
+  }
+  return null
+}
+
+function acceptanceRequestSuccess(
+  database: DatabaseSync,
+  row: DeliverableAcceptanceRequestRow,
+  organizationId: string,
+  teamId: string,
+  receipt: ReturnType<typeof deliverableReceipt>,
+): RequestDeliverableAcceptanceResult {
+  const deliverable = readDeliverableRow(database, row.project_id, row.deliverable_id)
+  if (deliverable === null) throw new Error('Workbench Acceptance Request lost its Deliverable')
+  const value = scopedDeliverablesProjection(database, row.project_id, organizationId, teamId)
+  const request = acceptanceRequestFromRow(database, row, deliverable.revision)
+  return Object.freeze({ ok: true, value, request, receipt })
+}
+
+function commitDeliverableAcceptanceRequest(
+  database: DatabaseSync,
+  mutation: WorkbenchDeliverableAcceptanceRequestMutation,
+  signal: AbortSignal,
+): RequestDeliverableAcceptanceResult {
+  const requestHash = acceptanceRequestHash(mutation)
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const receipt = readCalendarReceipt(
+      database,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.id,
+      mutation.command.idempotencyKey,
+    )
+    if (receipt !== undefined) {
+      if (receipt.command_type !== DELIVERABLE_REQUEST_COMMAND_TYPE
+        || receipt.request_hash !== requestHash) {
+        database.exec('ROLLBACK')
+        began = false
+        return deliverableIdempotencyConflict()
+      }
+      const replay = readAcceptanceRequestByCommand(database, receipt.command_id)
+      if (replay === null) throw new Error('Workbench Acceptance Request receipt lost its snapshot')
+      const result = acceptanceRequestSuccess(
+        database,
+        replay,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        deliverableReceipt(receipt),
+      )
+      database.exec('COMMIT')
+      began = false
+      return result
+    }
+    assertValidLedger(database)
+    if (readProjectScopeRow(
+      database,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+      mutation.projectId,
+    ) === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableProjectMissing(mutation.projectId)
+    }
+    const head = readDeliverableHead(database, mutation.projectId)
+    const team = readProjectTeamHead(database, {
+      projectId: mutation.projectId,
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+    })
+    const schedule = readCalendarHead(database, mutation.projectId)
+    const tasks = readProjectTasksProjection(database, {
+      projectId: mutation.projectId,
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+    })
+    if (head === null || team === null || schedule === null || tasks === null) {
+      throw new Error('Workbench Acceptance Request dependency head disappeared')
+    }
+    const current = scopedDeliverablesProjection(
+      database,
+      mutation.projectId,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+    )
+    if (head.revision !== mutation.expectedDeliverablesRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverables-revision-conflict', 'Deliverables revision changed', { current })
+    }
+    if (team.team_revision !== mutation.expectedTeamRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('team-revision-conflict', 'Project Team revision changed', { current })
+    }
+    if (tasks.revision !== mutation.expectedTaskRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('task-projection-revision-conflict', 'Project task projection changed', { current })
+    }
+    if (schedule.revision !== mutation.expectedScheduleRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('project-schedule-revision-conflict', 'Project schedule revision changed', { current })
+    }
+    const deliverable = readDeliverableRow(database, mutation.projectId, mutation.deliverableId)
+    if (deliverable === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-not-found', 'Deliverable was not found', { current })
+    }
+    if (deliverable.revision !== mutation.expectedDeliverableRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-revision-conflict', 'Deliverable revision changed', { current })
+    }
+    if (deliverable.state !== 'planned') {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure(
+        deliverable.state === 'in-review' ? 'acceptance-request-pending' : 'deliverable-state-conflict',
+        'Deliverable cannot open an Acceptance Request in its current state',
+        { current },
+      )
+    }
+    if (deliverable.remote_status !== 'confirmed' || deliverable.sync_state !== 'healthy'
+      || deliverable.remote_observation_version !== mutation.expectedRemoteObservationVersion) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-revision-conflict', 'Deliverable Calendar authority changed', { current })
+    }
+    const memberError = deliverableMembersEligible(database, mutation.projectId, mutation.deliverableId)
+    if (memberError !== null) {
+      database.exec('ROLLBACK')
+      began = false
+      return Object.freeze({ ok: false, error: memberError })
+    }
+    const plan = decodeDeliverablePlan(deliverable.plan_json, deliverable.plan_digest)
+    for (const taskGuid of plan.taskGuids) {
+      if (!tasks.tasks.some(task => task.taskGuid === taskGuid)) {
+        database.exec('ROLLBACK')
+        began = false
+        return deliverableFailure('task-unavailable', 'Deliverable task is no longer visible', {
+          current,
+          taskGuid,
+        })
+      }
+    }
+    if (mutation.candidateVersions.length < 1
+      || mutation.candidateVersions.length > MAX_DELIVERABLE_CANDIDATES
+      || new Set(mutation.candidateVersions.map(value => value.referenceDigest)).size
+        !== mutation.candidateVersions.length) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('candidate-duplicate', 'Candidate versions must be a distinct bounded set', { current })
+    }
+    const nextDeliverableRevision = incrementRevision(deliverable.revision, 'Deliverable')
+    const round = database.prepare(`
+      SELECT COALESCE(MAX(round_sequence), 0) AS sequence
+      FROM workbench_deliverable_acceptance_request
+      WHERE project_id = ? AND deliverable_id = ?
+    `).get(mutation.projectId, mutation.deliverableId) as { readonly sequence: number } | undefined
+    if (round === undefined) throw new Error('Workbench Acceptance Request sequence query failed')
+    const roundSequence = incrementRevision(round.sequence, 'Acceptance Request sequence')
+    appendDeliverableLedger(database, {
+      command: mutation.command,
+      requestHash,
+      commandType: DELIVERABLE_REQUEST_COMMAND_TYPE,
+      auditAction: DELIVERABLE_REQUEST_AUDIT_ACTION,
+      summaryCode: DELIVERABLE_REQUEST_SUMMARY,
+      objectType: DELIVERABLE_REQUEST_OBJECT_TYPE,
+      objectId: mutation.acceptanceRequestId,
+      objectVersion: 1,
+      projectId: mutation.projectId,
+      changedFields: ['acceptanceRequest', 'deliverableState'],
+      outboxTopic: DELIVERABLE_REQUEST_OUTBOX_TOPIC,
+    })
+    const requestInsert = database.prepare(`
+      INSERT INTO workbench_deliverable_acceptance_request (
+        id, project_id, deliverable_id, round_sequence, revision,
+        deliverable_revision, plan_snapshot_id, plan_json, calendar_json,
+        task_guids_json, candidate_versions_json, candidates_digest,
+        persisted_state, decision_id, command_id, audit_event_id, outbox_id,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?, ?, ?)
+    `).run(
+      mutation.acceptanceRequestId,
+      mutation.projectId,
+      mutation.deliverableId,
+      roundSequence,
+      nextDeliverableRevision,
+      plan.planSnapshotId,
+      canonicalizeJson(plan),
+      canonicalizeJson(deliverableCalendarFromRow(deliverable)),
+      canonicalizeJson(plan.taskGuids),
+      canonicalizeJson(mutation.candidateVersions),
+      mutation.candidatesDigest,
+      mutation.command.commandId,
+      mutation.command.auditEventId,
+      mutation.command.outboxId,
+      mutation.createdAt,
+      mutation.createdAt,
+    )
+    if (requestInsert.changes !== 1) throw new Error('Workbench Acceptance Request was not inserted')
+    insertCandidateVersions(database, mutation.acceptanceRequestId, mutation.candidateVersions)
+    const changed = database.prepare(`
+      UPDATE workbench_project_deliverable
+      SET state = 'in-review', revision = ?, updated_at = ?
+      WHERE project_id = ? AND id = ? AND revision = ? AND state = 'planned'
+    `).run(
+      nextDeliverableRevision,
+      mutation.createdAt,
+      mutation.projectId,
+      mutation.deliverableId,
+      deliverable.revision,
+    )
+    if (changed.changes !== 1) throw new Error('Workbench Deliverable review transition lost its CAS')
+    updateDeliverableHead(
+      database,
+      head,
+      incrementRevision(head.revision, 'Deliverables'),
+      mutation.createdAt,
+    )
+    insertDeliverableActivity(database, {
+      activityId: mutation.activityId,
+      projectId: mutation.projectId,
+      deliverableId: mutation.deliverableId,
+      deliverableRevision: nextDeliverableRevision,
+      action: 'acceptance-requested',
+      sourceKind: 'audit-event',
+      sourceId: mutation.command.auditEventId,
+      planSnapshotId: plan.planSnapshotId,
+      acceptanceRequestId: mutation.acceptanceRequestId,
+      decisionId: null,
+      occurredAt: mutation.createdAt,
+    })
+    const request = readAcceptanceRequestRow(
+      database,
+      mutation.projectId,
+      mutation.deliverableId,
+      mutation.acceptanceRequestId,
+    )
+    if (request === null) throw new Error('Workbench Acceptance Request disappeared')
+    const result = acceptanceRequestSuccess(
+      database,
+      request,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+      deliverableReceipt(mutation.command),
+    )
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function readAcceptanceDecisionByCommand(
+  database: DatabaseSync,
+  commandId: string,
+): DeliverableAcceptanceDecisionRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, deliverable_id, acceptance_request_id,
+      request_revision, outcome, actor_kind, actor_id,
+      designated_acceptor_json, criteria_json, feedback, causation_id,
+      command_id, audit_event_id, outbox_id, decided_at
+    FROM workbench_deliverable_acceptance_decision WHERE command_id = ?
+  `).get(commandId) as DeliverableAcceptanceDecisionRow | undefined
+  return row ?? null
+}
+
+function acceptanceDecisionSuccess(
+  database: DatabaseSync,
+  decision: DeliverableAcceptanceDecisionRow,
+  organizationId: string,
+  teamId: string,
+  receipt: ReturnType<typeof deliverableReceipt>,
+): DecideDeliverableAcceptanceResult {
+  const deliverable = readDeliverableRow(database, decision.project_id, decision.deliverable_id)
+  const request = readAcceptanceRequestRow(
+    database,
+    decision.project_id,
+    decision.deliverable_id,
+    decision.acceptance_request_id,
+  )
+  if (deliverable === null || request === null) {
+    throw new Error('Workbench acceptance decision lost its immutable target')
+  }
+  const value = scopedDeliverablesProjection(database, decision.project_id, organizationId, teamId)
+  return Object.freeze({
+    ok: true,
+    value,
+    request: acceptanceRequestFromRow(database, request, deliverable.revision),
+    finalRelease: readFinalRelease(database, deliverable),
+    receipt,
+  })
+}
+
+function decisionVocabulary(mode: WorkbenchDeliverableAcceptanceDecisionMutation['mode']) {
+  if (mode === 'approve') return Object.freeze({
+    state: 'approved' as const,
+    action: DELIVERABLE_APPROVE_AUDIT_ACTION,
+    summary: DELIVERABLE_APPROVE_SUMMARY,
+    activity: 'acceptance-approved' as const,
+  })
+  if (mode === 'reject') return Object.freeze({
+    state: 'rejected' as const,
+    action: DELIVERABLE_REJECT_AUDIT_ACTION,
+    summary: DELIVERABLE_REJECT_SUMMARY,
+    activity: 'acceptance-rejected' as const,
+  })
+  return Object.freeze({
+    state: 'needs_changes' as const,
+    action: DELIVERABLE_NEEDS_CHANGES_AUDIT_ACTION,
+    summary: DELIVERABLE_NEEDS_CHANGES_SUMMARY,
+    activity: 'acceptance-needs-changes' as const,
+  })
+}
+
+function commitDeliverableAcceptanceDecision(
+  database: DatabaseSync,
+  mutation: WorkbenchDeliverableAcceptanceDecisionMutation,
+  signal: AbortSignal,
+): DecideDeliverableAcceptanceResult {
+  const requestHash = acceptanceDecisionHash(mutation)
+  const vocabulary = decisionVocabulary(mutation.mode)
+  const commandType = decisionCommandType(mutation.mode)
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const receipt = readCalendarReceipt(
+      database,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.id,
+      mutation.command.idempotencyKey,
+    )
+    if (receipt !== undefined) {
+      if (receipt.command_type !== commandType || receipt.request_hash !== requestHash) {
+        database.exec('ROLLBACK')
+        began = false
+        return deliverableIdempotencyConflict()
+      }
+      const replay = readAcceptanceDecisionByCommand(database, receipt.command_id)
+      if (replay === null) throw new Error('Workbench acceptance decision receipt lost its row')
+      const result = acceptanceDecisionSuccess(
+        database,
+        replay,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        deliverableReceipt(receipt),
+      )
+      database.exec('COMMIT')
+      began = false
+      return result
+    }
+    assertValidLedger(database)
+    if (readProjectScopeRow(
+      database,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+      mutation.projectId,
+    ) === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableProjectMissing(mutation.projectId)
+    }
+    const head = readDeliverableHead(database, mutation.projectId)
+    if (head === null) throw new Error('Workbench Deliverable head disappeared')
+    const current = scopedDeliverablesProjection(
+      database,
+      mutation.projectId,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+    )
+    if (head.revision !== mutation.expectedDeliverablesRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverables-revision-conflict', 'Deliverables revision changed', { current })
+    }
+    const deliverable = readDeliverableRow(database, mutation.projectId, mutation.deliverableId)
+    if (deliverable === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-not-found', 'Deliverable was not found', { current })
+    }
+    if (deliverable.revision !== mutation.expectedDeliverableRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-revision-conflict', 'Deliverable revision changed', { current })
+    }
+    if (deliverable.state !== 'in-review') {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-state-conflict', 'Deliverable is not in review', { current })
+    }
+    const request = readAcceptanceRequestRow(
+      database,
+      mutation.projectId,
+      mutation.deliverableId,
+      mutation.acceptanceRequestId,
+    )
+    if (request === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('acceptance-request-not-found', 'Acceptance Request was not found', { current })
+    }
+    if (request.revision !== mutation.expectedAcceptanceRequestRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure(
+        'acceptance-request-revision-conflict',
+        'Acceptance Request revision changed',
+        { current },
+      )
+    }
+    if (request.persisted_state !== 'pending') {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('deliverable-state-conflict', 'Acceptance Request is already closed', { current })
+    }
+    const stale = deliverable.revision !== request.deliverable_revision
+    if (stale && mutation.mode === 'approve') {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('acceptance-request-stale', 'A stale Acceptance Request cannot be approved', {
+        current,
+      })
+    }
+    const plan = decodeDeliverablePlan(request.plan_json, objectValue(
+      parseCanonicalJson(request.plan_json, 'Stored Acceptance Request Plan'),
+      'Stored Acceptance Request Plan',
+    ).digest as string)
+    const criterionIds = plan.criteria.map(criterion => criterion.criterionId)
+    const submitted = new Set(mutation.criteria.map(criterion => criterion.criterionId))
+    if (mutation.criteria.length !== criterionIds.length || submitted.size !== criterionIds.length
+      || criterionIds.some(id => !submitted.has(id))) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure(
+        'criterion-result-incomplete',
+        'Decision must include exactly one result for every Acceptance Criterion',
+        { current },
+      )
+    }
+    if (criterionIds.some((criterionId, index) =>
+      mutation.criteria[index]?.criterionId !== criterionId)) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure(
+        'criterion-result-invalid',
+        'Decision criterion results must follow the immutable Plan order',
+        { current },
+      )
+    }
+    if (mutation.criteria.some(criterion => criterion.outcome !== 'met'
+      && criterion.outcome !== 'not-met')) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('criterion-result-invalid', 'Criterion result is invalid', { current })
+    }
+    if (mutation.mode === 'approve'
+      && mutation.criteria.some(criterion => criterion.outcome !== 'met')) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('approval-criteria-not-met', 'Approval requires every criterion to be met', {
+        current,
+      })
+    }
+    if (mutation.mode === 'request-changes'
+      && mutation.criteria.every(criterion => criterion.outcome === 'met')) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure(
+        'needs-changes-criterion-required',
+        'Request changes requires at least one criterion that is not met',
+        { current },
+      )
+    }
+    const acceptor = plan.responsibility.acceptor
+    const nextDeliverableRevision = incrementRevision(deliverable.revision, 'Deliverable')
+    appendDeliverableLedger(database, {
+      command: mutation.command,
+      requestHash,
+      commandType,
+      auditAction: vocabulary.action,
+      summaryCode: vocabulary.summary,
+      objectType: DELIVERABLE_REQUEST_OBJECT_TYPE,
+      objectId: request.id,
+      objectVersion: 2,
+      projectId: mutation.projectId,
+      changedFields: ['acceptanceDecision', 'deliverableState'],
+      outboxTopic: DELIVERABLE_DECISION_OUTBOX_TOPIC,
+    })
+    const decision = database.prepare(`
+      INSERT INTO workbench_deliverable_acceptance_decision (
+        id, project_id, deliverable_id, acceptance_request_id,
+        request_revision, outcome, actor_kind, actor_id,
+        designated_acceptor_json, criteria_json, feedback, causation_id,
+        command_id, audit_event_id, outbox_id, decided_at
+      ) VALUES (?, ?, ?, ?, 2, ?, 'owner', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      mutation.decisionId,
+      mutation.projectId,
+      mutation.deliverableId,
+      mutation.acceptanceRequestId,
+      vocabulary.state,
+      mutation.command.actor.id,
+      canonicalizeJson(acceptor),
+      canonicalizeJson(mutation.criteria),
+      mutation.feedback,
+      mutation.command.causationId,
+      mutation.command.commandId,
+      mutation.command.auditEventId,
+      mutation.command.outboxId,
+      mutation.decidedAt,
+    )
+    if (decision.changes !== 1) throw new Error('Workbench acceptance decision was not inserted')
+    const requestUpdate = database.prepare(`
+      UPDATE workbench_deliverable_acceptance_request
+      SET revision = 2, persisted_state = ?, decision_id = ?, updated_at = ?
+      WHERE project_id = ? AND deliverable_id = ? AND id = ?
+        AND revision = 1 AND persisted_state = 'pending'
+    `).run(
+      vocabulary.state,
+      mutation.decisionId,
+      mutation.decidedAt,
+      mutation.projectId,
+      mutation.deliverableId,
+      mutation.acceptanceRequestId,
+    )
+    if (requestUpdate.changes !== 1) throw new Error('Workbench Acceptance Request close lost its CAS')
+    const deliverableUpdate = database.prepare(`
+      UPDATE workbench_project_deliverable
+      SET revision = ?, state = ?, updated_at = ?
+      WHERE project_id = ? AND id = ? AND revision = ? AND state = 'in-review'
+    `).run(
+      nextDeliverableRevision,
+      mutation.mode === 'approve' ? 'accepted' : 'planned',
+      mutation.decidedAt,
+      mutation.projectId,
+      mutation.deliverableId,
+      deliverable.revision,
+    )
+    if (deliverableUpdate.changes !== 1) throw new Error('Workbench Deliverable decision lost its CAS')
+    if (mutation.mode === 'approve') {
+      if (mutation.finalReleaseId === null) throw new Error('Workbench approval lacks a Final Release id')
+      const release = database.prepare(`
+        INSERT INTO workbench_deliverable_final_release (
+          id, project_id, deliverable_id, acceptance_request_id,
+          versions_json, versions_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        mutation.finalReleaseId,
+        mutation.projectId,
+        mutation.deliverableId,
+        mutation.acceptanceRequestId,
+        request.candidate_versions_json,
+        request.candidates_digest,
+        mutation.decidedAt,
+      )
+      if (release.changes !== 1) throw new Error('Workbench Final Release was not inserted')
+      const expectedVersionCount = readCandidateVersionRows(
+        database,
+        mutation.acceptanceRequestId,
+      ).length
+      const releaseVersions = database.prepare(`
+        INSERT INTO workbench_deliverable_final_release_version (
+          final_release_id, ordinal, acceptance_request_id,
+          candidate_ordinal, reference_digest
+        ) SELECT ?, ordinal, acceptance_request_id, ordinal, reference_digest
+          FROM workbench_deliverable_candidate_version
+          WHERE acceptance_request_id = ? ORDER BY ordinal
+      `).run(mutation.finalReleaseId, mutation.acceptanceRequestId)
+      if (releaseVersions.changes !== expectedVersionCount) {
+        throw new Error('Workbench Final Release version rows were not copied exactly')
+      }
+    } else if (mutation.finalReleaseId !== null) {
+      throw new Error('Workbench non-approval cannot create a Final Release')
+    }
+    updateDeliverableHead(
+      database,
+      head,
+      incrementRevision(head.revision, 'Deliverables'),
+      mutation.decidedAt,
+    )
+    insertDeliverableActivity(database, {
+      activityId: mutation.activityId,
+      projectId: mutation.projectId,
+      deliverableId: mutation.deliverableId,
+      deliverableRevision: nextDeliverableRevision,
+      action: vocabulary.activity,
+      sourceKind: 'audit-event',
+      sourceId: mutation.command.auditEventId,
+      planSnapshotId: plan.planSnapshotId,
+      acceptanceRequestId: mutation.acceptanceRequestId,
+      decisionId: mutation.decisionId,
+      occurredAt: mutation.decidedAt,
+    })
+    const decisionRow = readAcceptanceDecisionByCommand(database, mutation.command.commandId)
+    if (decisionRow === null) throw new Error('Workbench acceptance decision disappeared')
+    const result = acceptanceDecisionSuccess(
+      database,
+      decisionRow,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+      deliverableReceipt(mutation.command),
+    )
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
   } catch (error: unknown) {
     if (began) rollback(database, error)
     throw error

@@ -562,6 +562,18 @@ function restartScenario(
 
 function dropV8WorkflowSchema(database: DatabaseSync): void {
   database.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TABLE workbench_deliverable_calendar_effect;
+    DROP TABLE workbench_deliverable_activity;
+    DROP TABLE workbench_deliverable_final_release_version;
+    DROP TABLE workbench_deliverable_final_release;
+    DROP TABLE workbench_deliverable_acceptance_decision;
+    DROP TABLE workbench_deliverable_candidate_version;
+    DROP TABLE workbench_deliverable_acceptance_request;
+    DROP TABLE workbench_project_deliverable_member;
+    DROP TABLE workbench_project_deliverable;
+    DROP TABLE workbench_calendar_commitment;
+    DROP TABLE workbench_project_deliverable_head;
     DROP TABLE workbench_feishu_calendar_effect;
     DROP TABLE workbench_feishu_calendar_inbox;
     DROP TABLE workbench_project_schedule_change;
@@ -579,6 +591,7 @@ function dropV8WorkflowSchema(database: DatabaseSync): void {
     DROP TABLE workbench_feishu_task_workflow_version;
     DROP TABLE workbench_feishu_task_workflow;
     PRAGMA user_version = 7;
+    PRAGMA foreign_keys = ON;
   `)
 }
 
@@ -608,7 +621,7 @@ function legacyStatusMutation(): WorkbenchStatusMutation {
 }
 
 describe('T09 workflow reliability', () => {
-  it('migrates an exact Schema v7 database to v9 and survives a second restart', async () => {
+  it('migrates an exact Schema v7 database to v10 and survives a second restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-workbench-t09-v7-'))
     temporaryRoots.push(root)
     const databasePath = join(root, 'workbench.sqlite')
@@ -668,7 +681,9 @@ describe('T09 workflow reliability', () => {
       eventCount: 1,
     })
     expect((Reflect.get(restarted, 'database') as DatabaseSync)
-      .prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
+      .prepare('PRAGMA user_version').get()).toEqual({
+        user_version: WORKBENCH_SCHEMA_VERSION,
+      })
     await restarted.close()
   })
 

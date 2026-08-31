@@ -72,6 +72,11 @@ export interface AuditCommandReference {
     | 'workbench.project-calendar.bind'
     | 'workbench.project-milestone.create'
     | 'workbench.project-milestone.date-update'
+    | 'workbench.project-deliverable.create'
+    | 'workbench.deliverable-acceptance.request'
+    | 'workbench.deliverable-acceptance.approve'
+    | 'workbench.deliverable-acceptance.reject'
+    | 'workbench.deliverable-acceptance.needs-changes'
 }
 
 export interface AuditCausationReference {
@@ -443,7 +448,12 @@ function normalizeReason(value: unknown): AuditReason {
     && record.code !== 'owner-feishu-task-workflow-configure'
     && record.code !== 'owner-project-calendar-bind'
     && record.code !== 'owner-project-milestone-create'
-    && record.code !== 'owner-project-milestone-date-update') {
+    && record.code !== 'owner-project-milestone-date-update'
+    && record.code !== 'owner-project-deliverable-create'
+    && record.code !== 'owner-deliverable-acceptance-request'
+    && record.code !== 'owner-deliverable-acceptance-approve'
+    && record.code !== 'owner-deliverable-acceptance-reject'
+    && record.code !== 'owner-deliverable-acceptance-needs-changes') {
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -547,7 +557,12 @@ function auditAction(value: unknown): WorkbenchAuditAction {
     && value !== 'workbench.feishu-task-workflow.configured'
     && value !== 'workbench.project-calendar.bound'
     && value !== 'workbench.project-milestone.created'
-    && value !== 'workbench.project-milestone.date-update-requested') {
+    && value !== 'workbench.project-milestone.date-update-requested'
+    && value !== 'workbench.project-deliverable.created'
+    && value !== 'workbench.deliverable-acceptance.requested'
+    && value !== 'workbench.deliverable-acceptance.approved'
+    && value !== 'workbench.deliverable-acceptance.rejected'
+    && value !== 'workbench.deliverable-acceptance.needs-changes') {
     throw new TypeError('Audit action is unsupported')
   }
   return value
@@ -564,7 +579,9 @@ function auditObjectType(value: unknown): WorkbenchAuditObjectType {
     && value !== 'feishu-task'
     && value !== 'feishu-task-workflow'
     && value !== 'project-calendar-binding'
-    && value !== 'project-milestone') {
+    && value !== 'project-milestone'
+    && value !== 'project-deliverable'
+    && value !== 'deliverable-acceptance-request') {
     throw new TypeError('Audit object type is unsupported')
   }
   return value
@@ -591,7 +608,12 @@ function auditCommandType(value: unknown): AuditCommandReference['type'] {
     && value !== 'workbench.feishu-task-workflow.configure'
     && value !== 'workbench.project-calendar.bind'
     && value !== 'workbench.project-milestone.create'
-    && value !== 'workbench.project-milestone.date-update') {
+    && value !== 'workbench.project-milestone.date-update'
+    && value !== 'workbench.project-deliverable.create'
+    && value !== 'workbench.deliverable-acceptance.request'
+    && value !== 'workbench.deliverable-acceptance.approve'
+    && value !== 'workbench.deliverable-acceptance.reject'
+    && value !== 'workbench.deliverable-acceptance.needs-changes') {
     throw new TypeError('Audit command type is unsupported')
   }
   return value
@@ -620,7 +642,12 @@ function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
     && value !== 'feishu-task-workflow-configured'
     && value !== 'project-calendar-bound'
     && value !== 'project-milestone-created'
-    && value !== 'project-milestone-date-update-requested') {
+    && value !== 'project-milestone-date-update-requested'
+    && value !== 'project-deliverable-created'
+    && value !== 'deliverable-acceptance-requested'
+    && value !== 'deliverable-acceptance-approved'
+    && value !== 'deliverable-acceptance-rejected'
+    && value !== 'deliverable-acceptance-needs-changes') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -796,6 +823,41 @@ function assertCorrelatedVocabulary(
           && command.type === 'workbench.project-milestone.date-update'
           && summary.code === 'project-milestone-date-update-requested'
           && exactChangedFields(summary, ['schedule', 'effectState'])
+          && scope.projectId !== null
+      case 'workbench.project-deliverable.created':
+        return reason.code === 'owner-project-deliverable-create'
+          && object.type === 'project-deliverable'
+          && command.type === 'workbench.project-deliverable.create'
+          && summary.code === 'project-deliverable-created'
+          && exactChangedFields(summary, ['plan', 'calendarCommitment'])
+          && scope.projectId !== null
+      case 'workbench.deliverable-acceptance.requested':
+        return reason.code === 'owner-deliverable-acceptance-request'
+          && object.type === 'deliverable-acceptance-request'
+          && command.type === 'workbench.deliverable-acceptance.request'
+          && summary.code === 'deliverable-acceptance-requested'
+          && exactChangedFields(summary, ['acceptanceRequest', 'deliverableState'])
+          && scope.projectId !== null
+      case 'workbench.deliverable-acceptance.approved':
+        return reason.code === 'owner-deliverable-acceptance-approve'
+          && object.type === 'deliverable-acceptance-request'
+          && command.type === 'workbench.deliverable-acceptance.approve'
+          && summary.code === 'deliverable-acceptance-approved'
+          && exactChangedFields(summary, ['acceptanceDecision', 'deliverableState'])
+          && scope.projectId !== null
+      case 'workbench.deliverable-acceptance.rejected':
+        return reason.code === 'owner-deliverable-acceptance-reject'
+          && object.type === 'deliverable-acceptance-request'
+          && command.type === 'workbench.deliverable-acceptance.reject'
+          && summary.code === 'deliverable-acceptance-rejected'
+          && exactChangedFields(summary, ['acceptanceDecision', 'deliverableState'])
+          && scope.projectId !== null
+      case 'workbench.deliverable-acceptance.needs-changes':
+        return reason.code === 'owner-deliverable-acceptance-needs-changes'
+          && object.type === 'deliverable-acceptance-request'
+          && command.type === 'workbench.deliverable-acceptance.needs-changes'
+          && summary.code === 'deliverable-acceptance-needs-changes'
+          && exactChangedFields(summary, ['acceptanceDecision', 'deliverableState'])
           && scope.projectId !== null
     }
   })()

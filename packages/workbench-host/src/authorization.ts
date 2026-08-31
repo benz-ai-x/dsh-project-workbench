@@ -31,6 +31,10 @@ export type WorkbenchAction =
   | 'workbench.project.calendar.bind'
   | 'workbench.project.calendar.reconcile'
   | 'workbench.project.milestone.write'
+  | 'workbench.project.deliverable.read'
+  | 'workbench.project.deliverable.activity.read'
+  | 'workbench.project.deliverable.write'
+  | 'workbench.project.deliverable.accept'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {
