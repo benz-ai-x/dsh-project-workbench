@@ -68,6 +68,25 @@ const WORKBENCH_CREATE_PROJECT_MILESTONE_PATH = '/api/workbench/createProjectMil
 const WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH
   = '/api/workbench/updateProjectMilestoneDate'
 const WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH = '/api/workbench/reconcileProjectCalendar'
+const PROJECT_MILESTONE_OPERATION_PATHS = Object.freeze([
+  WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH,
+  WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
+  WORKBENCH_DISCOVER_FEISHU_CALENDAR_EVENTS_PATH,
+  WORKBENCH_CREATE_PROJECT_MILESTONE_PATH,
+  WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH,
+  WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH,
+])
+const WORKBENCH_CLIENT_STYLE_IDS = Object.freeze([
+  'ActivityPanel.module.css',
+  'FeishuConnectionPanel.module.css',
+  'OwnerPage.module.css',
+  'ProjectMilestonesPanel.module.css',
+  'ProjectTasksPanel.module.css',
+  'ProjectTeamPanel.module.css',
+  'ProjectsPanel.module.css',
+  'ReviewCenterPanel.module.css',
+  'WorkbenchStatusPage.module.css',
+].map(name => `${CLIENT_PACKAGE_ID}/${name}`))
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -558,6 +577,33 @@ function countRequestsToPath(journey, path) {
   return journey.requests.filter(value => new URL(value).pathname === path).length
 }
 
+function projectMilestoneRemoteCounts(journey) {
+  return Object.freeze({
+    read: countRequestsToPath(journey, WORKBENCH_GET_PROJECT_MILESTONES_PATH),
+    operations: Object.freeze(Object.fromEntries(PROJECT_MILESTONE_OPERATION_PATHS.map(path => [
+      path,
+      countRequestsToPath(journey, path),
+    ]))),
+  })
+}
+
+function emptyProjectMilestoneRemoteCounts() {
+  return Object.freeze({
+    read: 0,
+    operations: Object.freeze(Object.fromEntries(
+      PROJECT_MILESTONE_OPERATION_PATHS.map(path => [path, 0]),
+    )),
+  })
+}
+
+function assertProjectMilestoneRemotesSilent(journey, expected, label) {
+  assert.deepEqual(
+    projectMilestoneRemoteCounts(journey),
+    expected,
+    `${label}: Project Milestones read or mutation/discovery Remote ran before Project reopen`,
+  )
+}
+
 async function assertSecretsAbsentFromBrowserStorage(page, secrets) {
   const surfaces = await page.evaluate(() => ({
     href: location.href,
@@ -579,6 +625,19 @@ async function assertNoHorizontalOverflow(page, label) {
   assert.ok(
     Math.max(dimensions.body, dimensions.document) <= dimensions.viewport + 1,
     `${label}: page has horizontal overflow (body=${String(dimensions.body)}, document=${String(dimensions.document)}, viewport=${String(dimensions.viewport)})`,
+  )
+}
+
+async function assertNoInternalHorizontalOverflow(locator, label) {
+  await locator.waitFor({ state: 'visible' })
+  const dimensions = await locator.evaluate(element => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }))
+  assert.ok(dimensions.clientWidth > 0, `${label}: rendered container has no width`)
+  assert.ok(
+    dimensions.scrollWidth <= dimensions.clientWidth + 1,
+    `${label}: container has horizontal overflow (scroll=${String(dimensions.scrollWidth)}, client=${String(dimensions.clientWidth)})`,
   )
 }
 
@@ -685,7 +744,7 @@ async function assertProjectDetail(page, expected) {
   return detail
 }
 
-async function reopenProject(page, expected) {
+async function reopenProject(page, expected, options = {}) {
   const catalog = await assertProjectCatalog(page, expected.projectName)
   await catalog.card.getByRole('button', { name: '打开 Project', exact: true }).click()
   const detail = await assertProjectDetail(page, {
@@ -693,7 +752,9 @@ async function reopenProject(page, expected) {
     definitionDigest: catalog.definitionDigest,
   })
   await assertProjectTasksUnbound(page, expected.projectName)
-  await assertProjectMilestonesUnbound(page, expected.projectName)
+  if (options.skipMilestones !== true) {
+    await assertProjectMilestonesUnbound(page, expected.projectName)
+  }
   return detail
 }
 
@@ -738,6 +799,131 @@ async function assertProjectMilestonesUnbound(page, projectName) {
     true,
     'Project Milestones allowed discovery without a verified explicit Feishu route',
   )
+  return panel
+}
+
+function mobileProjectMilestonesProjection(projectId) {
+  return Object.freeze({
+    projectId,
+    revision: 4,
+    binding: Object.freeze({
+      calendarId: 'calendar-mobile-evidence',
+      summary: '移动端证据日历',
+      calendarType: 'shared',
+      role: 'owner',
+      identity: Object.freeze({
+        kind: 'bot',
+        routeGeneration: 4,
+        appId: 'cli_mobile_evidence',
+        openId: 'ou-mobile-evidence',
+        tenantKey: 'tenant-mobile-evidence',
+      }),
+      createdByWorkbench: true,
+      revision: 1,
+      boundAt: '2026-08-31T11:00:00.000Z',
+    }),
+    milestones: Object.freeze([Object.freeze({
+      milestoneId: 'milestone-mobile-evidence',
+      name: 'Research sign-off',
+      description: 'Confirm the source-backed recommendation.',
+      eventId: 'event-mobile-evidence',
+      eventAppLink: 'https://applink.feishu.cn/client/calendar/event/detail?eventId=event-mobile-evidence',
+      schedule: Object.freeze({
+        kind: 'all-day',
+        startDate: '2026-09-10',
+        endDate: '2026-09-11',
+      }),
+      remoteStatus: 'confirmed',
+      remoteObservationVersion: `sha256:${'1'.repeat(64)}`,
+      syncState: 'attention',
+      revision: 2,
+      createdAt: '2026-08-31T12:00:00.000Z',
+      updatedAt: '2026-08-31T12:05:00.000Z',
+      lastObservedAt: '2026-08-31T12:05:00.000Z',
+    })]),
+    sync: Object.freeze({
+      state: 'attention',
+      lastEventAt: '2026-08-31T12:04:00.000Z',
+      lastReconciledAt: '2026-08-31T12:05:00.000Z',
+      lastAttemptAt: '2026-08-31T12:05:00.000Z',
+      issue: null,
+    }),
+    effects: Object.freeze([Object.freeze({
+      effectId: 'effect-mobile-evidence',
+      operation: 'event-date-update',
+      milestoneId: 'milestone-mobile-evidence',
+      state: 'unknown',
+      createdAt: '2026-08-31T12:03:00.000Z',
+      updatedAt: '2026-08-31T12:04:00.000Z',
+    })]),
+    recentChanges: Object.freeze([Object.freeze({
+      changeId: 'change-mobile-evidence',
+      projectRevision: 4,
+      milestoneId: 'milestone-mobile-evidence',
+      milestoneRevision: 2,
+      source: 'feishu',
+      changedFields: Object.freeze(['schedule', 'remote-status']),
+      beforeSchedule: Object.freeze({
+        kind: 'all-day',
+        startDate: '2026-09-07',
+        endDate: '2026-09-08',
+      }),
+      afterSchedule: Object.freeze({
+        kind: 'all-day',
+        startDate: '2026-09-10',
+        endDate: '2026-09-11',
+      }),
+      occurredAt: '2026-08-31T12:04:00.000Z',
+    })]),
+  })
+}
+
+async function withProjectMilestonesProjection(page, projection, work) {
+  const pattern = `**${WORKBENCH_GET_PROJECT_MILESTONES_PATH}`
+  const handler = async route => {
+    const envelope = route.request().postDataJSON()
+    assert.equal(envelope?.type, 'client-request')
+    assert.equal(envelope?.method, 'workbench/getProjectMilestones')
+    assert.equal(envelope?.payload?.args?.query?.projectId, projection.projectId)
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { 'cache-control': 'no-store' },
+      body: JSON.stringify({
+        type: 'server-response',
+        rpcId: envelope.rpcId,
+        result: { ok: true, value: projection },
+      }),
+    })
+  }
+  await page.route(pattern, handler)
+  try {
+    await work()
+  } finally {
+    await page.unroute(pattern, handler)
+  }
+}
+
+async function assertProjectMilestonesBound(page) {
+  const panel = projectMilestonesPanel(page)
+  await panel.getByRole('heading', { name: 'Project Milestones', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: '移动端证据日历', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('button', { name: '立即对账日历', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: '创建 Milestone', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: 'Research sign-off', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('link', {
+    name: '在飞书日历中打开 Research sign-off （飞书日历）',
+    exact: true,
+  }).waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: '日历写入需要关注', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: '最近日程变化', exact: true })
+    .waitFor({ state: 'visible' })
   return panel
 }
 
@@ -1388,10 +1574,14 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   assert.equal(originalSource.includes(cssMarker), false)
   const insertion = cssAt + cssPrefix.length
   const changed = originalSource.slice(0, insertion) + cssMarker + originalSource.slice(insertion)
-  const initialStyleCount = await page.locator(
+  const initialStyleIds = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
-  ).count()
-  assert.equal(initialStyleCount, 8, 'Workbench Client did not own exactly eight CSS Module resources')
+  ).evaluateAll(styles => styles.map(style => style.dataset.pluginCss).sort())
+  assert.deepEqual(
+    initialStyleIds,
+    WORKBENCH_CLIENT_STYLE_IDS,
+    'Workbench Client did not own the exact nine CSS Module resources',
+  )
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -1413,10 +1603,10 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const styleEvidence = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).evaluateAll((styles, marker) => ({
-    count: styles.length,
+    ids: styles.map(style => style.dataset.pluginCss).sort(),
     marked: styles.filter(style => style.textContent?.includes(marker) === true).length,
   }), cssMarker)
-  assert.deepEqual(styleEvidence, { count: initialStyleCount, marked: 1 })
+  assert.deepEqual(styleEvidence, { ids: WORKBENCH_CLIENT_STYLE_IDS, marked: 1 })
   assert.ok(journey.requests.slice(requestFence).some(url =>
     decodeURIComponent(url).includes('@benz-ai-x/dsh-project-workbench-client/client.js')),
   'browser did not request the rebuilt Workbench Client bundle')
@@ -2503,6 +2693,7 @@ async function main() {
   }
 
   const reviewRequestsBeforeHmr = countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH)
+  const milestoneRequestsBeforeHmr = projectMilestoneRemoteCounts(firstJourney)
   await exerciseClientHmr(
     firstJourney,
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
@@ -2512,6 +2703,11 @@ async function main() {
     countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH),
     reviewRequestsBeforeHmr,
     'Client HMR queried Review without a selected Project',
+  )
+  assertProjectMilestoneRemotesSilent(
+    firstJourney,
+    milestoneRequestsBeforeHmr,
+    'Client HMR',
   )
   await reopenProject(firstJourney.page, {
     projectName,
@@ -2548,80 +2744,155 @@ async function main() {
   })
   await sessionBar.waitFor({ state: 'visible' })
   await captureVisual(firstJourney.page, '06-authenticated-desktop')
-  await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
-    await sessionBar.waitFor({ state: 'visible' })
-    await firstJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
-    await reopenProject(firstJourney.page, {
-      projectName,
-      primaryGoalName,
-      outcomeName,
-      metricName,
-    })
-    const mobileTeam = await assertProjectTeam(firstJourney.page, expectedTeam)
-    const mobileReview = await assertRecoveredReview(firstJourney.page)
-    const mobileMilestones = await assertProjectMilestonesUnbound(firstJourney.page, projectName)
-    await applyReviewFilters(mobileReview, '待处理', '全部风险', [finalPending.heading])
-    const mobileAddDisclosure = mobileTeam.locator('details').filter({
-      hasText: '添加 ProjectMember',
-    })
-    await mobileAddDisclosure.locator('summary').click()
-    await assertWithinViewport(sessionBar, firstJourney.page, 'mobile Owner session bar')
-    await assertWithinViewport(firstJourney.page.locator('#workbench-status-editor'), firstJourney.page, 'mobile status editor')
-    await assertWithinViewport(
-      firstJourney.page.getByLabel('Project 名称', { exact: true }),
-      firstJourney.page,
-      'mobile Project name editor',
-    )
-    await assertWithinViewport(
-      mobileAddDisclosure.getByLabel('显示名称', { exact: true }),
-      firstJourney.page,
-      'mobile Project member name editor',
-    )
-    await assertWithinViewport(
-      mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
-      firstJourney.page,
-      'mobile Accountable selector',
-    )
-    await assertVisibleKeyboardFocus(
-      mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
-      'mobile Accountable selector',
-    )
-    await assertWithinViewport(
-      reviewFilterSelect(mobileReview, 0),
-      firstJourney.page,
-      'mobile Review status filter',
-    )
-    await assertWithinViewport(
-      mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
-      firstJourney.page,
-      'mobile Review proposal Accountable',
-    )
-    await assertWithinViewport(
-      mobileMilestones.getByRole('button', { name: '读取可访问日历', exact: true }),
-      firstJourney.page,
-      'mobile Project calendar discovery',
-    )
-    await assertVisibleKeyboardFocus(
-      reviewFilterSelect(mobileReview, 0),
-      'mobile Review status filter',
-    )
-    await assertVisibleKeyboardFocus(
-      mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
-      'mobile Review proposal Accountable',
-    )
-    await assertNoHorizontalOverflow(firstJourney.page, 'authenticated mobile Project Milestones')
-    const layout = await firstJourney.page.evaluate(() => {
-      const session = document.querySelector('header[aria-label]')
-      const status = document.querySelector('main[data-workbench-phase]')
-      return {
-        sessionHeight: session?.getBoundingClientRect().height ?? 0,
-        statusHeight: status?.getBoundingClientRect().height ?? 0,
-      }
-    })
-    assert.ok(layout.sessionHeight > 0 && layout.sessionHeight < MOBILE_VIEWPORT.height / 2)
-    assert.ok(layout.statusHeight > 0, 'mobile session bar squeezed out the status surface')
-    await captureVisual(firstJourney.page, '07-authenticated-mobile-375')
-  })
+  await withProjectMilestonesProjection(
+    firstJourney.page,
+    mobileProjectMilestonesProjection(projectId),
+    async () => {
+      await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
+        await sessionBar.waitFor({ state: 'visible' })
+        await firstJourney.page.locator('main[data-workbench-phase="value"]')
+          .waitFor({ state: 'visible' })
+        await reopenProject(firstJourney.page, {
+          projectName,
+          primaryGoalName,
+          outcomeName,
+          metricName,
+        }, { skipMilestones: true })
+        const mobileTeam = await assertProjectTeam(firstJourney.page, expectedTeam)
+        const mobileReview = await assertRecoveredReview(firstJourney.page)
+        const mobileMilestones = await assertProjectMilestonesBound(firstJourney.page)
+        const mobileCreateSection = mobileMilestones.locator(
+          'section[aria-labelledby="workbench-milestone-create-title"]',
+        )
+        const mobileMilestoneCard = mobileMilestones.locator(
+          'article[aria-label="Research sign-off"]',
+        )
+        const mobileChanges = mobileMilestones.locator(
+          'section[aria-labelledby="workbench-schedule-changes-title"]',
+        )
+        await mobileCreateSection.getByRole('radio', {
+          name: '创建新的飞书事件',
+          exact: true,
+        }).check()
+        const mobileCreateSchedule = mobileCreateSection.getByRole('group', {
+          name: '权威日期意图',
+          exact: true,
+        })
+        await mobileCreateSchedule.getByRole('radio', { name: '定时日程', exact: true }).check()
+        await mobileCreateSchedule.getByLabel('IANA 时区', { exact: true })
+          .waitFor({ state: 'visible' })
+        await mobileMilestoneCard.locator('details summary').click()
+        const mobileEditorSchedule = mobileMilestoneCard.getByRole('group', {
+          name: '权威日期意图',
+          exact: true,
+        })
+        await mobileEditorSchedule.getByLabel('开始日期', { exact: true })
+          .waitFor({ state: 'visible' })
+        await applyReviewFilters(mobileReview, '待处理', '全部风险', [finalPending.heading])
+        const mobileAddDisclosure = mobileTeam.locator('details').filter({
+          hasText: '添加 ProjectMember',
+        })
+        await mobileAddDisclosure.locator('summary').click()
+        await assertWithinViewport(sessionBar, firstJourney.page, 'mobile Owner session bar')
+        await assertWithinViewport(
+          firstJourney.page.locator('#workbench-status-editor'),
+          firstJourney.page,
+          'mobile status editor',
+        )
+        await assertWithinViewport(
+          firstJourney.page.getByLabel('Project 名称', { exact: true }),
+          firstJourney.page,
+          'mobile Project name editor',
+        )
+        await assertWithinViewport(
+          mobileAddDisclosure.getByLabel('显示名称', { exact: true }),
+          firstJourney.page,
+          'mobile Project member name editor',
+        )
+        await assertWithinViewport(
+          mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
+          firstJourney.page,
+          'mobile Accountable selector',
+        )
+        await assertVisibleKeyboardFocus(
+          mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
+          'mobile Accountable selector',
+        )
+        await assertWithinViewport(
+          reviewFilterSelect(mobileReview, 0),
+          firstJourney.page,
+          'mobile Review status filter',
+        )
+        await assertWithinViewport(
+          mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
+          firstJourney.page,
+          'mobile Review proposal Accountable',
+        )
+        await assertWithinViewport(
+          mobileCreateSection.getByRole('button', { name: '读取现有事件', exact: true }),
+          firstJourney.page,
+          'mobile Project event discovery',
+        )
+        await assertWithinViewport(
+          mobileCreateSchedule.getByLabel('IANA 时区', { exact: true }),
+          firstJourney.page,
+          'mobile Project Milestone timezone',
+        )
+        await assertWithinViewport(
+          mobileMilestoneCard.getByRole('link', {
+            name: '在飞书日历中打开 Research sign-off （飞书日历）',
+            exact: true,
+          }),
+          firstJourney.page,
+          'mobile Feishu Calendar deep link',
+        )
+        await assertVisibleKeyboardFocus(
+          reviewFilterSelect(mobileReview, 0),
+          'mobile Review status filter',
+        )
+        await assertVisibleKeyboardFocus(
+          mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
+          'mobile Review proposal Accountable',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileMilestones,
+          'mobile Project Milestones panel',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileCreateSection,
+          'mobile Project Milestone create section',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileCreateSchedule,
+          'mobile timed Project Milestone fields',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileMilestoneCard,
+          'mobile Project Milestone card',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileEditorSchedule,
+          'mobile all-day Project Milestone editor',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileChanges,
+          'mobile Project Milestone recent changes',
+        )
+        await assertNoHorizontalOverflow(firstJourney.page, 'authenticated mobile Project Milestones')
+        const layout = await firstJourney.page.evaluate(() => {
+          const session = document.querySelector('header[aria-label]')
+          const status = document.querySelector('main[data-workbench-phase]')
+          return {
+            sessionHeight: session?.getBoundingClientRect().height ?? 0,
+            statusHeight: status?.getBoundingClientRect().height ?? 0,
+          }
+        })
+        assert.ok(layout.sessionHeight > 0 && layout.sessionHeight < MOBILE_VIEWPORT.height / 2)
+        assert.ok(layout.statusHeight > 0, 'mobile session bar squeezed out the status surface')
+        await captureVisual(firstJourney.page, '07-authenticated-mobile-375')
+      })
+    },
+  )
   await firstJourney.page.setViewportSize(DESKTOP_VIEWPORT)
   await assertNoBrowserErrors(firstJourney, [expectedHttpError])
 
@@ -2770,6 +3041,11 @@ async function main() {
     0,
     'a restarted Host queried Review before the Owner selected a Project',
   )
+  assertProjectMilestoneRemotesSilent(
+    secondJourney,
+    emptyProjectMilestoneRemoteCounts(),
+    'restarted Host before Project reopen',
+  )
   await reopenProject(secondJourney.page, {
     projectName,
     primaryGoalName,
@@ -2904,6 +3180,11 @@ async function main() {
     countRequestsToPath(postRecoveryJourney, WORKBENCH_REVIEW_CENTER_PATH),
     0,
     'post-recovery Client queried Review before selecting a Project',
+  )
+  assertProjectMilestoneRemotesSilent(
+    postRecoveryJourney,
+    emptyProjectMilestoneRemoteCounts(),
+    'credential-recovered Client before Project reopen',
   )
   await reopenProject(postRecoveryJourney.page, {
     projectName,

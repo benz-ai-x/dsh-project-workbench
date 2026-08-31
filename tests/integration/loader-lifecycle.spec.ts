@@ -39,6 +39,13 @@ const authDependenciesFixtureEntry = resolve(
   repositoryRoot,
   'tests/integration/fixtures/owner-auth-dependencies-fixture.mjs',
 )
+const calendarHostFixtureEntry = resolve(
+  repositoryRoot,
+  'tests/integration/fixtures/workbench-calendar-host-fixture.mjs',
+)
+const CALENDAR_LOADER_APP_ID = 'cli_calendar_loader'
+const CALENDAR_LOADER_CALENDAR_ID = 'calendar-loader-evidence'
+const CALENDAR_LOADER_EVENT_ID = 'event-loader-evidence'
 const temporaryRoots: string[] = []
 const contexts: Context[] = []
 const servers: Server[] = []
@@ -123,7 +130,12 @@ async function fixture(): Promise<{
   }
 }
 
-function config(entry: string, databasePath: string, maxStatusLength = 280): string {
+function config(
+  entry: string,
+  databasePath: string,
+  maxStatusLength = 280,
+  calendarReconciliationIntervalMs?: number,
+): string {
   return [
     '- id: owner-auth-dependencies-fixture',
     `  name: ${JSON.stringify(authDependenciesFixtureEntry)}`,
@@ -136,6 +148,9 @@ function config(entry: string, databasePath: string, maxStatusLength = 280): str
     '    journalMode: wal',
     '    busyTimeoutMs: 500',
     `    maxStatusLength: ${String(maxStatusLength)}`,
+    ...calendarReconciliationIntervalMs === undefined
+      ? []
+      : [`    calendarReconciliationIntervalMs: ${String(calendarReconciliationIntervalMs)}`],
     '',
   ].join('\n')
 }
@@ -915,6 +930,170 @@ describe('built Workbench Host through the real DSH Loader', () => {
     await restarted.fiber.dispose()
     contexts.splice(contexts.indexOf(restarted), 1)
     expect(restarted.get('workbench')).toBeUndefined()
+  })
+
+  it('recovers a non-empty Calendar binding and Milestone through a real Loader restart', async () => {
+    expect(existsSync(hostEntry)).toBe(true)
+    expect(existsSync(calendarHostFixtureEntry)).toBe(true)
+    const test = await fixture()
+    await writeFile(
+      test.configPath,
+      config(calendarHostFixtureEntry, test.databasePath, 280, 0),
+    )
+
+    const first = await load(test.configPath)
+    const start = await first.workbenchAuth.run(() => first.workbench.projectStart(
+      { limit: 10 },
+      new AbortController().signal,
+    ))
+    const created = await first.workbenchAuth.run(() => first.workbench.createProject({
+      template: start.template.selection,
+      projectName: 'Loader Calendar Project',
+      primaryGoal: {
+        name: 'Preserve calendar authority through restart',
+        outcomes: [{
+          name: 'Recover one committed Milestone',
+          metric: {
+            metricName: 'Recovered Milestones',
+            initialValue: 0,
+            targetValue: 1,
+            unit: 'milestones',
+            direction: 'increase',
+          },
+        }],
+      },
+      supportingGoals: [],
+      expectedCatalogRevision: start.catalogRevision,
+      expectedRevision: null,
+      idempotencyKey: 'loader-calendar-project-key-0001',
+      causationId: 'loader-calendar-project-cause-0001',
+      reason: 'owner-project-create',
+    }, new AbortController().signal))
+    expect(created.ok).toBe(true)
+    if (!created.ok) throw new Error('expected Loader Calendar Project creation to succeed')
+    const projectId = created.value.project.projectId
+
+    const configured = await first.workbenchAuth.run(() =>
+      first.workbench.configureFeishuIdentityRoute({
+        kind: 'bot',
+        mode: 'set',
+        appId: CALENDAR_LOADER_APP_ID,
+        credentialRef: 'FEISHU_CALENDAR_LOADER_SECRET',
+        expectedConnectionRevision: 0,
+        expectedRouteGeneration: null,
+        idempotencyKey: 'loader-calendar-configure-key-0001',
+        causationId: 'loader-calendar-configure-cause-0001',
+        reason: 'owner-feishu-route-configure',
+      }, new AbortController().signal))
+    expect(configured).toMatchObject({
+      ok: true,
+      value: { connectionRevision: 1, routeGeneration: 1 },
+    })
+    if (!configured.ok) throw new Error('expected Loader Calendar route configuration to succeed')
+
+    const verified = await first.workbenchAuth.run(() =>
+      first.workbench.verifyFeishuIdentityRoute({
+        kind: 'bot',
+        expectedConnectionRevision: configured.value.connectionRevision,
+        expectedRouteGeneration: configured.value.routeGeneration,
+        idempotencyKey: 'loader-calendar-verify-key-0001',
+        causationId: 'loader-calendar-verify-cause-0001',
+        reason: 'owner-feishu-route-verify',
+      }, new AbortController().signal))
+    expect(verified).toMatchObject({
+      ok: true,
+      value: { connectionRevision: 2, routeGeneration: 1, result: 'healthy' },
+    })
+    if (!verified.ok) throw new Error('expected Loader Calendar route verification to succeed')
+
+    await expect(first.workbenchAuth.run(() => first.workbench.discoverFeishuCalendars({
+      projectId,
+      kind: 'bot',
+      expectedConnectionRevision: verified.value.connectionRevision,
+      expectedRouteGeneration: verified.value.routeGeneration,
+    }, new AbortController().signal))).resolves.toMatchObject({
+      projectId,
+      items: [{ calendarId: CALENDAR_LOADER_CALENDAR_ID, selectable: true }],
+    })
+
+    const bound = await first.workbenchAuth.run(() => first.workbench.bindProjectCalendar({
+      projectId,
+      kind: 'bot',
+      mode: 'existing',
+      calendarId: CALENDAR_LOADER_CALENDAR_ID,
+      expectedConnectionRevision: verified.value.connectionRevision,
+      expectedRouteGeneration: verified.value.routeGeneration,
+      expectedBindingRevision: null,
+      idempotencyKey: 'loader-calendar-bind-key-0001',
+      causationId: 'loader-calendar-bind-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, new AbortController().signal))
+    expect(bound).toMatchObject({
+      ok: true,
+      value: { revision: 1, binding: { calendarId: CALENDAR_LOADER_CALENDAR_ID } },
+    })
+    if (!bound.ok) throw new Error('expected Loader Calendar binding to succeed')
+
+    await expect(first.workbenchAuth.run(() => first.workbench.discoverFeishuCalendarEvents({
+      projectId,
+      expectedRevision: bound.value.revision,
+    }, new AbortController().signal))).resolves.toMatchObject({
+      projectId,
+      calendarId: CALENDAR_LOADER_CALENDAR_ID,
+      items: [{ eventId: CALENDAR_LOADER_EVENT_ID, selectable: true }],
+    })
+
+    const milestone = await first.workbenchAuth.run(() => first.workbench.createProjectMilestone({
+      projectId,
+      mode: 'existing-event',
+      eventId: CALENDAR_LOADER_EVENT_ID,
+      expectedRevision: bound.value.revision,
+      expectedMilestoneRevision: null,
+      name: 'Loader restart checkpoint',
+      description: 'Durable Calendar and Milestone evidence',
+      idempotencyKey: 'loader-calendar-milestone-key-0001',
+      causationId: 'loader-calendar-milestone-cause-0001',
+      reason: 'owner-project-milestone-create',
+    }, new AbortController().signal))
+    expect(milestone).toMatchObject({
+      ok: true,
+      value: {
+        revision: 2,
+        binding: { calendarId: CALENDAR_LOADER_CALENDAR_ID },
+        milestones: [{
+          name: 'Loader restart checkpoint',
+          eventId: CALENDAR_LOADER_EVENT_ID,
+        }],
+        recentChanges: [{ source: 'workbench', beforeSchedule: null }],
+      },
+    })
+    if (!milestone.ok) throw new Error('expected Loader Milestone creation to succeed')
+    const durableProjection: ProjectMilestonesProjection = milestone.value
+
+    const firstService = first.workbench
+    await first.fiber.dispose()
+    contexts.splice(contexts.indexOf(first), 1)
+    expect(first.get('workbench')).toBeUndefined()
+    expect(firstService.scenario.lifecycle).toBe('closed')
+
+    const restarted = await load(test.configPath)
+    const recovered = await restarted.workbenchAuth.run(() =>
+      restarted.workbench.getProjectMilestones(
+        { projectId },
+        new AbortController().signal,
+      ))
+    expect(recovered).toEqual(durableProjection)
+    expect(recovered).toMatchObject({
+      revision: 2,
+      binding: { calendarId: CALENDAR_LOADER_CALENDAR_ID },
+      milestones: [{ eventId: CALENDAR_LOADER_EVENT_ID }],
+    })
+    expect(recovered?.milestones).toHaveLength(1)
+    const restartedService = restarted.workbench
+    await restarted.fiber.dispose()
+    contexts.splice(contexts.indexOf(restarted), 1)
+    expect(restarted.get('workbench')).toBeUndefined()
+    expect(restartedService.scenario.lifecycle).toBe('closed')
   })
 
   it('withdraws and remounts the built Host cleanly through one live Loader entry', async () => {
