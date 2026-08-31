@@ -514,13 +514,16 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
         normalized.calendarId,
         currentInstant(this.now()),
       )
-      return updated.eventId === normalized.eventId
-        && updated.organizerCalendarId === normalized.calendarId
-        && !updated.recurring
-        && !updated.exception
-        && updated.status === 'confirmed'
+      if (updated.eventId !== normalized.eventId
+        || updated.organizerCalendarId !== normalized.calendarId
+        || updated.recurring
+        || updated.exception
+        || updated.status !== 'confirmed') {
+        return writeUnknown(invalidProviderIssue())
+      }
+      return sameCalendarSchedule(updated.schedule, normalized.schedule)
         ? writeOk(updated)
-        : writeUnknown(invalidProviderIssue())
+        : Object.freeze({ state: 'conflict', current: updated })
     } catch {
       return writeUnknown(invalidProviderIssue())
     }
@@ -1929,6 +1932,20 @@ function providerCalendarScheduleBody(
       timezone: schedule.timeZone,
     }),
   })
+}
+
+function sameCalendarSchedule(
+  left: WorkbenchCalendarSchedule,
+  right: WorkbenchCalendarSchedule,
+): boolean {
+  if (left.kind !== right.kind) return false
+  if (left.kind === 'all-day' && right.kind === 'all-day') {
+    return left.startDate === right.startDate && left.endDate === right.endDate
+  }
+  return left.kind === 'timed' && right.kind === 'timed'
+    && left.startAt === right.startAt
+    && left.endAt === right.endAt
+    && left.timeZone === right.timeZone
 }
 
 function checkedWorkflowFieldCreate(input: Readonly<{
