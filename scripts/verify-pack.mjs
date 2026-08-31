@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T08 npm archives without touching publication.
+ * Create and inspect the real T09 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -54,6 +54,7 @@ const packageSpecs = [
       'lib/types/client.d.ts',
       'lib/types/feishu-connection-adapter.d.ts',
       'lib/types/feishu-task-federation.d.ts',
+      'lib/types/feishu-task-workflow.d.ts',
       'lib/types/owner-auth-service.d.ts',
       'lib/types/recovery.d.ts',
       'lib/typert.host.js',
@@ -69,6 +70,7 @@ const packageSpecs = [
       'lib/types/client.d.ts',
       'lib/types/feishu-connection-adapter.d.ts',
       'lib/types/feishu-task-federation.d.ts',
+      'lib/types/feishu-task-workflow.d.ts',
       'lib/types/http-bridge.d.ts',
       'lib/types/index.d.ts',
       'lib/types/owner-access.d.ts',
@@ -88,12 +90,18 @@ const packageSpecs = [
     directory: 'packages/workbench-client',
     name: '@benz-ai-x/dsh-project-workbench-client',
     requiredExports: ['.', './client', './package.json'],
-    requiredFiles: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts'],
+    requiredFiles: [
+      'lib/index.js',
+      'lib/client.js',
+      'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
+      'lib/types/index.d.ts',
+    ],
     expectedDeclarations: [
       'lib/types/client/ActivityPanel.d.ts',
       'lib/types/client/FeishuConnectionPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
+      'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
       'lib/types/client/ProjectTasksPanel.d.ts',
       'lib/types/client/ProjectsPanel.d.ts',
       'lib/types/client/ReviewCenterPanel.d.ts',
