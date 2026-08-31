@@ -229,6 +229,9 @@ function browserFixtureAdapter(credentials) {
 }
 
 export default class WorkbenchBrowserHostService extends WorkbenchService {
+  static inject = WorkbenchService.inject
+  static Config = WorkbenchService.Config
+
   constructor(ctx, config = {}) {
     const adapter = browserFixtureAdapter(ctx.credentials)
     super(ctx, config, {

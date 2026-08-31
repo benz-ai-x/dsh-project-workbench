@@ -23664,11 +23664,15 @@ function commitDeliverableAcceptanceRequest(
     }
     const plan = decodeDeliverablePlan(deliverable.plan_json, deliverable.plan_digest)
     if (!plan.taskGuids.some(taskGuid => tasks.tasks.some(task => task.taskGuid === taskGuid))) {
+      const unavailableTaskGuid = plan.taskGuids[0]
+      if (unavailableTaskGuid === undefined) {
+        throw new Error('Workbench Deliverable Plan lost its required task link')
+      }
       database.exec('ROLLBACK')
       began = false
       return deliverableFailure('task-unavailable', 'No Deliverable task remains visible', {
         current,
-        taskGuid: plan.taskGuids[0],
+        taskGuid: unavailableTaskGuid,
       })
     }
     if (mutation.candidateVersions.length < 1

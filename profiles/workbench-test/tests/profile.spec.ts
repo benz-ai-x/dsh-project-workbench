@@ -186,4 +186,16 @@ describe('Workbench test profile', () => {
       'requestDeliverableAcceptance',
     ]))
   })
+
+  it('keeps the browser-fixture Host Loader contract explicit', async () => {
+    const root = fileURLToPath(new URL('..', import.meta.url))
+    const host = await import(pathToFileURL(resolve(root, 'browser-host.mjs')).href) as {
+      default: { inject?: unknown; Config?: unknown }
+    }
+
+    expect(Object.hasOwn(host.default, 'inject')).toBe(true)
+    expect(Object.hasOwn(host.default, 'Config')).toBe(true)
+    expect(host.default.inject).toEqual(['workbenchAuth', 'credentials'])
+    expect(typeof host.default.Config).toBe('function')
+  })
 })
