@@ -1739,6 +1739,345 @@ export interface FeishuTaskEventResult {
   readonly projectionRevision: number | null
 }
 
+/** Closed formal-date value shared by Milestone commands and projections. */
+export type ProjectCalendarSchedule =
+  | {
+    readonly kind: 'all-day'
+    readonly startDate: string
+    /** Exclusive ISO calendar date. */
+    readonly endDate: string
+  }
+  | {
+    readonly kind: 'timed'
+    readonly startAt: string
+    readonly endAt: string
+    readonly timeZone: string
+  }
+
+export type FeishuCalendarRole =
+  | 'unknown'
+  | 'free_busy_reader'
+  | 'reader'
+  | 'writer'
+  | 'owner'
+export type FeishuCalendarType = 'primary' | 'shared' | 'resource' | 'unknown'
+
+/** One calendar returned only by explicit exact-route discovery. */
+export interface FeishuCalendarCandidateProjection {
+  readonly calendarId: string
+  readonly summary: string
+  readonly description: string | null
+  readonly calendarType: FeishuCalendarType
+  readonly role: FeishuCalendarRole
+  readonly deleted: boolean
+  readonly thirdParty: boolean
+  readonly selectable: boolean
+}
+
+export interface DiscoverFeishuCalendarsRequest {
+  readonly projectId: string
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+}
+
+export interface FeishuCalendarDiscoveryProjection {
+  readonly projectId: string
+  readonly connectionRevision: number
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly items: readonly FeishuCalendarCandidateProjection[]
+}
+
+export interface ProjectCalendarIdentityProjection {
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly appId: string
+  readonly openId: string
+  readonly tenantKey: string | null
+}
+
+export interface ProjectCalendarBindingProjection {
+  readonly calendarId: string
+  readonly summary: string
+  readonly calendarType: 'primary' | 'shared'
+  readonly role: 'writer' | 'owner'
+  readonly identity: ProjectCalendarIdentityProjection
+  readonly createdByWorkbench: boolean
+  readonly revision: number
+  readonly boundAt: string
+}
+
+export type ProjectCalendarSyncState = 'unbound' | 'healthy' | 'attention' | 'unknown'
+
+export interface ProjectCalendarSyncProjection {
+  readonly state: ProjectCalendarSyncState
+  readonly lastEventAt: string | null
+  readonly lastReconciledAt: string | null
+  readonly lastAttemptAt: string | null
+  readonly issue: FeishuConnectionIssue | null
+}
+
+export interface ProjectMilestoneProjection {
+  readonly milestoneId: string
+  readonly name: string
+  readonly description: string | null
+  readonly eventId: string
+  readonly eventAppLink: string
+  readonly schedule: ProjectCalendarSchedule
+  readonly remoteStatus: 'confirmed' | 'cancelled' | 'unknown'
+  /** Workbench digest of an exact provider observation, never provider CAS. */
+  readonly remoteObservationVersion: string
+  readonly syncState: 'healthy' | 'attention' | 'unknown'
+  readonly revision: number
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly lastObservedAt: string
+}
+
+export interface ProjectScheduleChangeProjection {
+  readonly changeId: string
+  readonly projectRevision: number
+  readonly milestoneId: string
+  readonly milestoneRevision: number
+  readonly source: 'workbench' | 'feishu'
+  readonly changedFields: readonly ('schedule' | 'remote-status' | 'event-link')[]
+  readonly beforeSchedule: ProjectCalendarSchedule | null
+  readonly afterSchedule: ProjectCalendarSchedule
+  readonly occurredAt: string
+}
+
+export interface FeishuCalendarMutationEffectProjection {
+  readonly effectId: string
+  readonly operation: 'calendar-create' | 'event-create' | 'event-date-update'
+  readonly milestoneId: string | null
+  readonly state: 'prepared' | 'delivered' | 'unknown' | 'failed' | 'conflict'
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Complete authorized Project Calendar and Milestone projection. */
+export interface ProjectMilestonesProjection {
+  readonly projectId: string
+  readonly revision: number
+  readonly binding: ProjectCalendarBindingProjection | null
+  readonly milestones: readonly ProjectMilestoneProjection[]
+  readonly sync: ProjectCalendarSyncProjection
+  readonly effects: readonly FeishuCalendarMutationEffectProjection[]
+  readonly recentChanges: readonly ProjectScheduleChangeProjection[]
+}
+
+export interface ProjectMilestonesQuery {
+  readonly projectId: string
+}
+
+interface BindProjectCalendarRequestBase {
+  readonly projectId: string
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly expectedBindingRevision: null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-calendar-bind'
+}
+
+export type BindProjectCalendarRequest =
+  | BindProjectCalendarRequestBase & {
+    readonly mode: 'existing'
+    readonly calendarId: string
+    readonly summary?: never
+    readonly description?: never
+  }
+  | BindProjectCalendarRequestBase & {
+    readonly mode: 'create'
+    readonly calendarId?: never
+    readonly summary: string
+    readonly description?: string | null
+  }
+
+export type BindProjectCalendarResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectMilestonesProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code:
+        | 'calendar-already-bound'
+        | 'calendar-already-used'
+        | 'calendar-not-selectable'
+        | 'connection-revision-conflict'
+        | 'route-generation-conflict'
+        | 'route-unconfigured'
+        | 'route-disabled'
+        | 'route-unverified'
+        | 'remote-outcome-unknown'
+        | 'remote-rejected'
+      readonly message: string
+      readonly issue?: FeishuConnectionIssue
+      readonly current?: ProjectMilestonesProjection
+    }
+  }
+
+/** One non-recurring event returned by explicit discovery on the bound calendar. */
+export interface FeishuCalendarEventCandidateProjection {
+  readonly eventId: string
+  readonly summary: string
+  readonly description: string | null
+  readonly schedule: ProjectCalendarSchedule
+  readonly remoteStatus: 'confirmed' | 'cancelled' | 'unknown'
+  readonly recurring: boolean
+  readonly exception: boolean
+  readonly organizerMatchesCalendar: boolean
+  readonly eventAppLink: string
+  readonly remoteObservationVersion: string
+  readonly selectable: boolean
+}
+
+export interface DiscoverFeishuCalendarEventsRequest {
+  readonly projectId: string
+  readonly expectedRevision: number
+}
+
+export interface FeishuCalendarEventDiscoveryProjection {
+  readonly projectId: string
+  readonly revision: number
+  readonly calendarId: string
+  readonly items: readonly FeishuCalendarEventCandidateProjection[]
+}
+
+interface CreateProjectMilestoneRequestBase {
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: null
+  readonly name: string
+  readonly description?: string | null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-milestone-create'
+}
+
+export type CreateProjectMilestoneRequest =
+  | CreateProjectMilestoneRequestBase & {
+    readonly mode: 'existing-event'
+    readonly eventId: string
+    readonly schedule?: never
+  }
+  | CreateProjectMilestoneRequestBase & {
+    readonly mode: 'create-event'
+    readonly eventId?: never
+    readonly schedule: ProjectCalendarSchedule
+  }
+
+export type CreateProjectMilestoneResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectMilestonesProjection
+    readonly milestone: ProjectMilestoneProjection
+    readonly effect: FeishuCalendarMutationEffectProjection | null
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code:
+        | 'calendar-unbound'
+        | 'project-schedule-revision-conflict'
+        | 'event-already-used'
+        | 'event-not-selectable'
+        | 'milestone-limit-reached'
+        | 'remote-outcome-unknown'
+        | 'remote-rejected'
+      readonly message: string
+      readonly issue?: FeishuConnectionIssue
+      readonly current?: ProjectMilestonesProjection
+    }
+  }
+
+export interface UpdateProjectMilestoneDateRequest {
+  readonly projectId: string
+  readonly milestoneId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: number
+  readonly expectedRemoteObservationVersion: string
+  readonly schedule: ProjectCalendarSchedule
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-milestone-date-update'
+}
+
+export type UpdateProjectMilestoneDateResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectMilestonesProjection
+    readonly milestone: ProjectMilestoneProjection
+    readonly effect: FeishuCalendarMutationEffectProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code:
+        | 'calendar-unbound'
+        | 'milestone-not-found'
+        | 'project-schedule-revision-conflict'
+        | 'milestone-revision-conflict'
+        | 'remote-version-changed'
+        | 'event-not-selectable'
+        | 'remote-outcome-unknown'
+        | 'remote-rejected'
+      readonly message: string
+      readonly issue?: FeishuConnectionIssue
+      readonly current?: ProjectMilestonesProjection
+      readonly currentMilestone?: ProjectMilestoneProjection
+      readonly effect?: FeishuCalendarMutationEffectProjection
+    }
+  }
+
+export interface ReconcileProjectCalendarRequest {
+  readonly projectId: string
+  readonly expectedRevision: number
+}
+
+export type ReconcileProjectCalendarResult =
+  | { readonly ok: true; readonly value: ProjectMilestonesProjection }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code:
+        | 'calendar-unbound'
+        | 'project-schedule-revision-conflict'
+        | 'remote-rejected'
+      readonly message: string
+      readonly issue?: FeishuConnectionIssue
+      readonly current?: ProjectMilestonesProjection
+    }
+  }
+
+/** Trusted calendar hint; never accepted from a browser Remote. */
+export interface FeishuCalendarEventInput {
+  readonly eventEnvelopeId: string
+  readonly calendarId: string
+  readonly eventId: string | null
+  readonly occurredAt: string
+}
+
+export interface FeishuCalendarEventResult {
+  readonly outcome: 'applied' | 'duplicate' | 'ignored'
+  readonly projectId: string | null
+  readonly revision: number | null
+}
+
 /** Durable truth about one committed integration intent. */
 export type WorkbenchOutboxState = 'pending' | 'delivered' | 'unknown' | 'failed'
 

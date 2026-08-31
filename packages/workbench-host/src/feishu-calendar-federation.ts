@@ -1,4 +1,7 @@
-import type { FeishuConnectionIssue } from './client.ts'
+import type {
+  FeishuConnectionIssue,
+  ProjectCalendarSchedule,
+} from './client.ts'
 import type {
   WorkbenchFeishuReadResult,
   WorkbenchFeishuTaskRoute,
@@ -9,19 +12,7 @@ import type {
 export type WorkbenchFeishuCalendarRoute = WorkbenchFeishuTaskRoute
 
 /** Closed Workbench schedule value; provider request bodies never cross this seam. */
-export type WorkbenchCalendarSchedule =
-  | {
-    readonly kind: 'all-day'
-    readonly startDate: string
-    /** Exclusive ISO calendar date. */
-    readonly endDate: string
-  }
-  | {
-    readonly kind: 'timed'
-    readonly startAt: string
-    readonly endAt: string
-    readonly timeZone: string
-  }
+export type WorkbenchCalendarSchedule = ProjectCalendarSchedule
 
 export type WorkbenchFeishuCalendarRole =
   | 'unknown'
