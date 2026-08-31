@@ -215,3 +215,47 @@ _Avoid_: Latest file, replaceable publication pointer
 **Deliverable Activity**:
 The separately authorized append-only projection that connects immutable Deliverable plan, acceptance-request, decision, calendar-observation, and responsibility snapshots to their matching audit-event or Project Schedule Change source facts.
 _Avoid_: Generic Activity payload, mutable timeline
+
+**Risk**:
+A Workbench-owned uncertain Project event governed independently from the Feishu tasks that carry mitigation or contingency work.
+_Avoid_: Task, issue already known to have happened, AI observation
+
+**Risk Statement**:
+The structured condition, uncertain event, and consequence that explain what may happen and why it matters; condition may be unknown, while event and consequence are required.
+_Avoid_: Mitigation plan, consequence-only label, negated objective
+
+**Risk Assessment Version**:
+One immutable complete Risk evaluation containing statement, category, trigger, probability/impact intervals, confidence, time horizon, next review, assumptions, responsibility, links, and Host-derived exposure.
+_Avoid_: Mutable score row, JSON patch, latest-only history
+
+**Risk Trigger**:
+A bounded observable condition plus Owner-confirmed `unknown`, `not-met`, or `met` state; confirmation is audited but never silently changes Risk status.
+_Avoid_: Automatic sensor, status, task completion
+
+**Risk Exposure**:
+The Host-derived `low`, `medium`, or `high` result from one versioned complete likelihood-by-impact matrix using the assessment interval's upper endpoints. Confidence remains separate.
+_Avoid_: Review Risk, model severity, caller-selected color, raw multiplied score
+
+**Risk Status**:
+The current governed disposition `research`, `watch`, `mitigate`, `accept`, or terminal `closed`; accept remains active and every transition retains rationale.
+_Avoid_: Task status, exposure level, inferred trigger result
+
+**Risk Owner**:
+The active Accountable ProjectMember answerable for one current Risk assessment, with Contributors and a Human Sponsor governed by the executable-object responsibility rule.
+_Avoid_: Logged-in Workbench Owner, task assignee, multiple owners
+
+**Risk Evidence Reference**:
+A stable same-Project reference to an immutable Workbench audit event or Project Schedule Change supporting an assessment without copying the source body.
+_Avoid_: File evidence before its source adapter, arbitrary URL, free-text citation
+
+**Risk Dependency**:
+A current assessment's typed `depends-on` reference to another same-Project Risk, validated against self-links and direct or transitive cycles.
+_Avoid_: PlanBaseline edge, arbitrary `{type,id}`, treatment task
+
+**Risk Treatment Task Link**:
+A stable Feishu task GUID classified as mitigation or contingency and joined to current task availability while Feishu retains all task authority.
+_Avoid_: Copied task, Risk-owned completion, closure side effect
+
+**Risk Activity**:
+The separately authorized append-only replay of Risk creation, complete reassessment, and status transition identities with their matching audit facts and private transition rationale.
+_Avoid_: Generic Activity payload, mutable status log

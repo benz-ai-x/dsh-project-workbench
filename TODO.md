@@ -118,7 +118,7 @@
 
 ## T12 — Independent Risk register and mitigation tasks (#13)
 
-- [ ] Freeze the T12 domain, authority, lifecycle, privacy, migration, Remote, Client, packaging, and testing contract against Issue #13 and the parent V1 spec before implementation.
+- [x] Freeze the T12 domain, authority, lifecycle, privacy, migration, Remote, Client, packaging, and testing contract against Issue #13 and the parent V1 spec before implementation.
 - [ ] Model Risk as a first-class Workbench-owned uncertain event with category, trigger, probability interval, impact interval, confidence, Owner, and review date.
 - [ ] Derive exposure deterministically from bounded Risk inputs; never accept an arbitrary exposure label from a caller or model.
 - [ ] Link evidence, dependencies, mitigation tasks, and contingency tasks without copying Feishu task authority or coupling Risk closure to task completion.
