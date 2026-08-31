@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T09 npm archives without touching publication.
+ * Create and inspect the real T10 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -52,6 +52,7 @@ const packageSpecs = [
       'lib/recover-cli.js',
       'lib/types/index.d.ts',
       'lib/types/client.d.ts',
+      'lib/types/feishu-calendar-federation.d.ts',
       'lib/types/feishu-connection-adapter.d.ts',
       'lib/types/feishu-task-federation.d.ts',
       'lib/types/feishu-task-workflow.d.ts',
@@ -68,6 +69,7 @@ const packageSpecs = [
       'lib/types/audit.d.ts',
       'lib/types/authorization.d.ts',
       'lib/types/client.d.ts',
+      'lib/types/feishu-calendar-federation.d.ts',
       'lib/types/feishu-connection-adapter.d.ts',
       'lib/types/feishu-task-federation.d.ts',
       'lib/types/feishu-task-workflow.d.ts',
@@ -93,6 +95,7 @@ const packageSpecs = [
     requiredFiles: [
       'lib/index.js',
       'lib/client.js',
+      'lib/types/client/ProjectMilestonesPanel.d.ts',
       'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
       'lib/types/index.d.ts',
     ],
@@ -100,6 +103,7 @@ const packageSpecs = [
       'lib/types/client/ActivityPanel.d.ts',
       'lib/types/client/FeishuConnectionPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
+      'lib/types/client/ProjectMilestonesPanel.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
       'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
       'lib/types/client/ProjectTasksPanel.d.ts',
@@ -112,6 +116,7 @@ const packageSpecs = [
       'lib/types/client/feishu-connection-controller.d.ts',
       'lib/types/client/index.d.ts',
       'lib/types/client/locales.d.ts',
+      'lib/types/client/milestone-controller.d.ts',
       'lib/types/client/mount.d.ts',
       'lib/types/client/owner-controller.d.ts',
       'lib/types/client/project-controller.d.ts',
@@ -771,12 +776,19 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
-assert.equal(host.WORKBENCH_SCHEMA_VERSION, 8)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 9)
 assert.equal(typeof host.DshFeishuConnectionAdapter, 'function')
 assert.equal(host.FEISHU_CONNECTION_ADAPTER_ID, 'feishu-open-platform-v1')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.startIdentityVerification, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.readTaskList, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.listTaskWorkflowFields, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.listCalendars, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.readCalendar, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.createCalendar, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.listCalendarEvents, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.readCalendarEvent, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.createCalendarEvent, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.updateCalendarEventSchedule, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.createTaskWorkflowField, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.updateTaskWorkflowField, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.updateTask, 'function')
@@ -791,19 +803,25 @@ const remoteMethods = [
   'addProjectMember',
   'auditIntegrity',
   'bindFeishuTaskList',
+  'bindProjectCalendar',
   'configureFeishuIdentityRoute',
   'configureFeishuTaskWorkflow',
   'createProject',
+  'createProjectMilestone',
   'decideSuggestedChange',
+  'discoverFeishuCalendarEvents',
+  'discoverFeishuCalendars',
   'discoverFeishuTaskLists',
   'discoverFeishuTaskWorkflowFields',
   'feishuConnectionCenter',
+  'getProjectMilestones',
   'previewFeishuTaskWorkflow',
   'project',
   'projectStart',
   'projectTasks',
   'projectTeam',
   'proposeProjectResponsibilityChange',
+  'reconcileProjectCalendar',
   'reconcileProjectTasks',
   'referenceFeishuTask',
   'reviewCenter',
@@ -812,6 +830,7 @@ const remoteMethods = [
   'setStatus',
   'snapshot',
   'updateFeishuTask',
+  'updateProjectMilestoneDate',
   'verifyFeishuIdentityRoute',
 ]
 assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), remoteMethods)

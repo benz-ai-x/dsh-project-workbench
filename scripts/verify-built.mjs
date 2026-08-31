@@ -84,7 +84,7 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
-    check(main.WORKBENCH_SCHEMA_VERSION === 8, `${packageName}: built SQLite authority exports Schema v8`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 9, `${packageName}: built SQLite authority exports Schema v9`)
     check(typeof main.DshFeishuConnectionAdapter === 'function', `${packageName}: production Feishu adapter is a packed main export`)
     check(main.FEISHU_CONNECTION_ADAPTER_ID === 'feishu-open-platform-v1', `${packageName}: Feishu adapter exports its stable identity`)
     check(
@@ -97,6 +97,16 @@ async function verifyHost() {
         && typeof main.DshFeishuConnectionAdapter.prototype.createTaskWorkflowField === 'function'
         && typeof main.DshFeishuConnectionAdapter.prototype.updateTaskWorkflowField === 'function',
       `${packageName}: Feishu adapter ships the complete T09 workflow-field read/write surface`,
+    )
+    check(
+      typeof main.DshFeishuConnectionAdapter.prototype.listCalendars === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.readCalendar === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.createCalendar === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.listCalendarEvents === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.readCalendarEvent === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.createCalendarEvent === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.updateCalendarEventSchedule === 'function',
+      `${packageName}: Feishu adapter ships the complete T10 Calendar v4 surface`,
     )
   }
 
@@ -251,6 +261,7 @@ function verifyPublicHostImports(packageDir, packageName) {
     if (typeof main.DshFeishuConnectionAdapter !== 'function' || main.FEISHU_CONNECTION_ADAPTER_ID !== 'feishu-open-platform-v1') throw new Error('invalid Feishu adapter export')
     if (typeof main.DshFeishuConnectionAdapter.prototype.startIdentityVerification !== 'function' || Object.hasOwn(main.DshFeishuConnectionAdapter.prototype, 'verify')) throw new Error('invalid two-phase Feishu adapter surface')
     if (typeof main.DshFeishuConnectionAdapter.prototype.listTaskWorkflowFields !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.createTaskWorkflowField !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.updateTaskWorkflowField !== 'function') throw new Error('invalid Feishu workflow-field adapter surface')
+    if (typeof main.DshFeishuConnectionAdapter.prototype.listCalendars !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.readCalendar !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.createCalendar !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.listCalendarEvents !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.readCalendarEvent !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.createCalendarEvent !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.updateCalendarEventSchedule !== 'function') throw new Error('invalid Feishu Calendar v4 adapter surface')
     if (typeof auth.default !== 'function' || auth.default !== auth.OwnerAuthService) throw new Error('invalid Owner auth export')
     if ('default' in contract) throw new Error('browser-safe contract has an accidental default export')
     if (contract.FEISHU_CONNECTION_ID !== 'feishu-primary') throw new Error('invalid Feishu browser contract export')
@@ -302,19 +313,25 @@ function verifyTypertFace(face, packageName, label) {
     'addProjectMember',
     'auditIntegrity',
     'bindFeishuTaskList',
+    'bindProjectCalendar',
     'configureFeishuIdentityRoute',
     'configureFeishuTaskWorkflow',
     'createProject',
+    'createProjectMilestone',
     'decideSuggestedChange',
+    'discoverFeishuCalendarEvents',
+    'discoverFeishuCalendars',
     'discoverFeishuTaskLists',
     'discoverFeishuTaskWorkflowFields',
     'feishuConnectionCenter',
+    'getProjectMilestones',
     'project',
     'projectStart',
     'projectTasks',
     'projectTeam',
     'previewFeishuTaskWorkflow',
     'proposeProjectResponsibilityChange',
+    'reconcileProjectCalendar',
     'reconcileProjectTasks',
     'referenceFeishuTask',
     'reviewCenter',
@@ -323,11 +340,12 @@ function verifyTypertFace(face, packageName, label) {
     'setStatus',
     'snapshot',
     'updateFeishuTask',
+    'updateProjectMilestoneDate',
     'verifyFeishuIdentityRoute',
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the twenty-six T09 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the thirty-three T10 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -339,7 +357,13 @@ function verifyTypertFace(face, packageName, label) {
   const bindFeishuTaskList = invocations.find(
     invocation => invocation?.method === 'bindFeishuTaskList',
   )
+  const bindProjectCalendar = invocations.find(
+    invocation => invocation?.method === 'bindProjectCalendar',
+  )
   const createProject = invocations.find(invocation => invocation?.method === 'createProject')
+  const createProjectMilestone = invocations.find(
+    invocation => invocation?.method === 'createProjectMilestone',
+  )
   const configureFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'configureFeishuIdentityRoute',
   )
@@ -352,10 +376,19 @@ function verifyTypertFace(face, packageName, label) {
   const discoverFeishuTaskLists = invocations.find(
     invocation => invocation?.method === 'discoverFeishuTaskLists',
   )
+  const discoverFeishuCalendars = invocations.find(
+    invocation => invocation?.method === 'discoverFeishuCalendars',
+  )
+  const discoverFeishuCalendarEvents = invocations.find(
+    invocation => invocation?.method === 'discoverFeishuCalendarEvents',
+  )
   const discoverFeishuTaskWorkflowFields = invocations.find(
     invocation => invocation?.method === 'discoverFeishuTaskWorkflowFields',
   )
   const project = invocations.find(invocation => invocation?.method === 'project')
+  const getProjectMilestones = invocations.find(
+    invocation => invocation?.method === 'getProjectMilestones',
+  )
   const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
   const projectTasks = invocations.find(invocation => invocation?.method === 'projectTasks')
   const projectTeam = invocations.find(invocation => invocation?.method === 'projectTeam')
@@ -368,6 +401,9 @@ function verifyTypertFace(face, packageName, label) {
   const reviewCenter = invocations.find(invocation => invocation?.method === 'reviewCenter')
   const reconcileProjectTasks = invocations.find(
     invocation => invocation?.method === 'reconcileProjectTasks',
+  )
+  const reconcileProjectCalendar = invocations.find(
+    invocation => invocation?.method === 'reconcileProjectCalendar',
   )
   const referenceFeishuTask = invocations.find(
     invocation => invocation?.method === 'referenceFeishuTask',
@@ -384,6 +420,9 @@ function verifyTypertFace(face, packageName, label) {
   const setStatus = invocations.find(invocation => invocation?.method === 'setStatus')
   const snapshot = invocations.find(invocation => invocation?.method === 'snapshot')
   const updateFeishuTask = invocations.find(invocation => invocation?.method === 'updateFeishuTask')
+  const updateProjectMilestoneDate = invocations.find(
+    invocation => invocation?.method === 'updateProjectMilestoneDate',
+  )
   const verifyFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'verifyFeishuIdentityRoute',
   )
@@ -392,18 +431,24 @@ function verifyTypertFace(face, packageName, label) {
     addProjectMember,
     auditIntegrity,
     bindFeishuTaskList,
+    bindProjectCalendar,
     configureFeishuIdentityRoute,
     configureFeishuTaskWorkflow,
     createProject,
+    createProjectMilestone,
+    discoverFeishuCalendarEvents,
+    discoverFeishuCalendars,
     discoverFeishuTaskLists,
     discoverFeishuTaskWorkflowFields,
     feishuConnectionCenter,
+    getProjectMilestones,
     project,
     projectStart,
     projectTasks,
     projectTeam,
     previewFeishuTaskWorkflow,
     proposeProjectResponsibilityChange,
+    reconcileProjectCalendar,
     reconcileProjectTasks,
     referenceFeishuTask,
     reviewCenter,
@@ -413,6 +458,7 @@ function verifyTypertFace(face, packageName, label) {
     setStatus,
     snapshot,
     updateFeishuTask,
+    updateProjectMilestoneDate,
     verifyFeishuIdentityRoute,
   ]) {
     check(
@@ -521,6 +567,21 @@ function verifyTypertFace(face, packageName, label) {
       }),
     `${packageName}: ${label} Activity filter carries closed T09 workflow vocabulary without destructive actions`,
   )
+  check(
+    schemaAccepts(activityFilter?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      objectType: 'project-milestone',
+      action: 'workbench.project-milestone.date-update-requested',
+      limit: 5,
+    })
+      && schemaRejects(activityFilter?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        objectType: 'project-milestone',
+        action: 'workbench.project-milestone.deleted',
+        limit: 5,
+      }),
+    `${packageName}: ${label} Activity filter carries closed T10 calendar vocabulary without destructive actions`,
+  )
   const activityShape = unwrapSchema(activity?.result?.schema)?.def?.shape
   check(
     sameStrings(schemaObjectKeys(activity?.result?.schema), ['integrity', 'items', 'nextBeforeSequence']),
@@ -543,6 +604,168 @@ function verifyTypertFace(face, packageName, label) {
       'valid',
     ]),
     `${packageName}: ${label} auditIntegrity result exposes the safe verification projection`,
+  )
+
+  const discoverCalendarsRequest = discoverFeishuCalendars?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(discoverCalendarsRequest?.codec?.schema), [
+      'expectedConnectionRevision',
+      'expectedRouteGeneration',
+      'kind',
+      'projectId',
+    ]),
+    `${packageName}: ${label} calendar discovery pins one exact route and Project`,
+  )
+  const bindCalendarRequest = bindProjectCalendar?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    schemaAccepts(bindCalendarRequest?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      kind: 'bot',
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 3,
+      expectedBindingRevision: null,
+      idempotencyKey: 'built-calendar-bind-key-0001',
+      causationId: 'built-calendar-bind-cause-0001',
+      reason: 'owner-project-calendar-bind',
+      mode: 'existing',
+      calendarId: 'calendar-built',
+    })
+      && schemaAccepts(bindCalendarRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        kind: 'user',
+        expectedConnectionRevision: 2,
+        expectedRouteGeneration: 3,
+        expectedBindingRevision: null,
+        idempotencyKey: 'built-calendar-bind-key-0002',
+        causationId: 'built-calendar-bind-cause-0002',
+        reason: 'owner-project-calendar-bind',
+        mode: 'create',
+        summary: 'Built Project calendar',
+        description: null,
+      })
+      && schemaRejects(bindCalendarRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        kind: 'bot',
+        expectedConnectionRevision: 2,
+        expectedRouteGeneration: 3,
+        expectedBindingRevision: null,
+        idempotencyKey: 'built-calendar-bind-key-0003',
+        causationId: 'built-calendar-bind-cause-0003',
+        reason: 'owner-project-calendar-bind',
+        mode: 'existing',
+        calendarId: 'calendar-built',
+        summary: 'must not cross modes',
+      }),
+    `${packageName}: ${label} calendar binding keeps exact existing/create modes without fallback fields`,
+  )
+  const discoverEventsRequest = discoverFeishuCalendarEvents?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(discoverEventsRequest?.codec?.schema), [
+      'expectedRevision',
+      'projectId',
+    ]),
+    `${packageName}: ${label} event discovery is fenced by Project schedule revision`,
+  )
+  const milestonesQuery = getProjectMilestones?.parameters?.find(
+    parameter => parameter?.name === 'query',
+  )
+  check(
+    sameStrings(schemaObjectKeys(milestonesQuery?.codec?.schema), ['projectId']),
+    `${packageName}: ${label} Milestone lookup accepts only one Project identity`,
+  )
+  const milestonesProjection = unionOptions(getProjectMilestones?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('milestones'))
+    ?? unwrapSchema(getProjectMilestones?.result?.schema)
+  check(
+    sameStrings(schemaObjectKeys(milestonesProjection), [
+      'binding',
+      'effects',
+      'milestones',
+      'projectId',
+      'recentChanges',
+      'revision',
+      'sync',
+    ]),
+    `${packageName}: ${label} Milestone lookup carries binding, authority, effects, and change feed`,
+  )
+  const createMilestoneRequest = createProjectMilestone?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    schemaAccepts(createMilestoneRequest?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      expectedRevision: 4,
+      expectedMilestoneRevision: null,
+      name: 'Built milestone',
+      description: null,
+      idempotencyKey: 'built-milestone-create-key-0001',
+      causationId: 'built-milestone-create-cause-0001',
+      reason: 'owner-project-milestone-create',
+      mode: 'create-event',
+      schedule: { kind: 'all-day', startDate: '2026-09-01', endDate: '2026-09-02' },
+    })
+      && schemaAccepts(createMilestoneRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        expectedRevision: 4,
+        expectedMilestoneRevision: null,
+        name: 'Built timed milestone',
+        idempotencyKey: 'built-milestone-create-key-0002',
+        causationId: 'built-milestone-create-cause-0002',
+        reason: 'owner-project-milestone-create',
+        mode: 'create-event',
+        schedule: {
+          kind: 'timed',
+          startAt: '2026-09-01T09:00:00+08:00',
+          endAt: '2026-09-01T10:00:00+08:00',
+          timeZone: 'Asia/Shanghai',
+        },
+      })
+      && schemaRejects(createMilestoneRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        expectedRevision: 4,
+        expectedMilestoneRevision: null,
+        name: 'Invalid mixed milestone',
+        idempotencyKey: 'built-milestone-create-key-0003',
+        causationId: 'built-milestone-create-cause-0003',
+        reason: 'owner-project-milestone-create',
+        mode: 'existing-event',
+        eventId: 'event-built',
+        schedule: { kind: 'all-day', startDate: '2026-09-01', endDate: '2026-09-02' },
+      }),
+    `${packageName}: ${label} Milestone creation carries closed event modes and schedule variants`,
+  )
+  const updateMilestoneRequest = updateProjectMilestoneDate?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(updateMilestoneRequest?.codec?.schema), [
+      'causationId',
+      'expectedMilestoneRevision',
+      'expectedRemoteObservationVersion',
+      'expectedRevision',
+      'idempotencyKey',
+      'milestoneId',
+      'projectId',
+      'reason',
+      'schedule',
+    ]),
+    `${packageName}: ${label} Milestone date update carries Project, Milestone, and observation fencing`,
+  )
+  const reconcileCalendarRequest = reconcileProjectCalendar?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(reconcileCalendarRequest?.codec?.schema), [
+      'expectedRevision',
+      'projectId',
+    ]),
+    `${packageName}: ${label} calendar reconciliation is one Project-revision-fenced command`,
   )
 
   const projectTasksQuery = projectTasks?.parameters?.find(parameter => parameter?.name === 'query')

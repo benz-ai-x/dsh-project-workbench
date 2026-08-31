@@ -7,23 +7,33 @@ import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  BindProjectCalendarRequest,
+  BindProjectCalendarResult,
   BindFeishuTaskListRequest,
   BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteRequest,
   ConfigureFeishuIdentityRouteResult,
   ConfigureFeishuTaskWorkflowRequest,
   ConfigureFeishuTaskWorkflowResult,
+  CreateProjectMilestoneRequest,
+  CreateProjectMilestoneResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  DiscoverFeishuCalendarEventsRequest,
+  DiscoverFeishuCalendarsRequest,
   DiscoverFeishuTaskListsRequest,
   DiscoverFeishuTaskWorkflowFieldsRequest,
   FeishuTaskListDiscoveryProjection,
+  FeishuCalendarDiscoveryProjection,
+  FeishuCalendarEventDiscoveryProjection,
   FeishuTaskWorkflowCompatibilityPreview,
   FeishuTaskWorkflowFieldDiscoveryProjection,
   FeishuConnectionCenterProjection,
   ProjectDetailProjection,
+  ProjectMilestonesProjection,
+  ProjectMilestonesQuery,
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
@@ -36,6 +46,8 @@ import type {
   ProposeProjectResponsibilityChangeResult,
   ReconcileProjectTasksRequest,
   ReconcileProjectTasksResult,
+  ReconcileProjectCalendarRequest,
+  ReconcileProjectCalendarResult,
   ReferenceFeishuTaskRequest,
   ReferenceFeishuTaskResult,
   ReviewCenterFilter,
@@ -54,6 +66,8 @@ import type {
   VerifyFeishuIdentityRouteResult,
   UpdateFeishuTaskRequest,
   UpdateFeishuTaskResult,
+  UpdateProjectMilestoneDateRequest,
+  UpdateProjectMilestoneDateResult,
 } from './client.ts'
 import type { WorkbenchRepository } from './repository.ts'
 import {
@@ -73,6 +87,7 @@ import { DshFeishuConnectionAdapter } from './feishu-connection-adapter.ts'
 
 export type * from './client.ts'
 export type * from './repository.ts'
+export type * from './feishu-calendar-federation.ts'
 export type * from './feishu-task-federation.ts'
 export type * from './feishu-task-workflow.ts'
 export {
@@ -202,6 +217,7 @@ export const DEFAULT_WORKBENCH_DATABASE_PATH = '.dsh/project-workbench.sqlite'
 export const DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS = 5_000
 export const DEFAULT_WORKBENCH_MAX_STATUS_LENGTH = 280
 export const DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1_000
+export const DEFAULT_WORKBENCH_CALENDAR_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1_000
 const MAX_BUSY_TIMEOUT_MS = 2_147_483_647
 
 /** Public Loader configuration. Every property has an operational default. */
@@ -211,6 +227,7 @@ export interface Config {
   readonly busyTimeoutMs?: number
   readonly maxStatusLength?: number
   readonly taskReconciliationIntervalMs?: number
+  readonly calendarReconciliationIntervalMs?: number
 }
 
 /** Runtime mirror of {@link Config}; Loader validation happens before activation. */
@@ -234,6 +251,11 @@ export const Config: Schema<Config> = Schema.object({
     .min(0)
     .max(MAX_BUSY_TIMEOUT_MS)
     .default(DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS),
+  calendarReconciliationIntervalMs: Schema.number()
+    .step(1)
+    .min(0)
+    .max(MAX_BUSY_TIMEOUT_MS)
+    .default(DEFAULT_WORKBENCH_CALENDAR_RECONCILIATION_INTERVAL_MS),
 })
 
 interface ResolvedConfig {
@@ -242,6 +264,7 @@ interface ResolvedConfig {
   readonly busyTimeoutMs: number
   readonly maxStatusLength: number
   readonly taskReconciliationIntervalMs: number
+  readonly calendarReconciliationIntervalMs: number
 }
 
 /** Optional construction ports used by WorkbenchScenario and focused Host tests. */
@@ -278,7 +301,7 @@ export class WorkbenchService extends TypertRemoteService {
     })
     const adapters = internals.adapters ?? (() => {
       const feishu = new DshFeishuConnectionAdapter(ctx.credentials as CredentialProvider)
-      return Object.freeze({ feishu, feishuTasks: feishu })
+      return Object.freeze({ feishu, feishuTasks: feishu, feishuCalendars: feishu })
     })()
     this.scenario = new WorkbenchScenario({
       clock: internals.clock ?? systemWorkbenchClock,
@@ -288,6 +311,7 @@ export class WorkbenchService extends TypertRemoteService {
       authorization: internals.authorization ?? ctx.workbenchAuth.authorization,
       maxStatusLength: resolved.maxStatusLength,
       taskReconciliationIntervalMs: resolved.taskReconciliationIntervalMs,
+      calendarReconciliationIntervalMs: resolved.calendarReconciliationIntervalMs,
     })
   }
 
@@ -346,6 +370,69 @@ export class WorkbenchService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<VerifyFeishuIdentityRouteResult> {
     return this.scenario.verifyFeishuIdentityRoute(request, signal)
+  }
+
+  /** Discover writable primary/shared calendars through one exact verified identity. */
+  @Remote
+  discoverFeishuCalendars(
+    request: DiscoverFeishuCalendarsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuCalendarDiscoveryProjection> {
+    return this.scenario.discoverFeishuCalendars(request, signal)
+  }
+
+  /** Bind one immutable existing or newly created Project calendar. */
+  @Remote
+  bindProjectCalendar(
+    request: BindProjectCalendarRequest,
+    signal: AbortSignal,
+  ): Promise<BindProjectCalendarResult> {
+    return this.scenario.bindProjectCalendar(request, signal)
+  }
+
+  /** Discover selectable non-recurring events from the bound calendar. */
+  @Remote
+  discoverFeishuCalendarEvents(
+    request: DiscoverFeishuCalendarEventsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuCalendarEventDiscoveryProjection> {
+    return this.scenario.discoverFeishuCalendarEvents(request, signal)
+  }
+
+  /** Read one Project's authoritative calendar and Milestone projection. */
+  @Remote
+  getProjectMilestones(
+    query: ProjectMilestonesQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectMilestonesProjection | null> {
+    return this.scenario.getProjectMilestones(query, signal)
+  }
+
+  /** Create a Milestone by binding or creating one Feishu calendar event. */
+  @Remote
+  createProjectMilestone(
+    request: CreateProjectMilestoneRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectMilestoneResult> {
+    return this.scenario.createProjectMilestone(request, signal)
+  }
+
+  /** Update one Milestone date after a fresh Feishu authority observation. */
+  @Remote
+  updateProjectMilestoneDate(
+    request: UpdateProjectMilestoneDateRequest,
+    signal: AbortSignal,
+  ): Promise<UpdateProjectMilestoneDateResult> {
+    return this.scenario.updateProjectMilestoneDate(request, signal)
+  }
+
+  /** Repair every event bound to one Project from Feishu-authoritative truth. */
+  @Remote
+  reconcileProjectCalendar(
+    request: ReconcileProjectCalendarRequest,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectCalendarResult> {
+    return this.scenario.reconcileProjectCalendar(request, signal)
   }
 
   /** Read one Project's local Feishu task projection. */
@@ -529,6 +616,8 @@ function resolveConfig(config: Config): ResolvedConfig {
     maxStatusLength: resolved.maxStatusLength ?? DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
     taskReconciliationIntervalMs: resolved.taskReconciliationIntervalMs
       ?? DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS,
+    calendarReconciliationIntervalMs: resolved.calendarReconciliationIntervalMs
+      ?? DEFAULT_WORKBENCH_CALENDAR_RECONCILIATION_INTERVAL_MS,
   }
 }
 

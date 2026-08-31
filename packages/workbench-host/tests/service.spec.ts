@@ -6,6 +6,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import WorkbenchService, {
   Config,
+  DEFAULT_WORKBENCH_CALENDAR_RECONCILIATION_INTERVAL_MS,
   DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS,
   DEFAULT_WORKBENCH_DATABASE_PATH,
   DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
@@ -76,6 +77,13 @@ describe('WorkbenchService', () => {
       { method: 'feishuConnectionCenter', invocation: { kind: 'direct' } },
       { method: 'configureFeishuIdentityRoute', invocation: { kind: 'direct' } },
       { method: 'verifyFeishuIdentityRoute', invocation: { kind: 'direct' } },
+      { method: 'discoverFeishuCalendars', invocation: { kind: 'direct' } },
+      { method: 'bindProjectCalendar', invocation: { kind: 'direct' } },
+      { method: 'discoverFeishuCalendarEvents', invocation: { kind: 'direct' } },
+      { method: 'getProjectMilestones', invocation: { kind: 'direct' } },
+      { method: 'createProjectMilestone', invocation: { kind: 'direct' } },
+      { method: 'updateProjectMilestoneDate', invocation: { kind: 'direct' } },
+      { method: 'reconcileProjectCalendar', invocation: { kind: 'direct' } },
       { method: 'projectTasks', invocation: { kind: 'direct' } },
       { method: 'discoverFeishuTaskLists', invocation: { kind: 'direct' } },
       { method: 'bindFeishuTaskList', invocation: { kind: 'direct' } },
@@ -497,6 +505,131 @@ describe('WorkbenchService', () => {
     expect(scenario.configureFeishuTaskWorkflow).toHaveBeenCalledWith(configureRequest, signal)
   })
 
+  it('forwards every calendar Remote request and the exact caller AbortSignal', async () => {
+    const signal = new AbortController().signal
+    const discoverCalendarsRequest = Object.freeze({
+      projectId: 'project-calendar-service',
+      kind: 'bot' as const,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 3,
+    })
+    const discoverCalendarsResult = Object.freeze({
+      projectId: 'project-calendar-service',
+      connectionRevision: 2,
+      kind: 'bot' as const,
+      routeGeneration: 3,
+      items: Object.freeze([]),
+    })
+    const bindRequest = Object.freeze({
+      projectId: 'project-calendar-service',
+      kind: 'bot' as const,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 3,
+      expectedBindingRevision: null,
+      idempotencyKey: 'calendar-service-bind-key-0001',
+      causationId: 'calendar-service-bind-cause-0001',
+      reason: 'owner-project-calendar-bind' as const,
+      mode: 'existing' as const,
+      calendarId: 'calendar-service',
+    })
+    const bindResult = Object.freeze({
+      ok: false as const,
+      error: Object.freeze({
+        code: 'remote-rejected' as const,
+        message: 'calendar fixture rejected',
+      }),
+    })
+    const discoverEventsRequest = Object.freeze({
+      projectId: 'project-calendar-service',
+      expectedRevision: 4,
+    })
+    const discoverEventsResult = Object.freeze({
+      projectId: 'project-calendar-service',
+      revision: 4,
+      calendarId: 'calendar-service',
+      items: Object.freeze([]),
+    })
+    const milestonesQuery = Object.freeze({ projectId: 'project-calendar-service' })
+    const createRequest = Object.freeze({
+      projectId: 'project-calendar-service',
+      expectedRevision: 4,
+      expectedMilestoneRevision: null,
+      name: 'Service milestone',
+      idempotencyKey: 'calendar-service-create-key-0001',
+      causationId: 'calendar-service-create-cause-0001',
+      reason: 'owner-project-milestone-create' as const,
+      mode: 'existing-event' as const,
+      eventId: 'event-service',
+    })
+    const createResult = Object.freeze({
+      ok: false as const,
+      error: Object.freeze({ code: 'calendar-unbound' as const, message: 'calendar unbound' }),
+    })
+    const updateRequest = Object.freeze({
+      projectId: 'project-calendar-service',
+      milestoneId: 'milestone-service',
+      expectedRevision: 4,
+      expectedMilestoneRevision: 1,
+      expectedRemoteObservationVersion: `sha256:${'0'.repeat(64)}`,
+      schedule: Object.freeze({
+        kind: 'all-day' as const,
+        startDate: '2026-09-01',
+        endDate: '2026-09-02',
+      }),
+      idempotencyKey: 'calendar-service-update-key-0001',
+      causationId: 'calendar-service-update-cause-0001',
+      reason: 'owner-project-milestone-date-update' as const,
+    })
+    const updateResult = Object.freeze({
+      ok: false as const,
+      error: Object.freeze({ code: 'milestone-not-found' as const, message: 'not found' }),
+    })
+    const reconcileRequest = Object.freeze({
+      projectId: 'project-calendar-service',
+      expectedRevision: 4,
+    })
+    const reconcileResult = Object.freeze({
+      ok: false as const,
+      error: Object.freeze({ code: 'calendar-unbound' as const, message: 'calendar unbound' }),
+    })
+    const scenario = {
+      discoverFeishuCalendars: vi.fn().mockResolvedValue(discoverCalendarsResult),
+      bindProjectCalendar: vi.fn().mockResolvedValue(bindResult),
+      discoverFeishuCalendarEvents: vi.fn().mockResolvedValue(discoverEventsResult),
+      getProjectMilestones: vi.fn().mockResolvedValue(null),
+      createProjectMilestone: vi.fn().mockResolvedValue(createResult),
+      updateProjectMilestoneDate: vi.fn().mockResolvedValue(updateResult),
+      reconcileProjectCalendar: vi.fn().mockResolvedValue(reconcileResult),
+    }
+    const service = Object.create(WorkbenchService.prototype) as WorkbenchService
+    Object.defineProperty(service, 'scenario', { value: scenario })
+
+    await expect(service.discoverFeishuCalendars(discoverCalendarsRequest, signal))
+      .resolves.toBe(discoverCalendarsResult)
+    await expect(service.bindProjectCalendar(bindRequest, signal)).resolves.toBe(bindResult)
+    await expect(service.discoverFeishuCalendarEvents(discoverEventsRequest, signal))
+      .resolves.toBe(discoverEventsResult)
+    await expect(service.getProjectMilestones(milestonesQuery, signal)).resolves.toBeNull()
+    await expect(service.createProjectMilestone(createRequest, signal)).resolves.toBe(createResult)
+    await expect(service.updateProjectMilestoneDate(updateRequest, signal)).resolves.toBe(updateResult)
+    await expect(service.reconcileProjectCalendar(reconcileRequest, signal))
+      .resolves.toBe(reconcileResult)
+
+    expect(scenario.discoverFeishuCalendars).toHaveBeenCalledWith(
+      discoverCalendarsRequest,
+      signal,
+    )
+    expect(scenario.bindProjectCalendar).toHaveBeenCalledWith(bindRequest, signal)
+    expect(scenario.discoverFeishuCalendarEvents).toHaveBeenCalledWith(
+      discoverEventsRequest,
+      signal,
+    )
+    expect(scenario.getProjectMilestones).toHaveBeenCalledWith(milestonesQuery, signal)
+    expect(scenario.createProjectMilestone).toHaveBeenCalledWith(createRequest, signal)
+    expect(scenario.updateProjectMilestoneDate).toHaveBeenCalledWith(updateRequest, signal)
+    expect(scenario.reconcileProjectCalendar).toHaveBeenCalledWith(reconcileRequest, signal)
+  })
+
   it('exports one same-named type/runtime Config with validated defaults', async () => {
     expect(WorkbenchService.inject).toEqual(['workbenchAuth', 'credentials'])
     expect(WorkbenchService.Config).toBe(Config)
@@ -506,10 +639,13 @@ describe('WorkbenchService', () => {
       busyTimeoutMs: DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS,
       maxStatusLength: DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
       taskReconciliationIntervalMs: DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS,
+      calendarReconciliationIntervalMs:
+        DEFAULT_WORKBENCH_CALENDAR_RECONCILIATION_INTERVAL_MS,
     })
     expect(() => Config({ maxStatusLength: 0 })).toThrow()
     expect(() => Config({ busyTimeoutMs: 1.5 })).toThrow()
     expect(() => Config({ databasePath: '   ' })).toThrow()
+    expect(() => Config({ calendarReconciliationIntervalMs: -1 })).toThrow()
 
     const ctx = new Context()
     contexts.push(ctx)

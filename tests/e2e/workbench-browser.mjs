@@ -59,6 +59,15 @@ const WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH
   = '/api/workbench/discoverFeishuTaskWorkflowFields'
 const WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH = '/api/workbench/previewFeishuTaskWorkflow'
 const WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH = '/api/workbench/configureFeishuTaskWorkflow'
+const WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH = '/api/workbench/discoverFeishuCalendars'
+const WORKBENCH_BIND_PROJECT_CALENDAR_PATH = '/api/workbench/bindProjectCalendar'
+const WORKBENCH_DISCOVER_FEISHU_CALENDAR_EVENTS_PATH
+  = '/api/workbench/discoverFeishuCalendarEvents'
+const WORKBENCH_GET_PROJECT_MILESTONES_PATH = '/api/workbench/getProjectMilestones'
+const WORKBENCH_CREATE_PROJECT_MILESTONE_PATH = '/api/workbench/createProjectMilestone'
+const WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH
+  = '/api/workbench/updateProjectMilestoneDate'
+const WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH = '/api/workbench/reconcileProjectCalendar'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -684,6 +693,7 @@ async function reopenProject(page, expected) {
     definitionDigest: catalog.definitionDigest,
   })
   await assertProjectTasksUnbound(page, expected.projectName)
+  await assertProjectMilestonesUnbound(page, expected.projectName)
   return detail
 }
 
@@ -701,6 +711,34 @@ function feishuConnectionPanel(page) {
 
 function projectTasksPanel(page) {
   return page.locator('section[aria-labelledby="workbench-project-tasks-title"]')
+}
+
+function projectMilestonesPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-project-milestones-title"]')
+}
+
+async function assertProjectMilestonesUnbound(page, projectName) {
+  const panel = projectMilestonesPanel(page)
+  await panel.getByRole('heading', { name: 'Project Milestones', exact: true })
+    .waitFor({ state: 'visible' })
+  if (projectName === undefined) {
+    await panel.getByText('先打开一个 Project，再配置或阅读它的里程碑。', { exact: true })
+      .waitFor({ state: 'visible' })
+    return panel
+  }
+  await panel.getByText(projectName, { exact: true }).waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: '绑定唯一项目日历', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByText(
+    '请先在 Connection Center 配置并验证所选身份；权限不足时不会回退到另一身份。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  assert.equal(
+    await panel.getByRole('button', { name: '读取可访问日历', exact: true }).isDisabled(),
+    true,
+    'Project Milestones allowed discovery without a verified explicit Feishu route',
+  )
+  return panel
 }
 
 async function assertProjectTasksUnbound(page, projectName) {
@@ -1422,6 +1460,7 @@ async function main() {
     materializer,
     dshBin,
     chromeExecutable,
+    join(dshBaselineRoot, 'apps/web/dist/index.html'),
     join(repositoryRoot, 'packages/workbench-host/lib/index.js'),
     join(repositoryRoot, 'packages/workbench-host/lib/recover-cli.js'),
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
@@ -1542,10 +1581,18 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_BIND_PROJECT_CALENDAR_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_FEISHU_CALENDAR_EVENTS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_GET_PROJECT_MILESTONES_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_MILESTONE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-tasks-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-milestones-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
   await captureVisual(firstJourney.page, '01-setup-desktop')
@@ -1575,11 +1622,23 @@ async function main() {
     false,
     WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH,
   )
+  for (const path of [
+    WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH,
+    WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
+    WORKBENCH_DISCOVER_FEISHU_CALENDAR_EVENTS_PATH,
+    WORKBENCH_GET_PROJECT_MILESTONES_PATH,
+    WORKBENCH_CREATE_PROJECT_MILESTONE_PATH,
+    WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH,
+    WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH,
+  ]) {
+    await expectCarrierDenied(firstJourney.page, firstNetwork, false, path)
+  }
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 1)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-tasks-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-milestones-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
 
   // Hold the real initialize request briefly so the actual disabled/pending
@@ -1695,6 +1754,7 @@ async function main() {
     .waitFor({ state: 'visible' })
   await assertFeishuConnectionCenter(firstJourney.page)
   await assertProjectTasksUnbound(firstJourney.page)
+  await assertProjectMilestonesUnbound(firstJourney.page)
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
@@ -1715,6 +1775,25 @@ async function main() {
     0,
     'Project Tasks queried Host before a Project was selected',
   )
+  assert.equal(
+    countRequestsToPath(firstJourney, WORKBENCH_GET_PROJECT_MILESTONES_PATH),
+    1,
+    'Project Milestones queried Host before selection beyond the explicit authorization probe',
+  )
+  for (const path of [
+    WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH,
+    WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
+    WORKBENCH_DISCOVER_FEISHU_CALENDAR_EVENTS_PATH,
+    WORKBENCH_CREATE_PROJECT_MILESTONE_PATH,
+    WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH,
+    WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH,
+  ]) {
+    assert.equal(
+      countRequestsToPath(firstJourney, path),
+      1,
+      `Project Milestones invoked ${path} beyond the explicit authorization probe`,
+    )
+  }
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH), 1)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH), 1)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH), 1)
@@ -1785,7 +1864,10 @@ async function main() {
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH) > 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
   await assertProjectTasksUnbound(firstJourney.page, projectName)
+  await assertProjectMilestonesUnbound(firstJourney.page, projectName)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH) > 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_GET_PROJECT_MILESTONES_PATH) > 1)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH), 1)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH), 1)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH), 1)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH), 1)
@@ -1813,6 +1895,10 @@ async function main() {
   }
   await activityObjectType.selectOption('feishu-task-workflow')
   await activityAction.selectOption('workbench.feishu-task-workflow.configured')
+  await activityPanel.getByRole('button', { name: '应用筛选', exact: true }).click()
+  await activityPanel.getByText('没有匹配的活动', { exact: true }).waitFor({ state: 'visible' })
+  await activityObjectType.selectOption('project-milestone')
+  await activityAction.selectOption('workbench.project-milestone.date-update-requested')
   await activityPanel.getByRole('button', { name: '应用筛选', exact: true }).click()
   await activityPanel.getByText('没有匹配的活动', { exact: true }).waitFor({ state: 'visible' })
   await activityObjectType.selectOption('')
@@ -2473,6 +2559,7 @@ async function main() {
     })
     const mobileTeam = await assertProjectTeam(firstJourney.page, expectedTeam)
     const mobileReview = await assertRecoveredReview(firstJourney.page)
+    const mobileMilestones = await assertProjectMilestonesUnbound(firstJourney.page, projectName)
     await applyReviewFilters(mobileReview, '待处理', '全部风险', [finalPending.heading])
     const mobileAddDisclosure = mobileTeam.locator('details').filter({
       hasText: '添加 ProjectMember',
@@ -2509,6 +2596,11 @@ async function main() {
       firstJourney.page,
       'mobile Review proposal Accountable',
     )
+    await assertWithinViewport(
+      mobileMilestones.getByRole('button', { name: '读取可访问日历', exact: true }),
+      firstJourney.page,
+      'mobile Project calendar discovery',
+    )
     await assertVisibleKeyboardFocus(
       reviewFilterSelect(mobileReview, 0),
       'mobile Review status filter',
@@ -2517,6 +2609,7 @@ async function main() {
       mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
       'mobile Review proposal Accountable',
     )
+    await assertNoHorizontalOverflow(firstJourney.page, 'authenticated mobile Project Milestones')
     const layout = await firstJourney.page.evaluate(() => {
       const session = document.querySelector('header[aria-label]')
       const status = document.querySelector('main[data-workbench-phase]')
@@ -2537,6 +2630,7 @@ async function main() {
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-milestones-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-review-center-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-feishu-connection-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
@@ -2572,12 +2666,22 @@ async function main() {
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_FEISHU_CONNECTION_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
+  for (const path of [
+    WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH,
+    WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
+    WORKBENCH_DISCOVER_FEISHU_CALENDAR_EVENTS_PATH,
+    WORKBENCH_GET_PROJECT_MILESTONES_PATH,
+    WORKBENCH_CREATE_PROJECT_MILESTONE_PATH,
+    WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH,
+    WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH,
+  ]) assert.equal(countRequestsToPath(separateJourney, path), 0)
   await separateLogin.fill(wrongPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
   assert.equal(await separateJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await separateJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await separateJourney.page.locator('#workbench-project-team-title').count(), 0)
+  assert.equal(await separateJourney.page.locator('#workbench-project-milestones-title').count(), 0)
   await separateLogin.fill(initialPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
@@ -2594,10 +2698,16 @@ async function main() {
     credentialRef: feishuCredentialRef,
     credentialValue: feishuCredentialValue,
   })
+  await assertProjectMilestonesUnbound(separateJourney.page)
   assert.equal(
     countRequestsToPath(separateJourney, WORKBENCH_REVIEW_CENTER_PATH),
     0,
     'a new browser context queried Review before selecting a Project',
+  )
+  assert.equal(
+    countRequestsToPath(separateJourney, WORKBENCH_GET_PROJECT_MILESTONES_PATH),
+    0,
+    'a new browser context queried Milestones before selecting a Project',
   )
   await reopenProject(separateJourney.page, {
     projectName,
@@ -2822,11 +2932,12 @@ async function main() {
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS T09 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
+    'PASS T10 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
       + '-> explicit Feishu Bot configure/verify without actor fallback '
       + '-> Project Tasks selection boundary and verified-route gate '
       + '-> T09 workflow Remote authorization/selection gate and Activity vocabulary '
+      + '-> Project Milestones selection/route/mobile boundary and seven protected Remotes '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',

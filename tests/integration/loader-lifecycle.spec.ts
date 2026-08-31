@@ -12,6 +12,7 @@ import type {
   CreateProjectResult,
   DecideSuggestedChangeResult,
   ProjectDetailProjection,
+  ProjectMilestonesProjection,
   ProjectStartProjection,
   ProjectTeamProjection,
   ProposeProjectResponsibilityChangeResult,
@@ -45,20 +46,26 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'activity',
   'addProjectMember',
   'auditIntegrity',
+  'bindProjectCalendar',
   'bindFeishuTaskList',
   'configureFeishuIdentityRoute',
   'configureFeishuTaskWorkflow',
   'createProject',
+  'createProjectMilestone',
   'decideSuggestedChange',
+  'discoverFeishuCalendarEvents',
+  'discoverFeishuCalendars',
   'discoverFeishuTaskLists',
   'discoverFeishuTaskWorkflowFields',
   'feishuConnectionCenter',
+  'getProjectMilestones',
   'previewFeishuTaskWorkflow',
   'project',
   'projectStart',
   'projectTasks',
   'projectTeam',
   'proposeProjectResponsibilityChange',
+  'reconcileProjectCalendar',
   'reconcileProjectTasks',
   'referenceFeishuTask',
   'reviewCenter',
@@ -67,6 +74,7 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'setStatus',
   'snapshot',
   'updateFeishuTask',
+  'updateProjectMilestoneDate',
   'verifyFeishuIdentityRoute',
 ])
 
@@ -250,6 +258,10 @@ describe('built Workbench Host through the real DSH Loader', () => {
       { projectId: 'project-secret' },
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(firstService.getProjectMilestones(
+      { projectId: 'project-secret' },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(first.workbenchAuth.run(() =>
       firstService.snapshot(new AbortController().signal))).resolves.toBeNull()
     const initialProjects: ProjectStartProjection = await first.workbenchAuth.run(() =>
@@ -415,6 +427,26 @@ describe('built Workbench Host through the real DSH Loader', () => {
       }],
       nextBeforeSequence: null,
     })
+    const unboundMilestones = await first.workbenchAuth.run(() =>
+      firstService.getProjectMilestones(
+        { projectId: createdProject.project.projectId },
+        new AbortController().signal,
+      ))
+    expect(unboundMilestones).toEqual({
+      projectId: createdProject.project.projectId,
+      revision: 0,
+      binding: null,
+      milestones: [],
+      sync: {
+        state: 'unbound',
+        lastEventAt: null,
+        lastReconciledAt: null,
+        lastAttemptAt: null,
+        issue: null,
+      },
+      effects: [],
+      recentChanges: [],
+    } satisfies ProjectMilestonesProjection)
     const projectActivity = await first.workbenchAuth.run(() => firstService.activity({
       projectId: createdProject.project.projectId,
       objectType: 'project',
@@ -866,6 +898,10 @@ describe('built Workbench Host through the real DSH Loader', () => {
       { projectId: createdProject.project.projectId },
       new AbortController().signal,
     ))).resolves.toEqual(acceptedTeam)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.getProjectMilestones(
+      { projectId: createdProject.project.projectId },
+      new AbortController().signal,
+    ))).resolves.toEqual(unboundMilestones)
     await expect(restarted.workbenchAuth.run(() => restarted.workbench.reviewCenter({
       projectId: createdProject.project.projectId,
       status: 'accepted',
