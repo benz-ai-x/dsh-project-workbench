@@ -83,14 +83,14 @@
 
 ## T09 — Map template workflow to a Feishu custom field (#10)
 
-- [ ] Define a bounded multi-state workflow with stable logical IDs, initial state, allowed transitions, and terminal states.
-- [ ] Create or map one Feishu single-select field on the Project's primary task list and persist stable field/option GUIDs.
-- [ ] Preview create/existing/migrate compatibility and block missing, hidden, duplicate, unmapped, or in-use destructive changes before provider mutation.
-- [ ] Converge both Workbench-originated and Feishu-originated state changes to Feishu-authoritative custom-field values under Project, task, remote-version, and workflow CAS.
-- [ ] Derive a terminal-state completion suggestion without automatically completing the Feishu task.
+- [x] Define a bounded multi-state workflow with stable logical IDs, initial state, allowed transitions, and terminal states.
+- [x] Create or map one Feishu single-select field on the Project's primary task list and persist stable field/option GUIDs.
+- [x] Preview create/existing/migrate compatibility and block missing, hidden, duplicate, unmapped, or in-use destructive changes before provider mutation.
+- [x] Converge both Workbench-originated and Feishu-originated state changes to Feishu-authoritative custom-field values under Project, task, remote-version, and workflow CAS.
+- [x] Derive a terminal-state completion suggestion without automatically completing the Feishu task.
 - [x] Build the localized accessible Client workflow editor, allowed-transition selector, explicit completion confirmation, exact retry, stale/conflict handling, and Project/logout/HMR draft cleanup.
-- [ ] Reserve/claim/settle custom-field writes durably so response loss becomes audited unknown and the same command is never blindly redelivered.
-- [ ] Prove Schema v7→v8 restart, exact Task v2 field/value requests, stable create/map/migrate GUIDs, compatibility conflicts, transition matrices, reconciliation, replay/unknown recovery, Client lifecycle, generated Remote, and packed artifacts.
+- [x] Reserve/claim/settle custom-field writes durably so response loss becomes audited unknown and the same command is never blindly redelivered.
+- [x] Prove Schema v7→v8 restart, exact Task v2 field/value requests, stable create/map/migrate GUIDs, compatibility conflicts, transition matrices, reconciliation, replay/unknown recovery, Client lifecycle, generated Remote, and packed artifacts.
 
 ## Later tickets
 
