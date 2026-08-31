@@ -104,6 +104,18 @@ export {
   workflowTransitionAllowed,
 } from './feishu-task-workflow.ts'
 export {
+  assertProjectRiskDependencyGraph,
+  normalizeProjectRiskAssessment,
+  normalizeProjectRiskTransition,
+  projectRiskExposure,
+} from './project-risk.ts'
+export type {
+  NormalizedProjectRiskAssessment,
+  NormalizedProjectRiskTransition,
+  NormalizeProjectRiskAssessmentOptions,
+  NormalizeProjectRiskTransitionOptions,
+} from './project-risk.ts'
+export {
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_BYTES_V1,
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
   KNOWLEDGE_WORK_TEMPLATE_DEFINITION_DIGEST_V1,

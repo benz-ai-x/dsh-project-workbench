@@ -2519,6 +2519,431 @@ export interface DeliverableAcceptanceReviewCenterProjection {
   readonly nextBeforeSequence: number | null
 }
 
+/** Closed project-risk-category-v1 vocabulary. */
+export type ProjectRiskCategory =
+  | 'schedule'
+  | 'dependency'
+  | 'scope'
+  | 'capacity'
+  | 'ownership'
+  | 'quality'
+  | 'information'
+  | 'governance'
+  | 'external'
+  | 'other'
+
+/** Current governed disposition; closed is terminal in T12. */
+export type ProjectRiskStatus = 'research' | 'watch' | 'mitigate' | 'accept' | 'closed'
+export type ProjectRiskTriggerState = 'unknown' | 'not-met' | 'met'
+export type ProjectRiskConfidence = 'low' | 'medium' | 'high'
+export type ProjectRiskExposureLevel = 'low' | 'medium' | 'high'
+export type ProjectRiskClosureReason =
+  | 'no-longer-exists'
+  | 'below-threshold'
+  | 'materialized-as-issue'
+  | 'superseded'
+
+/** Condition is optional; the uncertain event and consequence are always explicit. */
+export interface ProjectRiskStatement {
+  readonly condition: string | null
+  readonly event: string
+  readonly consequence: string
+}
+
+/** Integer probability range for one explicit assessment horizon. */
+export interface ProjectRiskProbabilityInterval {
+  readonly lowerBasisPoints: number
+  readonly upperBasisPoints: number
+}
+
+/** Closed project-risk-impact-v1 range; higher bands are more severe. */
+export interface ProjectRiskImpactInterval {
+  readonly lowerBand: 1 | 2 | 3 | 4 | 5
+  readonly upperBand: 1 | 2 | 3 | 4 | 5
+}
+
+/** Complete Host-derived result from the versioned 5x5 exposure policy. */
+export interface ProjectRiskExposure {
+  readonly policyVersion: 'project-risk-exposure-v1'
+  readonly likelihoodBand: 'P1' | 'P2' | 'P3' | 'P4' | 'P5'
+  readonly impactBand: 'I1' | 'I2' | 'I3' | 'I4' | 'I5'
+  readonly level: ProjectRiskExposureLevel
+}
+
+/** Browser input deliberately omits the Host-derived first-met timestamp. */
+export interface ProjectRiskTriggerDraft {
+  readonly statement: string
+  readonly state: ProjectRiskTriggerState
+  readonly observedAt?: never
+}
+
+export interface ProjectRiskTriggerProjection {
+  readonly statement: string
+  readonly state: ProjectRiskTriggerState
+  readonly observedAt: string | null
+}
+
+/** T12 evidence stays inside immutable, same-Project Workbench facts. */
+export type ProjectRiskEvidenceRef =
+  | {
+    readonly kind: 'workbench-audit-event'
+    readonly auditEventId: string
+    readonly scheduleChangeId?: never
+  }
+  | {
+    readonly kind: 'project-schedule-change'
+    readonly scheduleChangeId: string
+    readonly auditEventId?: never
+  }
+
+export interface ProjectRiskDependency {
+  readonly kind: 'depends-on'
+  readonly riskId: string
+}
+
+/** Complete semantic replacement value; no identity, exposure, or policy is caller supplied. */
+export interface ProjectRiskAssessmentDraft {
+  readonly statement: ProjectRiskStatement
+  readonly category: ProjectRiskCategory
+  readonly trigger: ProjectRiskTriggerDraft
+  readonly probability: ProjectRiskProbabilityInterval
+  readonly impact: ProjectRiskImpactInterval
+  readonly confidence: ProjectRiskConfidence
+  readonly confidenceRationale: string
+  readonly assessmentHorizonEnd: string
+  readonly nextReviewOn: string
+  readonly assumptions: readonly string[]
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly evidence: readonly ProjectRiskEvidenceRef[]
+  readonly dependencies: readonly ProjectRiskDependency[]
+  readonly mitigationTaskGuids: readonly string[]
+  readonly contingencyTaskGuids: readonly string[]
+  readonly exposure?: never
+  readonly assessmentId?: never
+  readonly sequence?: never
+  readonly digest?: never
+  readonly assessedAt?: never
+}
+
+export interface ProjectRiskMemberSnapshot {
+  readonly memberId: string
+  readonly displayName: string
+  readonly kind: 'human' | 'agent'
+}
+
+/** Immutable member identity captured with one assessment version. */
+export interface ProjectRiskResponsibilitySnapshot {
+  readonly accountable: ProjectRiskMemberSnapshot
+  readonly contributors: readonly ProjectRiskMemberSnapshot[]
+  readonly humanSponsor: ProjectRiskMemberSnapshot | null
+}
+
+/** One immutable complete assessment version returned only through the authorized projection. */
+export interface ProjectRiskAssessmentProjection {
+  readonly assessmentId: string
+  readonly sequence: number
+  readonly statement: ProjectRiskStatement
+  readonly category: ProjectRiskCategory
+  readonly trigger: ProjectRiskTriggerProjection
+  readonly probability: ProjectRiskProbabilityInterval
+  readonly impact: ProjectRiskImpactInterval
+  readonly confidence: ProjectRiskConfidence
+  readonly confidenceRationale: string
+  readonly assessmentHorizonEnd: string
+  readonly nextReviewOn: string
+  readonly assumptions: readonly string[]
+  readonly responsibility: ProjectRiskResponsibilitySnapshot
+  readonly evidence: readonly ProjectRiskEvidenceRef[]
+  readonly dependencies: readonly ProjectRiskDependency[]
+  readonly mitigationTaskGuids: readonly string[]
+  readonly contingencyTaskGuids: readonly string[]
+  readonly exposure: ProjectRiskExposure
+  readonly digest: WorkbenchDigest
+  readonly assessedAt: string
+}
+
+export interface ProjectRiskStatusTransitionProjection {
+  readonly transitionId: string
+  readonly sequence: number
+  readonly fromStatus: ProjectRiskStatus
+  readonly toStatus: ProjectRiskStatus
+  readonly rationale: string
+  readonly closureReason: ProjectRiskClosureReason | null
+  readonly occurredAt: string
+}
+
+/** One current Risk summary; selected history is paged independently. */
+export interface ProjectRiskProjection {
+  readonly riskId: string
+  readonly sequence: number
+  readonly revision: number
+  readonly status: ProjectRiskStatus
+  readonly closureReason: ProjectRiskClosureReason | null
+  readonly currentAssessment: ProjectRiskAssessmentProjection
+  readonly treatmentTasks: readonly ProjectRiskTaskLinkProjection[]
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export interface ProjectRiskHistorySource {
+  readonly kind: 'audit-event'
+  readonly auditEventId: string
+}
+
+/** One unified per-Risk historical sequence; the selected detail pages this union. */
+export type ProjectRiskHistoryEntry =
+  | {
+    readonly kind: 'assessment'
+    readonly sequence: number
+    readonly assessment: ProjectRiskAssessmentProjection
+    readonly transition?: never
+    readonly source: ProjectRiskHistorySource
+    readonly actor: WorkbenchActivityActor
+    readonly causationId: string
+  }
+  | {
+    readonly kind: 'transition'
+    readonly sequence: number
+    readonly assessment?: never
+    readonly transition: ProjectRiskStatusTransitionProjection
+    readonly source: ProjectRiskHistorySource
+    readonly actor: WorkbenchActivityActor
+    readonly causationId: string
+  }
+
+export interface ProjectRiskSelectedProjection {
+  readonly risk: ProjectRiskProjection
+  readonly history: readonly ProjectRiskHistoryEntry[]
+  readonly nextBeforeHistorySequence: number | null
+}
+
+export type ProjectRiskActivityAction = 'risk-created' | 'risk-revised' | 'risk-transitioned'
+
+/** Separately authorized Risk replay; transition rationale never enters generic Activity. */
+export interface ProjectRiskActivityEntry {
+  readonly sequence: number
+  readonly activityId: string
+  readonly riskId: string
+  readonly riskRevision: number
+  readonly action: ProjectRiskActivityAction
+  readonly assessmentId: string | null
+  readonly transitionId: string | null
+  readonly fromStatus: ProjectRiskStatus | null
+  readonly toStatus: ProjectRiskStatus
+  readonly rationale: string | null
+  readonly closureReason: ProjectRiskClosureReason | null
+  readonly actor: WorkbenchActivityActor
+  readonly auditEventId: string
+  readonly causationId: string
+  readonly occurredAt: string
+}
+
+/** Safe roster choice; inactive members remain displayable but are not selectable. */
+export interface ProjectRiskMemberOption {
+  readonly memberId: string
+  readonly displayName: string
+  readonly kind: 'human' | 'agent'
+  readonly status: ProjectMemberStatus
+  readonly requiresHumanSponsor: boolean
+  readonly canBeHumanSponsor: boolean
+}
+
+/** Bounded safe source summaries used by the Risk evidence picker. */
+export type ProjectRiskEvidenceOption =
+  | {
+    readonly kind: 'workbench-audit-event'
+    readonly auditEventId: string
+    readonly occurredAt: string
+    readonly summaryCode: WorkbenchActivitySummaryCode
+  }
+  | {
+    readonly kind: 'project-schedule-change'
+    readonly scheduleChangeId: string
+    readonly occurredAt: string
+    readonly source: ProjectScheduleChangeProjection['source']
+    readonly changedFields: ProjectScheduleChangeProjection['changedFields']
+  }
+
+/** Same-Project Risk choice; dependencies are still rechecked transactionally. */
+export interface ProjectRiskDependencyOption {
+  readonly riskId: string
+  readonly status: ProjectRiskStatus
+  readonly statement: ProjectRiskStatement
+  readonly exposure: ProjectRiskExposure
+  readonly selectable: boolean
+}
+
+/** Current Feishu truth joined by stable GUID; Risk never owns task fields. */
+export interface ProjectRiskTaskLinkProjection {
+  readonly role: 'mitigation' | 'contingency'
+  readonly taskGuid: string
+  readonly availability: 'available' | 'unavailable'
+  readonly task: ProjectTaskProjection | null
+}
+
+/** Closed conjunctive filters and three independent descending cursors. */
+export interface ProjectRisksQuery {
+  readonly projectId: string
+  readonly exposure?: ProjectRiskExposureLevel
+  readonly status?: ProjectRiskStatus
+  readonly riskOwnerMemberId?: string
+  readonly triggerState?: ProjectRiskTriggerState
+  readonly triggerContains?: string
+  readonly reviewFrom?: string
+  readonly reviewTo?: string
+  readonly selectedRiskId?: string
+  readonly beforeRiskSequence?: number
+  readonly riskLimit?: number
+  readonly beforeActivitySequence?: number
+  readonly activityLimit?: number
+  readonly beforeHistorySequence?: number
+  readonly historyLimit?: number
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+/** One detached Project Risk page and the form choices from the same authorized read. */
+export interface ProjectRisksProjection {
+  readonly projectId: string
+  readonly revision: number
+  readonly teamRevision: number
+  readonly taskRevision: number
+  readonly risks: readonly ProjectRiskProjection[]
+  readonly nextBeforeRiskSequence: number | null
+  readonly selectedRisk: ProjectRiskSelectedProjection | null
+  readonly activity: readonly ProjectRiskActivityEntry[]
+  readonly nextBeforeActivitySequence: number | null
+  readonly memberOptions: readonly ProjectRiskMemberOption[]
+  readonly evidenceOptions: readonly ProjectRiskEvidenceOption[]
+  readonly dependencyOptions: readonly ProjectRiskDependencyOption[]
+  readonly taskOptions: readonly ProjectTaskProjection[]
+}
+
+export interface CreateProjectRiskRequest {
+  readonly projectId: string
+  readonly assessment: ProjectRiskAssessmentDraft
+  readonly expectedRisksRevision: number
+  readonly expectedRiskRevision: null
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-risk-create'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+export interface ReviseProjectRiskRequest {
+  readonly projectId: string
+  readonly riskId: string
+  readonly assessment: ProjectRiskAssessmentDraft
+  readonly expectedRisksRevision: number
+  readonly expectedRiskRevision: number
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-risk-revise'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+interface TransitionProjectRiskRequestBase {
+  readonly projectId: string
+  readonly riskId: string
+  readonly rationale: string
+  readonly expectedRisksRevision: number
+  readonly expectedRiskRevision: number
+  readonly expectedTaskRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-risk-transition'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+/** Closing is an explicit discriminated branch; every other target forbids a closure reason. */
+export type TransitionProjectRiskRequest =
+  | TransitionProjectRiskRequestBase & {
+    readonly status: Exclude<ProjectRiskStatus, 'closed'>
+    readonly closureReason?: never
+  }
+  | TransitionProjectRiskRequestBase & {
+    readonly status: 'closed'
+    readonly closureReason: ProjectRiskClosureReason
+  }
+
+/** Closed privacy-safe conflict shared by the three Risk commands. */
+export interface ProjectRiskConflict {
+  readonly code:
+    | 'risks-revision-conflict'
+    | 'risk-not-found'
+    | 'risk-revision-conflict'
+    | 'team-revision-conflict'
+    | 'task-projection-revision-conflict'
+    | 'member-not-found'
+    | 'member-inactive'
+    | 'accountable-also-contributor'
+    | 'human-sponsor-required'
+    | 'human-sponsor-invalid'
+    | 'human-sponsor-forbidden'
+    | 'evidence-not-found'
+    | 'evidence-project-mismatch'
+    | 'dependency-not-found'
+    | 'dependency-project-mismatch'
+    | 'dependency-self-reference'
+    | 'dependency-cycle'
+    | 'task-not-in-project'
+    | 'treatment-task-overlap'
+    | 'invalid-status-transition'
+    | 'risk-closed'
+    | 'risk-review-overdue'
+    | 'mitigation-task-required'
+    | 'risk-limit-reached'
+  readonly message: string
+  readonly expectedRevision?: number
+  readonly currentRevision?: number
+}
+
+export type CreateProjectRiskResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectRisksProjection
+    readonly risk: ProjectRiskProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectRiskConflict }
+
+export type ReviseProjectRiskResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectRisksProjection
+    readonly risk: ProjectRiskProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectRiskConflict }
+
+export type TransitionProjectRiskResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectRisksProjection
+    readonly risk: ProjectRiskProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectRiskConflict }
+
 /** Closed Review Center query/result unions; each target keeps a typed command. */
 export type ReviewCenterQuery = ReviewCenterFilter | DeliverableAcceptanceReviewCenterFilter
 export type ReviewCenterResultProjection =
