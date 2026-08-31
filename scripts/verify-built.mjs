@@ -583,7 +583,11 @@ function verifyTypertFace(face, packageName, label) {
     `${packageName}: ${label} Project Risks carrier accepts public status/trigger filters and rejects disposition or authority aliases`,
   )
 
-  const risksProjection = unwrapSchema(projectRisks?.result?.schema)
+  const rawRisksProjection = unwrapSchema(projectRisks?.result?.schema)
+  const risksProjection = schemaObjectKeys(rawRisksProjection).includes('projectId')
+    ? rawRisksProjection
+    : unionOptions(rawRisksProjection).find(option =>
+        schemaObjectKeys(option).includes('projectId'))
   const risksProjectionShape = risksProjection?.def?.shape
   check(
     sameStrings(schemaObjectKeys(risksProjection), [
@@ -660,10 +664,14 @@ function verifyTypertFace(face, packageName, label) {
       ]),
     `${packageName}: ${label} immutable Risk assessments project Host trigger time, assessed time, digest, and deterministic exposure`,
   )
-  const selectedRiskShape = unwrapSchema(risksProjectionShape?.selectedRisk)?.def?.shape
+  const rawSelectedRisk = unwrapSchema(risksProjectionShape?.selectedRisk)
+  const selectedRisk = schemaObjectKeys(rawSelectedRisk).includes('history')
+    ? rawSelectedRisk
+    : unionOptions(rawSelectedRisk).find(option => schemaObjectKeys(option).includes('history'))
+  const selectedRiskShape = unwrapSchema(selectedRisk)?.def?.shape
   const historyEntry = arrayElementSchema(selectedRiskShape?.history)
   check(
-    sameStrings(schemaObjectKeys(risksProjectionShape?.selectedRisk), [
+    sameStrings(schemaObjectKeys(selectedRisk), [
       'history', 'nextBeforeHistorySequence', 'risk',
     ])
       && unionOptions(historyEntry).length === 2

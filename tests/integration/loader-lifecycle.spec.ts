@@ -979,10 +979,17 @@ describe('built Workbench Host through the real DSH Loader', () => {
       selectedRisk: null,
       activity: [],
       nextBeforeActivitySequence: null,
-      evidenceOptions: [],
       dependencyOptions: [],
       taskOptions: [],
     })
+    expect(emptyRisks.evidenceOptions).toEqual(expect.arrayContaining([{
+      kind: 'workbench-audit-event',
+      summaryCode: 'project-created-from-template',
+      auditEventId: expect.stringMatching(/^audit-/u),
+      occurredAt: expect.stringMatching(/Z$/u),
+    }]))
+    expect(JSON.stringify(emptyRisks.evidenceOptions)).not.toContain('Loader-created Project')
+    expect(JSON.stringify(emptyRisks.evidenceOptions)).not.toContain('Shorten Loader feedback time')
 
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
