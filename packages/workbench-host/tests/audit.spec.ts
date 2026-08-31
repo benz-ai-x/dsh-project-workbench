@@ -439,6 +439,90 @@ describe('audit hash envelope', () => {
       summary: { code: 'feishu-route-configured', changedFields: ['route', 'appSecret'] },
     })).toThrow(/correlated combination/u)
   })
+
+  it('admits only correlated, redacted Project Calendar and Milestone vocabulary', () => {
+    const calendarScope = {
+      organizationId: 'organization-001',
+      teamId: 'team-001',
+      projectId: 'project-001',
+    }
+    const cases: readonly AuditEventInput[] = [
+      {
+        ...eventInput(),
+        action: 'workbench.project-calendar.bound',
+        scope: calendarScope,
+        reason: { code: 'owner-project-calendar-bind' },
+        object: { type: 'project-calendar-binding', id: 'project-001', version: '1' },
+        command: { id: 'command-calendar-001', type: 'workbench.project-calendar.bind' },
+        summary: { code: 'project-calendar-bound', changedFields: ['calendarBinding'] },
+      },
+      {
+        ...eventInput(),
+        action: 'workbench.project-calendar.bound',
+        scope: calendarScope,
+        reason: { code: 'owner-project-calendar-bind' },
+        object: { type: 'project-calendar-binding', id: 'project-001', version: '1' },
+        command: { id: 'command-calendar-002', type: 'workbench.project-calendar.bind' },
+        summary: {
+          code: 'project-calendar-bound',
+          changedFields: ['calendarBinding', 'effectState'],
+        },
+      },
+      {
+        ...eventInput(),
+        action: 'workbench.project-milestone.created',
+        scope: calendarScope,
+        reason: { code: 'owner-project-milestone-create' },
+        object: { type: 'project-milestone', id: 'milestone-001', version: '1' },
+        command: { id: 'command-milestone-001', type: 'workbench.project-milestone.create' },
+        summary: { code: 'project-milestone-created', changedFields: ['eventBinding', 'schedule'] },
+      },
+      {
+        ...eventInput(),
+        action: 'workbench.project-milestone.created',
+        scope: calendarScope,
+        reason: { code: 'owner-project-milestone-create' },
+        object: { type: 'project-milestone', id: 'milestone-002', version: '1' },
+        command: { id: 'command-milestone-002', type: 'workbench.project-milestone.create' },
+        summary: {
+          code: 'project-milestone-created',
+          changedFields: ['eventBinding', 'schedule', 'effectState'],
+        },
+      },
+      {
+        ...eventInput(),
+        action: 'workbench.project-milestone.date-update-requested',
+        scope: calendarScope,
+        reason: { code: 'owner-project-milestone-date-update' },
+        object: { type: 'project-milestone', id: 'milestone-001', version: '2' },
+        command: {
+          id: 'command-milestone-date-001',
+          type: 'workbench.project-milestone.date-update',
+        },
+        summary: {
+          code: 'project-milestone-date-update-requested',
+          changedFields: ['schedule', 'effectState'],
+        },
+      },
+    ]
+
+    for (const input of cases) {
+      const created = createAuditEvent(input)
+      expect(created.scope.projectId).toBe('project-001')
+      expect(created.canonicalEnvelope).not.toMatch(
+        /calendar-private|event-private|milestone name|2026-09-01|applink\.feishu/u,
+      )
+    }
+
+    expect(() => createAuditEvent({
+      ...cases[4]!,
+      command: { id: 'command-wrong', type: 'workbench.project-milestone.create' },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...cases[0]!,
+      summary: { code: 'project-calendar-bound', changedFields: ['calendarId'] },
+    })).toThrow(/correlated combination/u)
+  })
 })
 
 describe('audit chain verification', () => {

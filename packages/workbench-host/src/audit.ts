@@ -69,6 +69,9 @@ export interface AuditCommandReference {
     | 'workbench.feishu-task.reference'
     | 'workbench.feishu-task.update'
     | 'workbench.feishu-task-workflow.configure'
+    | 'workbench.project-calendar.bind'
+    | 'workbench.project-milestone.create'
+    | 'workbench.project-milestone.date-update'
 }
 
 export interface AuditCausationReference {
@@ -437,7 +440,10 @@ function normalizeReason(value: unknown): AuditReason {
     && record.code !== 'owner-feishu-task-list-bind'
     && record.code !== 'owner-feishu-task-reference'
     && record.code !== 'owner-feishu-task-update'
-    && record.code !== 'owner-feishu-task-workflow-configure') {
+    && record.code !== 'owner-feishu-task-workflow-configure'
+    && record.code !== 'owner-project-calendar-bind'
+    && record.code !== 'owner-project-milestone-create'
+    && record.code !== 'owner-project-milestone-date-update') {
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -538,7 +544,10 @@ function auditAction(value: unknown): WorkbenchAuditAction {
     && value !== 'workbench.feishu-task-list.bound'
     && value !== 'workbench.feishu-task.referenced'
     && value !== 'workbench.feishu-task.update-requested'
-    && value !== 'workbench.feishu-task-workflow.configured') {
+    && value !== 'workbench.feishu-task-workflow.configured'
+    && value !== 'workbench.project-calendar.bound'
+    && value !== 'workbench.project-milestone.created'
+    && value !== 'workbench.project-milestone.date-update-requested') {
     throw new TypeError('Audit action is unsupported')
   }
   return value
@@ -553,7 +562,9 @@ function auditObjectType(value: unknown): WorkbenchAuditObjectType {
     && value !== 'feishu-connection'
     && value !== 'feishu-task-list-binding'
     && value !== 'feishu-task'
-    && value !== 'feishu-task-workflow') {
+    && value !== 'feishu-task-workflow'
+    && value !== 'project-calendar-binding'
+    && value !== 'project-milestone') {
     throw new TypeError('Audit object type is unsupported')
   }
   return value
@@ -577,7 +588,10 @@ function auditCommandType(value: unknown): AuditCommandReference['type'] {
     && value !== 'workbench.feishu-task-list.bind'
     && value !== 'workbench.feishu-task.reference'
     && value !== 'workbench.feishu-task.update'
-    && value !== 'workbench.feishu-task-workflow.configure') {
+    && value !== 'workbench.feishu-task-workflow.configure'
+    && value !== 'workbench.project-calendar.bind'
+    && value !== 'workbench.project-milestone.create'
+    && value !== 'workbench.project-milestone.date-update') {
     throw new TypeError('Audit command type is unsupported')
   }
   return value
@@ -603,7 +617,10 @@ function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
     && value !== 'feishu-task-list-bound'
     && value !== 'feishu-task-referenced'
     && value !== 'feishu-task-update-requested'
-    && value !== 'feishu-task-workflow-configured') {
+    && value !== 'feishu-task-workflow-configured'
+    && value !== 'project-calendar-bound'
+    && value !== 'project-milestone-created'
+    && value !== 'project-milestone-date-update-requested') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -757,6 +774,29 @@ function assertCorrelatedVocabulary(
           && summary.code === 'feishu-task-workflow-configured'
           && exactChangedFields(summary, ['workflowDefinition', 'fieldMapping', 'compatibility'])
           && scope.projectId === object.id
+      case 'workbench.project-calendar.bound':
+        return reason.code === 'owner-project-calendar-bind'
+          && object.type === 'project-calendar-binding'
+          && command.type === 'workbench.project-calendar.bind'
+          && summary.code === 'project-calendar-bound'
+          && (exactChangedFields(summary, ['calendarBinding'])
+            || exactChangedFields(summary, ['calendarBinding', 'effectState']))
+          && scope.projectId === object.id
+      case 'workbench.project-milestone.created':
+        return reason.code === 'owner-project-milestone-create'
+          && object.type === 'project-milestone'
+          && command.type === 'workbench.project-milestone.create'
+          && summary.code === 'project-milestone-created'
+          && (exactChangedFields(summary, ['eventBinding', 'schedule'])
+            || exactChangedFields(summary, ['eventBinding', 'schedule', 'effectState']))
+          && scope.projectId !== null
+      case 'workbench.project-milestone.date-update-requested':
+        return reason.code === 'owner-project-milestone-date-update'
+          && object.type === 'project-milestone'
+          && command.type === 'workbench.project-milestone.date-update'
+          && summary.code === 'project-milestone-date-update-requested'
+          && exactChangedFields(summary, ['schedule', 'effectState'])
+          && scope.projectId !== null
     }
   })()
   if (!correlated) {
