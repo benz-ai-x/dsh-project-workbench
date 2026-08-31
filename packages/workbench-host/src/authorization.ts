@@ -27,6 +27,10 @@ export type WorkbenchAction =
   | 'workbench.project.tasks.update'
   | 'workbench.project.tasks.workflow.read'
   | 'workbench.project.tasks.workflow.configure'
+  | 'workbench.project.calendar.read'
+  | 'workbench.project.calendar.bind'
+  | 'workbench.project.calendar.reconcile'
+  | 'workbench.project.milestone.write'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

@@ -88,6 +88,12 @@ function connection(workbench: SqliteWorkbenchRepository): DatabaseSync {
 
 function dropTaskFederationSchema(database: DatabaseSync): void {
   database.exec(`
+    DROP TABLE workbench_feishu_calendar_effect;
+    DROP TABLE workbench_feishu_calendar_inbox;
+    DROP TABLE workbench_project_schedule_change;
+    DROP TABLE workbench_project_milestone;
+    DROP TABLE workbench_project_calendar_binding;
+    DROP TABLE workbench_project_calendar_head;
     DROP TRIGGER workbench_feishu_task_workflow_operation_no_delete;
     DROP TRIGGER workbench_feishu_task_workflow_operation_intent_no_update;
     DROP TRIGGER workbench_feishu_task_workflow_version_no_delete;
@@ -1217,7 +1223,7 @@ describe('SqliteWorkbenchRepository', () => {
     await expect(workbench.open()).rejects.toThrow(/closed/u)
   })
 
-  it('migrates v2 through v8, seeds the exact template, and preserves the T03 ledger', async () => {
+  it('migrates v2 through v9, seeds the exact template, and preserves the T03 ledger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1280,7 +1286,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({
-      user_version: 8,
+      user_version: 9,
     })
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({
       id: 'status-legacy-v2',
@@ -1953,7 +1959,7 @@ describe('SqliteWorkbenchRepository', () => {
 
     const upgraded = repository(path)
     await upgraded.open()
-    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 8 })
+    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
     await expect(upgraded.readProjectTeam({
       organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
     }, signal)).resolves.toEqual({
@@ -2025,7 +2031,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     const database = connection(upgraded)
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 8 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
     expect(database.prepare(`
       SELECT name FROM sqlite_schema
       WHERE type = 'table' AND name LIKE 'workbench_suggested_change%'

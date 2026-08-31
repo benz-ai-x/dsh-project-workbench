@@ -562,6 +562,12 @@ function restartScenario(
 
 function dropV8WorkflowSchema(database: DatabaseSync): void {
   database.exec(`
+    DROP TABLE workbench_feishu_calendar_effect;
+    DROP TABLE workbench_feishu_calendar_inbox;
+    DROP TABLE workbench_project_schedule_change;
+    DROP TABLE workbench_project_milestone;
+    DROP TABLE workbench_project_calendar_binding;
+    DROP TABLE workbench_project_calendar_head;
     DROP TRIGGER workbench_feishu_task_workflow_operation_no_delete;
     DROP TRIGGER workbench_feishu_task_workflow_operation_intent_no_update;
     DROP TRIGGER workbench_feishu_task_workflow_version_no_delete;
@@ -602,7 +608,7 @@ function legacyStatusMutation(): WorkbenchStatusMutation {
 }
 
 describe('T09 workflow reliability', () => {
-  it('migrates an exact Schema v7 database to v8 and survives a second restart', async () => {
+  it('migrates an exact Schema v7 database to v9 and survives a second restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-workbench-t09-v7-'))
     temporaryRoots.push(root)
     const databasePath = join(root, 'workbench.sqlite')
@@ -662,7 +668,7 @@ describe('T09 workflow reliability', () => {
       eventCount: 1,
     })
     expect((Reflect.get(restarted, 'database') as DatabaseSync)
-      .prepare('PRAGMA user_version').get()).toEqual({ user_version: 8 })
+      .prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
     await restarted.close()
   })
 

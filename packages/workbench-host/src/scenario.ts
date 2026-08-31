@@ -1,10 +1,12 @@
 /** Highest-level deterministic seam around the Workbench public command/query surface. */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  BindProjectCalendarRequest,
+  BindProjectCalendarResult,
   BindFeishuTaskListRequest,
   BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteRequest,
@@ -14,9 +16,17 @@ import type {
   ConfigureFeishuTaskWorkflowResult,
   CreateProjectRequest,
   CreateProjectResult,
+  CreateProjectMilestoneRequest,
+  CreateProjectMilestoneResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
   DiscoverFeishuTaskListsRequest,
+  DiscoverFeishuCalendarsRequest,
+  DiscoverFeishuCalendarEventsRequest,
+  FeishuCalendarDiscoveryProjection,
+  FeishuCalendarEventDiscoveryProjection,
+  FeishuCalendarEventInput,
+  FeishuCalendarEventResult,
   DiscoverFeishuTaskWorkflowFieldsRequest,
   FeishuActorBinding,
   FeishuConnectionIssue,
@@ -33,6 +43,9 @@ import type {
   FeishuScopeObservation,
   OutcomeDraft,
   ProjectDetailProjection,
+  ProjectCalendarSchedule,
+  ProjectMilestonesProjection,
+  ProjectMilestonesQuery,
   ProjectMemberDraft,
   ProjectQuery,
   ProjectResponsibilitySuggestedValue,
@@ -50,6 +63,8 @@ import type {
   ProposeProjectResponsibilityChangeResult,
   ReconcileProjectTasksRequest,
   ReconcileProjectTasksResult,
+  ReconcileProjectCalendarRequest,
+  ReconcileProjectCalendarResult,
   ReferenceFeishuTaskRequest,
   ReferenceFeishuTaskResult,
   ReviewCenterFilter,
@@ -65,15 +80,19 @@ import type {
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
+  WorkbenchProjectCalendarReason,
   WorkbenchFeishuTaskReason,
   WorkbenchStatusSnapshot,
   VerifyFeishuIdentityRouteRequest,
   VerifyFeishuIdentityRouteResult,
   UpdateFeishuTaskRequest,
   UpdateFeishuTaskResult,
+  UpdateProjectMilestoneDateRequest,
+  UpdateProjectMilestoneDateResult,
 } from './client.ts'
 import {
   projectDetailProjection,
+  projectMilestonesProjection,
   projectResult,
   projectStartProjection,
   projectTeamCommandResult,
@@ -96,6 +115,8 @@ import {
   type WorkbenchSuggestedChangeProposalMutation,
   type WorkbenchFeishuTaskWorkflowMappedField,
   type WorkbenchFeishuTaskWorkflowContext,
+  type WorkbenchFeishuCalendarReconciliationTarget,
+  type WorkbenchProjectMilestoneReplayQuery,
 } from './repository.ts'
 import type { AuthorizedScope, WorkbenchAuthorization } from './authorization.ts'
 import type {
@@ -104,6 +125,11 @@ import type {
   WorkbenchFeishuTaskRoute,
   WorkbenchFeishuTaskWorkflowFieldWrite,
 } from './feishu-task-federation.ts'
+import type {
+  WorkbenchFeishuCalendarEventSnapshot,
+  WorkbenchFeishuCalendarExternalAdapter,
+  WorkbenchFeishuCalendarRoute,
+} from './feishu-calendar-federation.ts'
 import {
   assessTaskWorkflowCompatibility,
   projectTaskWorkflowDefinition,
@@ -127,6 +153,8 @@ export interface WorkbenchIdGenerator {
   nextCommandId(): string
   nextAuditEventId(): string
   nextOutboxId(): string
+  nextMilestoneId?(): string
+  nextScheduleChangeId?(): string
 }
 
 /** Stable identity for a future independently versioned external capability. */
@@ -193,6 +221,7 @@ export interface WorkbenchFeishuExternalAdapter extends WorkbenchExternalAdapter
 export interface WorkbenchExternalAdapters {
   readonly feishu?: WorkbenchFeishuExternalAdapter
   readonly feishuTasks?: WorkbenchFeishuTaskExternalAdapter
+  readonly feishuCalendars?: WorkbenchFeishuCalendarExternalAdapter
   readonly files?: WorkbenchExternalAdapter
   readonly modelAndSubagent?: WorkbenchExternalAdapter
   readonly scheduler?: WorkbenchExternalAdapter
@@ -208,6 +237,8 @@ export interface WorkbenchScenarioOptions {
   readonly maxStatusLength: number
   /** Zero/omitted disables the timer; production supplies a bounded interval. */
   readonly taskReconciliationIntervalMs?: number
+  /** Zero/omitted disables Calendar repair; notification hints remain optional. */
+  readonly calendarReconciliationIntervalMs?: number
 }
 
 export const systemWorkbenchClock: WorkbenchClock = Object.freeze({
@@ -226,6 +257,8 @@ export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextCommandId: () => `command-${randomUUID()}`,
   nextAuditEventId: () => `audit-${randomUUID()}`,
   nextOutboxId: () => `outbox-${randomUUID()}`,
+  nextMilestoneId: () => `milestone-${randomUUID()}`,
+  nextScheduleChangeId: () => `schedule-change-${randomUUID()}`,
 })
 
 export const noWorkbenchExternalAdapters: WorkbenchExternalAdapters = Object.freeze({})
@@ -245,6 +278,9 @@ export class WorkbenchScenario {
   private taskEventUnsubscribe: (() => void) | undefined
   private taskReconciliationTimer: ReturnType<typeof setInterval> | undefined
   private periodicReconciliationRunning = false
+  private calendarEventUnsubscribe: (() => void) | undefined
+  private calendarReconciliationTimer: ReturnType<typeof setInterval> | undefined
+  private periodicCalendarReconciliationRunning = false
 
   constructor(readonly options: WorkbenchScenarioOptions) {
     if (!Number.isSafeInteger(options.maxStatusLength) || options.maxStatusLength < 1) {
@@ -254,6 +290,11 @@ export class WorkbenchScenario {
       && (!Number.isSafeInteger(options.taskReconciliationIntervalMs)
         || options.taskReconciliationIntervalMs < 0)) {
       throw new TypeError('taskReconciliationIntervalMs must be a non-negative safe integer')
+    }
+    if (options.calendarReconciliationIntervalMs !== undefined
+      && (!Number.isSafeInteger(options.calendarReconciliationIntervalMs)
+        || options.calendarReconciliationIntervalMs < 0)) {
+      throw new TypeError('calendarReconciliationIntervalMs must be a non-negative safe integer')
     }
   }
 
@@ -1378,6 +1419,705 @@ export class WorkbenchScenario {
     })
   }
 
+  /** Discover calendars only through one explicitly selected verified route. */
+  discoverFeishuCalendars(
+    request: DiscoverFeishuCalendarsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuCalendarDiscoveryProjection> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'discoverFeishuCalendars')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.calendar.read',
+        operationSignal,
+      )
+      const normalized = validateDiscoverFeishuCalendarsRequest(request)
+      const project = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (project === null) throw badRequest('Project was not found', { field: 'projectId' })
+      const stored = await this.options.repository.readFeishuConnection(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+      }), operationSignal)
+      const resolved = resolveCalendarRouteForBinding(stored, normalized)
+      if (!resolved.ok) throw unavailable(resolved.error.error.message)
+      const observed = await requiredCalendarAdapter(this.options.adapters).listCalendars(
+        resolved.route,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (observed.state !== 'ok') throw unavailable('Feishu calendar discovery was rejected')
+      const seen = new Set<string>()
+      const items = Object.freeze(observed.value.map((item) => {
+        validateCalendarSnapshot(item)
+        if (seen.has(item.calendarId)) {
+          throw infrastructure('Feishu calendar discovery returned a duplicate identity')
+        }
+        seen.add(item.calendarId)
+        return calendarCandidate(item)
+      }))
+      return Object.freeze({
+        projectId: normalized.projectId,
+        connectionRevision: stored.revision,
+        kind: normalized.kind,
+        routeGeneration: normalized.expectedRouteGeneration,
+        items,
+      })
+    })
+  }
+
+  /** Bind exactly one immutable writable Calendar, reserving create before provider I/O. */
+  bindProjectCalendar(
+    request: BindProjectCalendarRequest,
+    signal: AbortSignal,
+  ): Promise<BindProjectCalendarResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'bindProjectCalendar')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.calendar.bind',
+        operationSignal,
+      )
+      const normalized = validateBindProjectCalendarRequest(request)
+      const intent = normalized.mode === 'existing'
+        ? Object.freeze({ mode: 'existing' as const, calendarId: normalized.calendarId })
+        : Object.freeze({
+          mode: 'create' as const,
+          summary: normalized.summary,
+          description: normalized.description ?? null,
+        })
+      const replay = await this.options.repository.replayFeishuCalendarBinding(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        intent,
+        kind: normalized.kind,
+        expectedConnectionRevision: normalized.expectedConnectionRevision,
+        expectedRouteGeneration: normalized.expectedRouteGeneration,
+        expectedBindingRevision: null,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+      }), operationSignal)
+      if (replay !== null) return replay
+      const current = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (current === null) return calendarProjectNotFound(normalized.projectId)
+      if (current.binding !== null) return calendarAlreadyBound(current)
+      const stored = await this.options.repository.readFeishuConnection(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+      }), operationSignal)
+      const resolved = resolveCalendarRouteForBinding(stored, normalized)
+      if (!resolved.ok) return resolved.error
+      const adapter = requiredCalendarAdapter(this.options.adapters)
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const command = calendarCommand(
+        this.options.ids,
+        commandId,
+        scope,
+        normalized.idempotencyKey,
+        normalized.causationId,
+        normalized.reason,
+        occurredAt,
+      )
+      if (normalized.mode === 'existing') {
+        const observed = await adapter.readCalendar(
+          resolved.route,
+          normalized.calendarId,
+          operationSignal,
+        )
+        throwIfCancelled(operationSignal)
+        if (observed.state !== 'ok') return calendarRemoteBindFailure('remote-rejected', observed.issue)
+        validateCalendarSnapshot(observed.value)
+        if (observed.value.calendarId !== normalized.calendarId) {
+          throw infrastructure('Feishu calendar read changed resource identity')
+        }
+        if (!calendarSelectable(observed.value)) return calendarNotSelectable()
+        return this.options.repository.commitFeishuCalendarBinding(Object.freeze({
+          projectId: normalized.projectId,
+          intent: Object.freeze({ mode: 'existing' as const, calendarId: normalized.calendarId }),
+          expectedConnectionRevision: normalized.expectedConnectionRevision,
+          expectedRouteGeneration: normalized.expectedRouteGeneration,
+          expectedBindingRevision: null,
+          route: resolved.route,
+          snapshot: observed.value,
+          boundAt: occurredAt,
+          command,
+        }), operationSignal)
+      }
+      const effectId = generatedId(`effect-${commandId}`, 'Calendar effect')
+      let reservation = await this.options.repository.reserveFeishuCalendarCreation(Object.freeze({
+        effectId,
+        projectId: normalized.projectId,
+        intent: Object.freeze({
+          mode: 'create' as const,
+          summary: normalized.summary,
+          description: normalized.description ?? null,
+        }),
+        expectedConnectionRevision: normalized.expectedConnectionRevision,
+        expectedRouteGeneration: normalized.expectedRouteGeneration,
+        expectedBindingRevision: null,
+        route: resolved.route,
+        preparedAt: occurredAt,
+        command,
+      }), operationSignal)
+      if (reservation.state !== 'deliver') return reservation.result
+      if (!await this.options.repository.claimFeishuCalendarEffect(
+        effectId,
+        commandInstant(this.options.clock),
+        operationSignal,
+      )) {
+        reservation = await this.options.repository.reserveFeishuCalendarCreation(Object.freeze({
+          effectId,
+          projectId: normalized.projectId,
+          intent: Object.freeze({
+            mode: 'create' as const,
+            summary: normalized.summary,
+            description: normalized.description ?? null,
+          }),
+          expectedConnectionRevision: normalized.expectedConnectionRevision,
+          expectedRouteGeneration: normalized.expectedRouteGeneration,
+          expectedBindingRevision: null,
+          route: resolved.route,
+          preparedAt: occurredAt,
+          command,
+        }), operationSignal)
+        if (reservation.state !== 'deliver') return reservation.result
+        return calendarUnknownBinding(reservation.effect)
+      }
+      const settleSignal = new AbortController().signal
+      try {
+        const outcome = await adapter.createCalendar(
+          reservation.route,
+          Object.freeze({ summary: normalized.summary, description: normalized.description ?? null }),
+          operationSignal,
+        )
+        const settledAt = commandInstant(this.options.clock)
+        if (outcome.state === 'ok') {
+          validateCalendarSnapshot(outcome.value)
+          if (!calendarSelectable(outcome.value)) {
+            return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+              state: 'failed',
+              issue: invalidCalendarIssue(),
+              settledAt,
+            }), settleSignal)
+          }
+          return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+            state: 'delivered', calendar: outcome.value, settledAt,
+          }), settleSignal)
+        }
+        return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+          state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+          issue: outcome.issue,
+          settledAt,
+        }), settleSignal)
+      } catch {
+        return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+          state: 'unknown',
+          issue: ambiguousCalendarTransportIssue(),
+          settledAt: commandInstant(this.options.clock),
+        }), settleSignal)
+      }
+    })
+  }
+
+  /** Discover non-recurring event candidates on the immutable bound Calendar. */
+  discoverFeishuCalendarEvents(
+    request: DiscoverFeishuCalendarEventsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuCalendarEventDiscoveryProjection> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'discoverFeishuCalendarEvents')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.calendar.read',
+        operationSignal,
+      )
+      const normalized = validateDiscoverFeishuCalendarEventsRequest(request)
+      const current = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (current === null) throw badRequest('Project was not found', { field: 'projectId' })
+      if (current.binding === null) throw unavailable('Project has no bound Calendar')
+      if (current.revision !== normalized.expectedRevision) {
+        throw unavailable('Project schedule revision changed before event discovery')
+      }
+      const target = await this.options.repository.readFeishuCalendarReconciliationTarget(
+        Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }),
+        operationSignal,
+      )
+      if (target === null) throw infrastructure('Workbench Calendar target disappeared')
+      const observed = await requiredCalendarAdapter(this.options.adapters).listCalendarEvents(
+        target.route,
+        target.calendarId,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (observed.state !== 'ok') throw unavailable('Feishu event discovery was rejected')
+      const used = new Set(target.milestones.map(milestone => milestone.eventId))
+      const seen = new Set<string>()
+      const items = Object.freeze(observed.value.map((item) => {
+        validateCalendarEventSnapshot(item)
+        if (seen.has(item.eventId)) throw infrastructure('Feishu event discovery returned a duplicate')
+        seen.add(item.eventId)
+        return calendarEventCandidate(item, target.calendarId, !used.has(item.eventId))
+      }))
+      return Object.freeze({
+        projectId: normalized.projectId,
+        revision: current.revision,
+        calendarId: target.calendarId,
+        items,
+      })
+    })
+  }
+
+  /** Read the detached authoritative Milestone projection. */
+  getProjectMilestones(
+    query: ProjectMilestonesQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectMilestonesProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'getProjectMilestones')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.calendar.read',
+        operationSignal,
+      )
+      const normalized = validateProjectMilestonesQuery(query)
+      const projection = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.project.calendar.read',
+        projectMilestonesProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Create Workbench Milestone semantics around one existing or newly created event. */
+  createProjectMilestone(
+    request: CreateProjectMilestoneRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectMilestoneResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'createProjectMilestone')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.milestone.write',
+        operationSignal,
+      )
+      const normalized = validateCreateProjectMilestoneRequest(request)
+      const description = normalized.description ?? null
+      const intent: WorkbenchProjectMilestoneReplayQuery['intent'] = normalized.mode === 'existing-event'
+        ? Object.freeze({ mode: 'existing-event', eventId: normalized.eventId })
+        : Object.freeze({ mode: 'create-event', schedule: normalized.schedule })
+      const replay = await this.options.repository.replayProjectMilestoneCreation(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        expectedRevision: normalized.expectedRevision,
+        expectedMilestoneRevision: null,
+        name: normalized.name,
+        description,
+        intent,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+      }), operationSignal)
+      if (replay !== null) return replay
+      const current = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const preflight = milestoneCreationPreflight(current, normalized)
+      if (preflight !== null) return preflight
+      const target = await this.options.repository.readFeishuCalendarReconciliationTarget(
+        Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }),
+        operationSignal,
+      )
+      if (target === null) throw infrastructure('Workbench Calendar target disappeared')
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const milestoneId = nextMilestoneId(this.options.ids, commandId)
+      const changeId = nextScheduleChangeId(this.options.ids, `${commandId}-created`)
+      const command = calendarCommand(
+        this.options.ids,
+        commandId,
+        scope,
+        normalized.idempotencyKey,
+        normalized.causationId,
+        normalized.reason,
+        occurredAt,
+      )
+      const adapter = requiredCalendarAdapter(this.options.adapters)
+      if (normalized.mode === 'existing-event') {
+        const observed = await adapter.readCalendarEvent(
+          target.route,
+          target.calendarId,
+          normalized.eventId,
+          operationSignal,
+        )
+        throwIfCancelled(operationSignal)
+        if (observed.state !== 'ok') return milestoneRemoteFailure('remote-rejected', observed.issue)
+        validateCalendarEventSnapshot(observed.value)
+        if (!eventSelectable(observed.value, target.calendarId)
+          || observed.value.eventId !== normalized.eventId) return milestoneEventNotSelectable()
+        return this.options.repository.commitProjectMilestone(Object.freeze({
+          milestoneId,
+          changeId,
+          projectId: normalized.projectId,
+          expectedRevision: normalized.expectedRevision,
+          expectedMilestoneRevision: null,
+          name: normalized.name,
+          description,
+          intent: Object.freeze({
+            mode: 'existing-event' as const,
+            eventId: normalized.eventId,
+          }),
+          event: observed.value,
+          createdAt: occurredAt,
+          command,
+        }), operationSignal)
+      }
+      const effectId = generatedId(`effect-${commandId}`, 'Calendar effect')
+      const providerIdempotencyKey = calendarProviderIdempotencyKey(commandId, normalized.projectId)
+      let reservation = await this.options.repository.reserveFeishuCalendarEventCreation(
+        Object.freeze({
+          effectId,
+          milestoneId,
+          changeId,
+          projectId: normalized.projectId,
+          expectedRevision: normalized.expectedRevision,
+          expectedMilestoneRevision: null,
+          name: normalized.name,
+          description,
+          schedule: normalized.schedule,
+          providerIdempotencyKey,
+          preparedAt: occurredAt,
+          command,
+        }),
+        operationSignal,
+      )
+      if (reservation.state !== 'deliver') return reservation.result
+      if (!await this.options.repository.claimFeishuCalendarEffect(
+        effectId,
+        commandInstant(this.options.clock),
+        operationSignal,
+      )) {
+        reservation = await this.options.repository.reserveFeishuCalendarEventCreation(
+          Object.freeze({
+            effectId,
+            milestoneId,
+            changeId,
+            projectId: normalized.projectId,
+            expectedRevision: normalized.expectedRevision,
+            expectedMilestoneRevision: null,
+            name: normalized.name,
+            description,
+            schedule: normalized.schedule,
+            providerIdempotencyKey,
+            preparedAt: occurredAt,
+            command,
+          }),
+          operationSignal,
+        )
+        if (reservation.state !== 'deliver') return reservation.result
+        return milestoneUnknownCreation(reservation.effect)
+      }
+      const settleSignal = new AbortController().signal
+      try {
+        const outcome = await adapter.createCalendarEvent(
+          reservation.route,
+          Object.freeze({
+            calendarId: reservation.calendarId,
+            idempotencyKey: reservation.providerIdempotencyKey,
+            summary: normalized.name,
+            description,
+            schedule: normalized.schedule,
+          }),
+          operationSignal,
+        )
+        const settledAt = commandInstant(this.options.clock)
+        if (outcome.state === 'ok') {
+          validateCalendarEventSnapshot(outcome.value)
+          if (!eventSelectable(outcome.value, reservation.calendarId)) {
+            return this.options.repository.settleFeishuCalendarEventCreation(
+              effectId,
+              Object.freeze({ state: 'failed', issue: invalidCalendarIssue(), settledAt }),
+              settleSignal,
+            )
+          }
+          return this.options.repository.settleFeishuCalendarEventCreation(
+            effectId,
+            Object.freeze({ state: 'delivered', event: outcome.value, settledAt }),
+            settleSignal,
+          )
+        }
+        return this.options.repository.settleFeishuCalendarEventCreation(
+          effectId,
+          Object.freeze({
+            state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+            issue: outcome.issue,
+            settledAt,
+          }),
+          settleSignal,
+        )
+      } catch {
+        return this.options.repository.settleFeishuCalendarEventCreation(
+          effectId,
+          Object.freeze({
+            state: 'unknown',
+            issue: ambiguousCalendarTransportIssue(),
+            settledAt: commandInstant(this.options.clock),
+          }),
+          settleSignal,
+        )
+      }
+    })
+  }
+
+  /** GET-before-reserve, claim once, PATCH dates only, and project only Feishu's response. */
+  updateProjectMilestoneDate(
+    request: UpdateProjectMilestoneDateRequest,
+    signal: AbortSignal,
+  ): Promise<UpdateProjectMilestoneDateResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'updateProjectMilestoneDate')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.milestone.write',
+        operationSignal,
+      )
+      const normalized = validateUpdateProjectMilestoneDateRequest(request)
+      const current = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const preflight = milestoneDatePreflight(current, normalized)
+      if (preflight !== null) return preflight
+      const target = await this.options.repository.readFeishuCalendarReconciliationTarget(
+        Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }),
+        operationSignal,
+      )
+      if (target === null) throw infrastructure('Workbench Calendar target disappeared')
+      const milestone = target.milestones.find(item => item.milestoneId === normalized.milestoneId)
+      if (milestone === undefined) return milestoneNotFound(normalized.milestoneId)
+      const observed = await requiredCalendarAdapter(this.options.adapters).readCalendarEvent(
+        target.route,
+        target.calendarId,
+        milestone.eventId,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (observed.state !== 'ok') return milestoneDateRemoteFailure('remote-rejected', observed.issue)
+      validateCalendarEventSnapshot(observed.value)
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const effectId = generatedId(`effect-${commandId}`, 'Calendar effect')
+      const command = calendarCommand(
+        this.options.ids,
+        commandId,
+        scope,
+        normalized.idempotencyKey,
+        normalized.causationId,
+        normalized.reason,
+        occurredAt,
+      )
+      let reservation = await this.options.repository.reserveFeishuCalendarDateUpdate(
+        Object.freeze({
+          effectId,
+          changeId: nextScheduleChangeId(this.options.ids, `${commandId}-preflight`),
+          projectId: normalized.projectId,
+          milestoneId: normalized.milestoneId,
+          expectedRevision: normalized.expectedRevision,
+          expectedMilestoneRevision: normalized.expectedMilestoneRevision,
+          expectedRemoteObservationVersion: normalized.expectedRemoteObservationVersion,
+          observed: observed.value,
+          schedule: normalized.schedule,
+          preparedAt: occurredAt,
+          command,
+        }),
+        operationSignal,
+      )
+      if (reservation.state !== 'deliver') return reservation.result
+      if (!await this.options.repository.claimFeishuCalendarEffect(
+        effectId,
+        commandInstant(this.options.clock),
+        operationSignal,
+      )) {
+        reservation = await this.options.repository.reserveFeishuCalendarDateUpdate(
+          Object.freeze({
+            effectId,
+            changeId: nextScheduleChangeId(this.options.ids, `${commandId}-recovered`),
+            projectId: normalized.projectId,
+            milestoneId: normalized.milestoneId,
+            expectedRevision: normalized.expectedRevision,
+            expectedMilestoneRevision: normalized.expectedMilestoneRevision,
+            expectedRemoteObservationVersion: normalized.expectedRemoteObservationVersion,
+            observed: observed.value,
+            schedule: normalized.schedule,
+            preparedAt: occurredAt,
+            command,
+          }),
+          operationSignal,
+        )
+        if (reservation.state !== 'deliver') return reservation.result
+        return milestoneDateUnknown(reservation.effect)
+      }
+      const adapter = requiredCalendarAdapter(this.options.adapters)
+      const settleSignal = new AbortController().signal
+      try {
+        const outcome = await adapter.updateCalendarEventSchedule(
+          reservation.route,
+          Object.freeze({
+            calendarId: reservation.calendarId,
+            eventId: reservation.eventId,
+            expectedRemoteObservationVersion: normalized.expectedRemoteObservationVersion,
+            schedule: normalized.schedule,
+          }),
+          operationSignal,
+        )
+        const settledAt = commandInstant(this.options.clock)
+        if (outcome.state === 'ok') {
+          validateCalendarEventSnapshot(outcome.value)
+          return this.options.repository.settleFeishuCalendarDateUpdate(
+            effectId,
+            Object.freeze({
+              state: 'delivered',
+              event: outcome.value,
+              changeId: nextScheduleChangeId(this.options.ids, `${commandId}-delivered`),
+              settledAt,
+            }),
+            settleSignal,
+          )
+        }
+        if (outcome.state === 'conflict') {
+          validateCalendarEventSnapshot(outcome.current)
+          return this.options.repository.settleFeishuCalendarDateUpdate(
+            effectId,
+            Object.freeze({
+              state: 'conflict',
+              event: outcome.current,
+              changeId: nextScheduleChangeId(this.options.ids, `${commandId}-conflict`),
+              settledAt,
+            }),
+            settleSignal,
+          )
+        }
+        return this.options.repository.settleFeishuCalendarDateUpdate(
+          effectId,
+          Object.freeze({
+            state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+            issue: outcome.issue,
+            settledAt,
+          }),
+          settleSignal,
+        )
+      } catch {
+        return this.options.repository.settleFeishuCalendarDateUpdate(
+          effectId,
+          Object.freeze({
+            state: 'unknown',
+            issue: ambiguousCalendarTransportIssue(),
+            settledAt: commandInstant(this.options.clock),
+          }),
+          settleSignal,
+        )
+      }
+    })
+  }
+
+  /** Read every bound event and atomically converge changed authority tuples. */
+  reconcileProjectCalendar(
+    request: ReconcileProjectCalendarRequest,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectCalendarResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'reconcileProjectCalendar')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.calendar.reconcile',
+        operationSignal,
+      )
+      const normalized = validateReconcileProjectCalendarRequest(request)
+      const current = await this.options.repository.readProjectMilestones(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const preflight = calendarReconciliationPreflight(current, normalized)
+      if (preflight !== null) return preflight
+      const target = await this.options.repository.readFeishuCalendarReconciliationTarget(
+        Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }),
+        operationSignal,
+      )
+      if (target === null) throw infrastructure('Workbench Calendar target disappeared')
+      return this.reconcileCalendarTarget(target, operationSignal)
+    })
+  }
+
+  /** Trusted Calendar hint entrypoint; browser Remotes never call it. */
+  ingestFeishuCalendarEvent(
+    event: FeishuCalendarEventInput,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<FeishuCalendarEventResult> {
+    return this.execute(async (lifetimeSignal) => {
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const normalized = validateFeishuCalendarEventInput(event)
+      const accepted = await this.options.repository.commitFeishuCalendarEvent(Object.freeze({
+        event: normalized,
+        receivedAt: commandInstant(this.options.clock),
+      }), operationSignal)
+      if (accepted.outcome !== 'applied' || accepted.projectId === null) return accepted
+      const targets = await this.options.repository.listFeishuCalendarReconciliationTargets(
+        operationSignal,
+      )
+      const target = targets.find(candidate => candidate.projectId === accepted.projectId) ?? null
+      if (target === null) return accepted
+      const reconciled = await this.reconcileCalendarTarget(target, operationSignal)
+      return Object.freeze({
+        outcome: 'applied',
+        projectId: accepted.projectId,
+        revision: reconciled.ok ? reconciled.value.revision : accepted.revision,
+      })
+    })
+  }
+
   /** Trusted connector entrypoint; it is intentionally not exposed as a Remote. */
   ingestFeishuTaskEvent(
     observation: WorkbenchFeishuTaskEventObservation,
@@ -1990,6 +2730,7 @@ export class WorkbenchScenario {
       if (this.phase === 'closing') return
       this.phase = 'running'
       this.installTaskFederationLifecycle()
+      this.installCalendarFederationLifecycle()
     } catch (error: unknown) {
       this.phase = 'closed'
       await this.options.repository.close().catch(() => undefined)
@@ -2004,10 +2745,19 @@ export class WorkbenchScenario {
       clearInterval(this.taskReconciliationTimer)
       this.taskReconciliationTimer = undefined
     }
+    if (this.calendarReconciliationTimer !== undefined) {
+      clearInterval(this.calendarReconciliationTimer)
+      this.calendarReconciliationTimer = undefined
+    }
     try {
       this.taskEventUnsubscribe?.()
     } finally {
       this.taskEventUnsubscribe = undefined
+    }
+    try {
+      this.calendarEventUnsubscribe?.()
+    } finally {
+      this.calendarEventUnsubscribe = undefined
     }
     this.lifetime.abort(new Error('Workbench scenario is disposing'))
     await this.opening?.catch(() => undefined)
@@ -2035,6 +2785,27 @@ export class WorkbenchScenario {
     }
   }
 
+  private installCalendarFederationLifecycle(): void {
+    const adapter = this.options.adapters.feishuCalendars
+    if (adapter?.subscribeCalendarChanges !== undefined) {
+      this.calendarEventUnsubscribe = adapter.subscribeCalendarChanges(async (notification) => {
+        await this.ingestFeishuCalendarEvent(Object.freeze({
+          eventEnvelopeId: notification.eventEnvelopeId,
+          calendarId: notification.calendarId,
+          eventId: notification.eventId,
+          occurredAt: notification.observedAt,
+        }), this.lifetime.signal)
+      })
+    }
+    const interval = this.options.calendarReconciliationIntervalMs ?? 0
+    if (adapter !== undefined && interval > 0) {
+      this.calendarReconciliationTimer = setInterval(() => {
+        void this.runPeriodicCalendarReconciliation().catch(() => undefined)
+      }, interval)
+      this.calendarReconciliationTimer.unref?.()
+    }
+  }
+
   private async runPeriodicTaskReconciliation(): Promise<void> {
     if (this.periodicReconciliationRunning || this.phase !== 'running') return
     this.periodicReconciliationRunning = true
@@ -2048,6 +2819,22 @@ export class WorkbenchScenario {
       })
     } finally {
       this.periodicReconciliationRunning = false
+    }
+  }
+
+  private async runPeriodicCalendarReconciliation(): Promise<void> {
+    if (this.periodicCalendarReconciliationRunning || this.phase !== 'running') return
+    this.periodicCalendarReconciliationRunning = true
+    try {
+      await this.execute(async (signal) => {
+        const targets = await this.options.repository.listFeishuCalendarReconciliationTargets(signal)
+        for (const target of targets) {
+          throwIfCancelled(signal)
+          await this.reconcileCalendarTarget(target, signal)
+        }
+      })
+    } finally {
+      this.periodicCalendarReconciliationRunning = false
     }
   }
 
@@ -2077,6 +2864,52 @@ export class WorkbenchScenario {
       expectedRevision: target.revision,
       attemptedAt,
       issue: observed.issue,
+    }), signal)
+  }
+
+  private async reconcileCalendarTarget(
+    target: WorkbenchFeishuCalendarReconciliationTarget,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectCalendarResult> {
+    const adapter = requiredCalendarAdapter(this.options.adapters)
+    const observations: Array<{
+      readonly event: WorkbenchFeishuCalendarEventSnapshot
+      readonly changeId: string
+    }> = []
+    for (const milestone of target.milestones) {
+      throwIfCancelled(signal)
+      const observed = await adapter.readCalendarEvent(
+        target.route,
+        target.calendarId,
+        milestone.eventId,
+        signal,
+      )
+      const attemptedAt = commandInstant(this.options.clock)
+      if (observed.state !== 'ok') {
+        return this.options.repository.commitFeishuCalendarReconciliationFailure(
+          Object.freeze({
+            projectId: target.projectId,
+            expectedRevision: target.revision,
+            attemptedAt,
+            issue: observed.issue,
+          }),
+          signal,
+        )
+      }
+      validateCalendarEventSnapshot(observed.value)
+      observations.push(Object.freeze({
+        event: observed.value,
+        changeId: nextScheduleChangeId(
+          this.options.ids,
+          `${target.projectId}-${milestone.milestoneId}-${observed.value.remoteObservationVersion}`,
+        ),
+      }))
+    }
+    return this.options.repository.commitFeishuCalendarReconciliation(Object.freeze({
+      projectId: target.projectId,
+      expectedRevision: target.revision,
+      observations: Object.freeze(observations),
+      attemptedAt: commandInstant(this.options.clock),
     }), signal)
   }
 
@@ -4085,6 +4918,685 @@ function ambiguousTaskTransportIssue(): FeishuConnectionIssue {
 
 function detachedIssue(issue: FeishuConnectionIssue): FeishuConnectionIssue {
   return Object.freeze({ ...issue, missingScopes: Object.freeze([...issue.missingScopes]) })
+}
+
+const MAX_CALENDAR_SUMMARY_LENGTH = 200
+const MAX_MILESTONE_NAME_LENGTH = 200
+const MAX_MILESTONE_DESCRIPTION_LENGTH = 2_000
+const MAX_PROJECT_MILESTONES = 100
+const CALENDAR_OBSERVATION_VERSION = /^sha256:[0-9a-f]{64}$/u
+const STRICT_DATE = /^(\d{4})-(\d{2})-(\d{2})$/u
+const OFFSET_RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u
+
+function requireSignal(signal: AbortSignal, operation: string): void {
+  if (!(signal instanceof AbortSignal)) {
+    throw badRequest(`${operation} requires an AbortSignal`, { field: 'signal' })
+  }
+}
+
+function validateProjectMilestonesQuery(value: ProjectMilestonesQuery): ProjectMilestonesQuery {
+  const record = exactRecord(value, 'getProjectMilestones query', ['projectId'])
+  return Object.freeze({ projectId: safeId(record.projectId, 'projectId') })
+}
+
+function validateDiscoverFeishuCalendarsRequest(
+  value: DiscoverFeishuCalendarsRequest,
+): DiscoverFeishuCalendarsRequest {
+  const record = exactRecord(value, 'discoverFeishuCalendars request', [
+    'projectId', 'kind', 'expectedConnectionRevision', 'expectedRouteGeneration',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    kind: validateFeishuKind(record.kind, 'kind'),
+    expectedConnectionRevision: nonNegativeRevision(
+      record.expectedConnectionRevision,
+      'expectedConnectionRevision',
+    ),
+    expectedRouteGeneration: positiveRevision(
+      record.expectedRouteGeneration,
+      'expectedRouteGeneration',
+    ),
+  })
+}
+
+function validateBindProjectCalendarRequest(
+  value: BindProjectCalendarRequest,
+): BindProjectCalendarRequest {
+  const record = exactRecord(value, 'bindProjectCalendar request', [
+    'projectId', 'kind', 'mode', 'expectedConnectionRevision',
+    'expectedRouteGeneration', 'expectedBindingRevision', 'idempotencyKey',
+    'causationId', 'reason',
+  ], ['calendarId', 'summary', 'description'])
+  if (record.reason !== 'owner-project-calendar-bind') {
+    throw badRequest('reason is not supported for Calendar binding', { field: 'reason' })
+  }
+  if (record.expectedBindingRevision !== null) {
+    throw badRequest('expectedBindingRevision must be null', { field: 'expectedBindingRevision' })
+  }
+  const common = Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    kind: validateFeishuKind(record.kind, 'kind'),
+    expectedConnectionRevision: nonNegativeRevision(
+      record.expectedConnectionRevision,
+      'expectedConnectionRevision',
+    ),
+    expectedRouteGeneration: positiveRevision(
+      record.expectedRouteGeneration,
+      'expectedRouteGeneration',
+    ),
+    expectedBindingRevision: null,
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-calendar-bind' as const,
+  })
+  if (record.mode === 'existing') {
+    if (record.summary !== undefined || record.description !== undefined) {
+      throw badRequest('existing Calendar binding cannot carry create fields', { field: 'mode' })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'existing',
+      calendarId: safeFeishuResourceId(record.calendarId, 'calendarId'),
+    })
+  }
+  if (record.mode === 'create') {
+    if (record.calendarId !== undefined) {
+      throw badRequest('Calendar create cannot carry calendarId', { field: 'calendarId' })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'create',
+      summary: boundedText(record.summary, 'summary', MAX_CALENDAR_SUMMARY_LENGTH),
+      description: nullableCalendarText(record.description, 'description'),
+    })
+  }
+  throw badRequest('mode must be existing or create', { field: 'mode' })
+}
+
+function validateDiscoverFeishuCalendarEventsRequest(
+  value: DiscoverFeishuCalendarEventsRequest,
+): DiscoverFeishuCalendarEventsRequest {
+  const record = exactRecord(value, 'discoverFeishuCalendarEvents request', [
+    'projectId', 'expectedRevision',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+  })
+}
+
+function validateCreateProjectMilestoneRequest(
+  value: CreateProjectMilestoneRequest,
+): CreateProjectMilestoneRequest {
+  const record = exactRecord(value, 'createProjectMilestone request', [
+    'projectId', 'mode', 'expectedRevision', 'expectedMilestoneRevision',
+    'name', 'idempotencyKey', 'causationId', 'reason',
+  ], ['description', 'eventId', 'schedule'])
+  if (record.expectedMilestoneRevision !== null) {
+    throw badRequest('expectedMilestoneRevision must be null', {
+      field: 'expectedMilestoneRevision',
+    })
+  }
+  if (record.reason !== 'owner-project-milestone-create') {
+    throw badRequest('reason is not supported for Milestone creation', { field: 'reason' })
+  }
+  const common = Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+    expectedMilestoneRevision: null,
+    name: boundedText(record.name, 'name', MAX_MILESTONE_NAME_LENGTH),
+    description: nullableCalendarText(record.description, 'description'),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-milestone-create' as const,
+  })
+  if (record.mode === 'existing-event') {
+    if (record.schedule !== undefined) {
+      throw badRequest('existing-event mode cannot carry schedule', { field: 'schedule' })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'existing-event',
+      eventId: safeFeishuResourceId(record.eventId, 'eventId'),
+    })
+  }
+  if (record.mode === 'create-event') {
+    if (record.eventId !== undefined) {
+      throw badRequest('create-event mode cannot carry eventId', { field: 'eventId' })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'create-event',
+      schedule: validateCalendarSchedule(record.schedule, 'schedule'),
+    })
+  }
+  throw badRequest('mode must be existing-event or create-event', { field: 'mode' })
+}
+
+function validateUpdateProjectMilestoneDateRequest(
+  value: UpdateProjectMilestoneDateRequest,
+): UpdateProjectMilestoneDateRequest {
+  const record = exactRecord(value, 'updateProjectMilestoneDate request', [
+    'projectId', 'milestoneId', 'expectedRevision', 'expectedMilestoneRevision',
+    'expectedRemoteObservationVersion', 'schedule', 'idempotencyKey',
+    'causationId', 'reason',
+  ])
+  if (record.reason !== 'owner-project-milestone-date-update') {
+    throw badRequest('reason is not supported for Milestone date update', { field: 'reason' })
+  }
+  const remoteVersion = record.expectedRemoteObservationVersion
+  if (typeof remoteVersion !== 'string' || !CALENDAR_OBSERVATION_VERSION.test(remoteVersion)) {
+    throw badRequest('expectedRemoteObservationVersion is invalid', {
+      field: 'expectedRemoteObservationVersion',
+    })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    milestoneId: safeId(record.milestoneId, 'milestoneId'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+    expectedMilestoneRevision: positiveRevision(
+      record.expectedMilestoneRevision,
+      'expectedMilestoneRevision',
+    ),
+    expectedRemoteObservationVersion: remoteVersion,
+    schedule: validateCalendarSchedule(record.schedule, 'schedule'),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-milestone-date-update',
+  })
+}
+
+function validateReconcileProjectCalendarRequest(
+  value: ReconcileProjectCalendarRequest,
+): ReconcileProjectCalendarRequest {
+  const record = exactRecord(value, 'reconcileProjectCalendar request', [
+    'projectId', 'expectedRevision',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+  })
+}
+
+function validateFeishuCalendarEventInput(
+  value: FeishuCalendarEventInput,
+): FeishuCalendarEventInput {
+  const record = exactRecord(value, 'Feishu Calendar event', [
+    'eventEnvelopeId', 'calendarId', 'eventId', 'occurredAt',
+  ])
+  return Object.freeze({
+    eventEnvelopeId: safeId(record.eventEnvelopeId, 'eventEnvelopeId'),
+    calendarId: safeFeishuResourceId(record.calendarId, 'calendarId'),
+    eventId: record.eventId === null ? null : safeFeishuResourceId(record.eventId, 'eventId'),
+    occurredAt: canonicalRequestInstant(record.occurredAt, 'occurredAt'),
+  })
+}
+
+function validateCalendarSchedule(value: unknown, field: string): ProjectCalendarSchedule {
+  const record = exactRecord(value, field, ['kind'], [
+    'startDate', 'endDate', 'startAt', 'endAt', 'timeZone',
+  ])
+  if (record.kind === 'all-day') {
+    if (record.startAt !== undefined || record.endAt !== undefined || record.timeZone !== undefined) {
+      throw badRequest(`${field} mixes all-day and timed fields`, { field })
+    }
+    const startDate = strictCalendarDate(record.startDate, `${field}.startDate`)
+    const endDate = strictCalendarDate(record.endDate, `${field}.endDate`)
+    if (startDate >= endDate) {
+      throw badRequest(`${field} start must precede exclusive end`, { field })
+    }
+    return Object.freeze({ kind: 'all-day', startDate, endDate })
+  }
+  if (record.kind === 'timed') {
+    if (record.startDate !== undefined || record.endDate !== undefined) {
+      throw badRequest(`${field} mixes all-day and timed fields`, { field })
+    }
+    const startAt = offsetInstant(record.startAt, `${field}.startAt`)
+    const endAt = offsetInstant(record.endAt, `${field}.endAt`)
+    const timeZone = ianaTimeZone(record.timeZone, `${field}.timeZone`)
+    if (Date.parse(startAt) >= Date.parse(endAt)) {
+      throw badRequest(`${field} start must precede end`, { field })
+    }
+    return Object.freeze({ kind: 'timed', startAt, endAt, timeZone })
+  }
+  throw badRequest(`${field}.kind must be all-day or timed`, { field: `${field}.kind` })
+}
+
+function strictCalendarDate(value: unknown, field: string): string {
+  if (typeof value !== 'string') throw badRequest(`${field} must be an ISO date`, { field })
+  const match = STRICT_DATE.exec(value)
+  if (match === null) throw badRequest(`${field} must be an ISO date`, { field })
+  const instant = new Date(`${value}T00:00:00.000Z`)
+  if (!Number.isFinite(instant.getTime()) || instant.toISOString().slice(0, 10) !== value) {
+    throw badRequest(`${field} is not a real calendar date`, { field })
+  }
+  return value
+}
+
+function offsetInstant(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !OFFSET_RFC3339.test(value)
+    || !Number.isFinite(Date.parse(value))) {
+    throw badRequest(`${field} must be an offset-bearing RFC 3339 instant`, { field })
+  }
+  return value
+}
+
+function ianaTimeZone(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 128
+    || TEXT_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw badRequest(`${field} must be a valid IANA timezone`, { field })
+  }
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format(0)
+  } catch {
+    throw badRequest(`${field} must be a valid IANA timezone`, { field })
+  }
+  return value
+}
+
+function canonicalRequestInstant(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))
+    || new Date(value).toISOString() !== value) {
+    throw badRequest(`${field} must be a canonical ISO instant`, { field })
+  }
+  return value
+}
+
+function nullableCalendarText(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') throw badRequest(`${field} must be a string or null`, { field })
+  const normalized = value.trim()
+  if ([...normalized].length > MAX_MILESTONE_DESCRIPTION_LENGTH
+    || TEXT_CONTROL_CHARACTER_PATTERN.test(normalized)) {
+    throw badRequest(`${field} is invalid`, { field })
+  }
+  return normalized.length === 0 ? null : normalized
+}
+
+function validateCalendarSnapshot(value: import('./feishu-calendar-federation.ts').WorkbenchFeishuCalendarSnapshot): void {
+  safeProviderResourceId(value.calendarId, 'Calendar id')
+  safeProviderText(value.summary, 'Calendar summary', MAX_CALENDAR_SUMMARY_LENGTH, false)
+  if (value.description !== null) {
+    safeProviderText(value.description, 'Calendar description', MAX_MILESTONE_DESCRIPTION_LENGTH, true)
+  }
+  if (!['primary', 'shared', 'resource', 'unknown'].includes(value.calendarType)
+    || !['unknown', 'free_busy_reader', 'reader', 'writer', 'owner'].includes(value.role)
+    || typeof value.deleted !== 'boolean' || typeof value.thirdParty !== 'boolean') {
+    throw infrastructure('Feishu Calendar response is invalid')
+  }
+}
+
+function validateCalendarEventSnapshot(value: WorkbenchFeishuCalendarEventSnapshot): void {
+  safeProviderResourceId(value.calendarId, 'Calendar event calendar id')
+  safeProviderResourceId(value.eventId, 'Calendar event id')
+  safeProviderResourceId(value.organizerCalendarId, 'Calendar event organizer id')
+  safeProviderText(value.summary, 'Calendar event summary', MAX_CALENDAR_SUMMARY_LENGTH, true)
+  if (value.description !== null) {
+    safeProviderText(value.description, 'Calendar event description', MAX_MILESTONE_DESCRIPTION_LENGTH, true)
+  }
+  validateCalendarSchedule(value.schedule, 'provider.schedule')
+  if (!['confirmed', 'cancelled', 'unknown'].includes(value.status)
+    || typeof value.recurring !== 'boolean' || typeof value.exception !== 'boolean'
+    || typeof value.appLink !== 'string' || value.appLink.length < 1 || value.appLink.length > 2_048
+    || !CALENDAR_OBSERVATION_VERSION.test(value.remoteObservationVersion)) {
+    throw infrastructure('Feishu Calendar event response is invalid')
+  }
+  canonicalProviderInstant(value.observedAt, 'Calendar event observedAt')
+}
+
+function safeProviderResourceId(value: string, label: string): void {
+  if (typeof value !== 'string' || !SAFE_FEISHU_RESOURCE_ID.test(value)) {
+    throw infrastructure(`Feishu provider returned an invalid ${label}`)
+  }
+}
+
+function safeProviderText(value: string, label: string, maximum: number, allowEmpty: boolean): void {
+  if (typeof value !== 'string' || (!allowEmpty && value.length === 0)
+    || [...value].length > maximum || TEXT_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw infrastructure(`Feishu provider returned invalid ${label}`)
+  }
+}
+
+function canonicalProviderInstant(value: string, label: string): void {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))
+    || new Date(value).toISOString() !== value) {
+    throw infrastructure(`Feishu provider returned invalid ${label}`)
+  }
+}
+
+function calendarSelectable(value: import('./feishu-calendar-federation.ts').WorkbenchFeishuCalendarSnapshot): boolean {
+  return !value.deleted && !value.thirdParty
+    && (value.calendarType === 'primary' || value.calendarType === 'shared')
+    && (value.role === 'writer' || value.role === 'owner')
+}
+
+function eventSelectable(value: WorkbenchFeishuCalendarEventSnapshot, calendarId: string): boolean {
+  return value.calendarId === calendarId && value.organizerCalendarId === calendarId
+    && !value.recurring && !value.exception && value.status === 'confirmed'
+}
+
+function calendarCandidate(value: import('./feishu-calendar-federation.ts').WorkbenchFeishuCalendarSnapshot) {
+  return Object.freeze({ ...value, selectable: calendarSelectable(value) })
+}
+
+function calendarEventCandidate(
+  value: WorkbenchFeishuCalendarEventSnapshot,
+  calendarId: string,
+  unused: boolean,
+) {
+  return Object.freeze({
+    eventId: value.eventId,
+    summary: value.summary,
+    description: value.description,
+    schedule: Object.freeze({ ...value.schedule }),
+    remoteStatus: value.status,
+    recurring: value.recurring,
+    exception: value.exception,
+    organizerMatchesCalendar: value.organizerCalendarId === calendarId,
+    eventAppLink: value.appLink,
+    remoteObservationVersion: value.remoteObservationVersion,
+    selectable: unused && eventSelectable(value, calendarId),
+  })
+}
+
+function resolveCalendarRouteForBinding(
+  stored: StoredFeishuConnection,
+  request: Pick<DiscoverFeishuCalendarsRequest,
+    'kind' | 'expectedConnectionRevision' | 'expectedRouteGeneration'>,
+):
+  | { readonly ok: true; readonly route: WorkbenchFeishuCalendarRoute }
+  | { readonly ok: false; readonly error: Extract<BindProjectCalendarResult, { readonly ok: false }> } {
+  if (stored.revision !== request.expectedConnectionRevision) {
+    return { ok: false, error: Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'connection-revision-conflict',
+        message: 'Feishu connection changed before Calendar access',
+      }),
+    }) }
+  }
+  const selected = request.kind === 'bot' ? stored.bot : stored.user
+  if (selected.generation === null) return calendarRouteFailure('route-unconfigured')
+  if (selected.generation !== request.expectedRouteGeneration) {
+    return calendarRouteFailure('route-generation-conflict')
+  }
+  if (selected.state === 'disabled') return calendarRouteFailure('route-disabled')
+  if (selected.actor === null) return calendarRouteFailure('route-unverified')
+  if (selected.appId === null || selected.credentialRef === null) {
+    throw infrastructure('Workbench Feishu Calendar route projection is incomplete')
+  }
+  return { ok: true, route: Object.freeze({
+    kind: request.kind,
+    routeGeneration: selected.generation,
+    appId: selected.appId,
+    credentialRef: selected.credentialRef,
+    actor: Object.freeze({ ...selected.actor }),
+  }) }
+}
+
+function calendarRouteFailure(
+  code: 'route-unconfigured' | 'route-generation-conflict' | 'route-disabled' | 'route-unverified',
+): { readonly ok: false; readonly error: Extract<BindProjectCalendarResult, { readonly ok: false }> } {
+  return { ok: false, error: Object.freeze({
+    ok: false,
+    error: Object.freeze({ code, message: `Feishu Calendar route is ${code}` }),
+  }) }
+}
+
+function requiredCalendarAdapter(
+  adapters: WorkbenchExternalAdapters,
+): WorkbenchFeishuCalendarExternalAdapter {
+  if (adapters.feishuCalendars === undefined) {
+    throw unavailable('Workbench Feishu Calendar adapter is not available')
+  }
+  return adapters.feishuCalendars
+}
+
+function calendarCommand<R extends WorkbenchProjectCalendarReason>(
+  ids: WorkbenchIdGenerator,
+  commandId: string,
+  scope: AuthorizedScope,
+  idempotencyKey: string,
+  causationId: string,
+  reason: R,
+  occurredAt: string,
+): WorkbenchCommandMetadata & { readonly reason: R } {
+  return Object.freeze({
+    commandId,
+    auditEventId: generatedId(ids.nextAuditEventId(), 'audit event'),
+    outboxId: generatedId(ids.nextOutboxId(), 'outbox'),
+    idempotencyKey,
+    causationId,
+    reason,
+    actor: Object.freeze({
+      kind: 'owner',
+      id: scope.ownerId,
+      organizationId: scope.organizationId,
+      teamId: scope.teamId,
+    }),
+    occurredAt,
+  })
+}
+
+function nextMilestoneId(ids: WorkbenchIdGenerator, fallback: string): string {
+  return generatedId(ids.nextMilestoneId?.() ?? `milestone-${fallback}`, 'Milestone')
+}
+
+function nextScheduleChangeId(ids: WorkbenchIdGenerator, fallback: string): string {
+  const normalizedFallback = createHash('sha256').update(fallback).digest('hex').slice(0, 32)
+  return generatedId(
+    ids.nextScheduleChangeId?.() ?? `schedule-change-${normalizedFallback}`,
+    'schedule change',
+  )
+}
+
+function calendarProviderIdempotencyKey(commandId: string, projectId: string): string {
+  return `dshwb-${createHash('sha256').update(`${commandId}\0${projectId}`).digest('hex')}`
+}
+
+function milestoneCreationPreflight(
+  current: ProjectMilestonesProjection | null,
+  request: CreateProjectMilestoneRequest,
+): CreateProjectMilestoneResult | null {
+  if (current === null) return calendarProjectNotFound(request.projectId)
+  if (current.binding === null) return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'calendar-unbound', message: 'Project has no bound Calendar' }),
+  })
+  if (current.revision !== request.expectedRevision) return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-schedule-revision-conflict',
+      message: 'Project schedule revision changed',
+      current,
+    }),
+  })
+  if (current.milestones.length >= MAX_PROJECT_MILESTONES) return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'milestone-limit-reached', message: 'Project has 100 Milestones' }),
+  })
+  if (request.mode === 'existing-event'
+    && current.milestones.some(item => item.eventId === request.eventId)) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({ code: 'event-already-used', message: 'Event already backs a Milestone' }),
+    })
+  }
+  return null
+}
+
+function milestoneDatePreflight(
+  current: ProjectMilestonesProjection | null,
+  request: UpdateProjectMilestoneDateRequest,
+): UpdateProjectMilestoneDateResult | null {
+  if (current === null) return calendarProjectNotFound(request.projectId)
+  if (current.binding === null) return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'calendar-unbound', message: 'Project has no bound Calendar' }),
+  })
+  if (current.revision !== request.expectedRevision) return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-schedule-revision-conflict',
+      message: 'Project schedule revision changed',
+      current,
+    }),
+  })
+  const milestone = current.milestones.find(item => item.milestoneId === request.milestoneId)
+  if (milestone === undefined) return milestoneNotFound(request.milestoneId)
+  if (milestone.revision !== request.expectedMilestoneRevision) return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'milestone-revision-conflict',
+      message: 'Milestone revision changed',
+      current,
+      currentMilestone: milestone,
+    }),
+  })
+  return null
+}
+
+function calendarReconciliationPreflight(
+  current: ProjectMilestonesProjection | null,
+  request: ReconcileProjectCalendarRequest,
+): ReconcileProjectCalendarResult | null {
+  if (current === null) return calendarProjectNotFound(request.projectId)
+  if (current.binding === null) return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'calendar-unbound', message: 'Project has no bound Calendar' }),
+  })
+  if (current.revision !== request.expectedRevision) return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-schedule-revision-conflict',
+      message: 'Project schedule revision changed',
+      current,
+    }),
+  })
+  return null
+}
+
+function calendarProjectNotFound(projectId: string) {
+  return Object.freeze({
+    ok: false as const,
+    error: Object.freeze({
+      code: 'project-not-found' as const,
+      message: `Workbench Project ${projectId} was not found in the authorized scope`,
+      projectId,
+    }),
+  })
+}
+
+function calendarAlreadyBound(current: ProjectMilestonesProjection): BindProjectCalendarResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'calendar-already-bound', message: 'Project already has a bound Calendar', current,
+    }),
+  })
+}
+
+function calendarNotSelectable(): BindProjectCalendarResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'calendar-not-selectable', message: 'Calendar is not writable or supported',
+    }),
+  })
+}
+
+function calendarRemoteBindFailure(
+  code: 'remote-outcome-unknown' | 'remote-rejected',
+  issue: FeishuConnectionIssue,
+): BindProjectCalendarResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, message: 'Calendar access failed', issue: detachedIssue(issue) }) })
+}
+
+function calendarUnknownBinding(
+  _effect: import('./client.ts').FeishuCalendarMutationEffectProjection,
+): BindProjectCalendarResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-outcome-unknown', message: 'Calendar create outcome is unknown',
+      issue: ambiguousCalendarTransportIssue(),
+    }),
+  })
+}
+
+function milestoneEventNotSelectable(): CreateProjectMilestoneResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'event-not-selectable', message: 'Event cannot back a T10 Milestone',
+    }),
+  })
+}
+
+function milestoneRemoteFailure(
+  code: 'remote-outcome-unknown' | 'remote-rejected',
+  issue: FeishuConnectionIssue,
+): CreateProjectMilestoneResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, message: 'Milestone event access failed', issue: detachedIssue(issue) }) })
+}
+
+function milestoneUnknownCreation(
+  _effect: import('./client.ts').FeishuCalendarMutationEffectProjection,
+): CreateProjectMilestoneResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-outcome-unknown', message: 'Milestone event create outcome is unknown',
+      issue: ambiguousCalendarTransportIssue(),
+    }),
+  })
+}
+
+function milestoneNotFound(milestoneId: string): UpdateProjectMilestoneDateResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code: 'milestone-not-found', message: `Milestone ${milestoneId} was not found` }),
+  })
+}
+
+function milestoneDateRemoteFailure(
+  code: 'remote-outcome-unknown' | 'remote-rejected',
+  issue: FeishuConnectionIssue,
+): UpdateProjectMilestoneDateResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, message: 'Milestone date access failed', issue: detachedIssue(issue) }) })
+}
+
+function milestoneDateUnknown(
+  effect: import('./client.ts').FeishuCalendarMutationEffectProjection,
+): UpdateProjectMilestoneDateResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-outcome-unknown', message: 'Milestone date update outcome is unknown',
+      effect: Object.freeze({ ...effect, state: 'unknown' }),
+      issue: ambiguousCalendarTransportIssue(),
+    }),
+  })
+}
+
+function ambiguousCalendarTransportIssue(): FeishuConnectionIssue {
+  return Object.freeze({
+    code: 'unknown-provider-error',
+    recovery: 'inspect-provider',
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+}
+
+function invalidCalendarIssue(): FeishuConnectionIssue {
+  return Object.freeze({
+    code: 'provider-response-invalid',
+    recovery: 'inspect-provider',
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
 }
 
 function generatedId(value: string, kind: string): string {

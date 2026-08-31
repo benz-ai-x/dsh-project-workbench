@@ -1,12 +1,17 @@
 import type {
   AddProjectMemberResult,
+  BindProjectCalendarResult,
   ConfigureFeishuIdentityRouteResult,
   ConfigureFeishuTaskWorkflowResult,
   CreateProjectResult,
+  CreateProjectMilestoneResult,
   DecideSuggestedChangeResult,
   BindFeishuTaskListResult,
   FeishuTaskEventInput,
   FeishuTaskEventResult,
+  FeishuCalendarEventInput,
+  FeishuCalendarEventResult,
+  FeishuCalendarMutationEffectProjection,
   FeishuTaskMutationEffectProjection,
   FeishuActorBinding,
   FeishuConnectionIssue,
@@ -16,6 +21,8 @@ import type {
   OutcomeMetric,
   ProjectResponsibilitySuggestedValue,
   ProjectDetailProjection,
+  ProjectCalendarSchedule,
+  ProjectMilestonesProjection,
   ProjectMemberDraft,
   ProjectMemberStatus,
   ProjectQuery,
@@ -30,6 +37,7 @@ import type {
   ProjectTemplateSelection,
   ProposeProjectResponsibilityChangeResult,
   ReconcileProjectTasksResult,
+  ReconcileProjectCalendarResult,
   ReferenceFeishuTaskResult,
   ReviewCenterFilter,
   ReviewCenterProjection,
@@ -40,6 +48,7 @@ import type {
   SetStatusResult,
   VerifyFeishuIdentityRouteResult,
   UpdateFeishuTaskResult,
+  UpdateProjectMilestoneDateResult,
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
@@ -49,6 +58,11 @@ import type {
   WorkbenchStatusChangeReason,
   WorkbenchStatusSnapshot,
 } from './client.ts'
+import type {
+  WorkbenchFeishuCalendarEventSnapshot,
+  WorkbenchFeishuCalendarRoute,
+  WorkbenchFeishuCalendarSnapshot,
+} from './feishu-calendar-federation.ts'
 import type {
   WorkbenchFeishuTaskListSnapshot,
   WorkbenchFeishuTaskPatch,
@@ -507,6 +521,240 @@ export type WorkbenchFeishuTaskUpdateSettlement =
     readonly settledAt: string
   }
 
+/** Host-fixed scope for one Project's Calendar/Milestone workspace. */
+export interface WorkbenchProjectMilestonesReadQuery extends ProjectQuery {
+  readonly organizationId: string
+  readonly teamId: string
+}
+
+export type WorkbenchFeishuCalendarBindingIntent =
+  | { readonly mode: 'existing'; readonly calendarId: string }
+  | { readonly mode: 'create'; readonly summary: string; readonly description: string | null }
+
+/** Receipt-first replay query used before any Calendar provider write or read. */
+export interface WorkbenchFeishuCalendarBindingReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly intent: WorkbenchFeishuCalendarBindingIntent
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly expectedBindingRevision: null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-calendar-bind'
+}
+
+/** Existing-calendar binding commits only after a detached exact-route observation. */
+export interface WorkbenchFeishuCalendarBindingMutation {
+  readonly projectId: string
+  readonly intent: Extract<WorkbenchFeishuCalendarBindingIntent, { readonly mode: 'existing' }>
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly expectedBindingRevision: null
+  readonly route: WorkbenchFeishuCalendarRoute
+  readonly snapshot: WorkbenchFeishuCalendarSnapshot
+  readonly boundAt: string
+  readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-calendar-bind' }
+}
+
+/** Durable one-attempt reservation for Calendar create, which has no provider idempotency token. */
+export interface WorkbenchFeishuCalendarCreationReservationMutation {
+  readonly effectId: string
+  readonly projectId: string
+  readonly intent: Extract<WorkbenchFeishuCalendarBindingIntent, { readonly mode: 'create' }>
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly expectedBindingRevision: null
+  readonly route: WorkbenchFeishuCalendarRoute
+  readonly preparedAt: string
+  readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-calendar-bind' }
+}
+
+export type WorkbenchFeishuCalendarBindingReservation =
+  | {
+    readonly state: 'deliver'
+    readonly effectId: string
+    readonly route: WorkbenchFeishuCalendarRoute
+    readonly effect: FeishuCalendarMutationEffectProjection
+    readonly receipt: import('./client.ts').WorkbenchCommandReceipt
+  }
+  | { readonly state: 'replay'; readonly result: BindProjectCalendarResult }
+  | { readonly state: 'rejected'; readonly result: BindProjectCalendarResult }
+
+export type WorkbenchFeishuCalendarBindingSettlement =
+  | {
+    readonly state: 'delivered'
+    readonly calendar: WorkbenchFeishuCalendarSnapshot
+    readonly settledAt: string
+  }
+  | {
+    readonly state: 'unknown' | 'failed'
+    readonly issue: FeishuConnectionIssue
+    readonly settledAt: string
+  }
+
+/** Side-effect-free replay check for both existing and create-event Milestone commands. */
+export interface WorkbenchProjectMilestoneReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: null
+  readonly name: string
+  readonly description: string | null
+  readonly intent:
+    | { readonly mode: 'existing-event'; readonly eventId: string }
+    | { readonly mode: 'create-event'; readonly schedule: ProjectCalendarSchedule }
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-milestone-create'
+}
+
+/** Existing event path: no provider write, but the formal command ledger is atomic. */
+export interface WorkbenchProjectMilestoneMutation {
+  readonly milestoneId: string
+  readonly changeId: string
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: null
+  readonly name: string
+  readonly description: string | null
+  readonly intent: Extract<WorkbenchProjectMilestoneReplayQuery['intent'], {
+    readonly mode: 'existing-event'
+  }>
+  readonly event: WorkbenchFeishuCalendarEventSnapshot
+  readonly createdAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-project-milestone-create'
+  }
+}
+
+/** Create-event path freezes semantic/event intent before the sole provider attempt. */
+export interface WorkbenchFeishuCalendarEventCreationReservationMutation {
+  readonly effectId: string
+  readonly milestoneId: string
+  readonly changeId: string
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: null
+  readonly name: string
+  readonly description: string | null
+  readonly schedule: ProjectCalendarSchedule
+  readonly providerIdempotencyKey: string
+  readonly preparedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-project-milestone-create'
+  }
+}
+
+export type WorkbenchFeishuCalendarEventCreationReservation =
+  | {
+    readonly state: 'deliver'
+    readonly effectId: string
+    readonly route: WorkbenchFeishuCalendarRoute
+    readonly calendarId: string
+    readonly providerIdempotencyKey: string
+    readonly effect: FeishuCalendarMutationEffectProjection
+    readonly receipt: import('./client.ts').WorkbenchCommandReceipt
+  }
+  | { readonly state: 'replay'; readonly result: CreateProjectMilestoneResult }
+  | { readonly state: 'rejected'; readonly result: CreateProjectMilestoneResult }
+
+export type WorkbenchFeishuCalendarEventCreationSettlement =
+  | {
+    readonly state: 'delivered'
+    readonly event: WorkbenchFeishuCalendarEventSnapshot
+    readonly settledAt: string
+  }
+  | {
+    readonly state: 'unknown' | 'failed'
+    readonly issue: FeishuConnectionIssue
+    readonly settledAt: string
+  }
+
+/** GET-observed, locally versioned exact date intent reserved before Calendar PATCH. */
+export interface WorkbenchFeishuCalendarDateUpdateReservationMutation {
+  readonly effectId: string
+  readonly changeId: string
+  readonly projectId: string
+  readonly milestoneId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: number
+  readonly expectedRemoteObservationVersion: string
+  readonly observed: WorkbenchFeishuCalendarEventSnapshot
+  readonly schedule: ProjectCalendarSchedule
+  readonly preparedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-project-milestone-date-update'
+  }
+}
+
+export type WorkbenchFeishuCalendarDateUpdateReservation =
+  | {
+    readonly state: 'deliver'
+    readonly effectId: string
+    readonly route: WorkbenchFeishuCalendarRoute
+    readonly calendarId: string
+    readonly eventId: string
+    readonly effect: FeishuCalendarMutationEffectProjection
+    readonly receipt: import('./client.ts').WorkbenchCommandReceipt
+  }
+  | { readonly state: 'replay'; readonly result: UpdateProjectMilestoneDateResult }
+  | { readonly state: 'rejected'; readonly result: UpdateProjectMilestoneDateResult }
+
+export type WorkbenchFeishuCalendarDateUpdateSettlement =
+  | {
+    readonly state: 'delivered' | 'conflict'
+    readonly event: WorkbenchFeishuCalendarEventSnapshot
+    readonly changeId: string
+    readonly settledAt: string
+  }
+  | {
+    readonly state: 'unknown' | 'failed'
+    readonly issue: FeishuConnectionIssue
+    readonly settledAt: string
+  }
+
+/** Exact immutable binding plus all bound event identities for bounded repair. */
+export interface WorkbenchFeishuCalendarReconciliationTarget {
+  readonly projectId: string
+  readonly revision: number
+  readonly calendarId: string
+  readonly route: WorkbenchFeishuCalendarRoute
+  readonly milestones: readonly {
+    readonly milestoneId: string
+    readonly milestoneRevision: number
+    readonly eventId: string
+    readonly remoteObservationVersion: string
+  }[]
+}
+
+export interface WorkbenchFeishuCalendarReconciliationMutation {
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly observations: readonly {
+    readonly event: WorkbenchFeishuCalendarEventSnapshot
+    readonly changeId: string
+  }[]
+  readonly attemptedAt: string
+}
+
+export interface WorkbenchFeishuCalendarReconciliationFailureMutation {
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly attemptedAt: string
+  readonly issue: FeishuConnectionIssue
+}
+
+export interface WorkbenchFeishuCalendarEventMutation {
+  readonly event: FeishuCalendarEventInput
+  readonly receivedAt: string
+}
+
 /** Host-fixed scope for the Project creation-page read. */
 export interface WorkbenchProjectStartQuery {
   readonly organizationId: string
@@ -741,6 +989,78 @@ export interface WorkbenchRepository {
     settlement: WorkbenchFeishuTaskUpdateSettlement,
     signal: AbortSignal,
   ): Promise<UpdateFeishuTaskResult>
+  /** Read one Project's Calendar binding, Milestones, sync health, effects, and change feed. */
+  readProjectMilestones(
+    query: WorkbenchProjectMilestonesReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectMilestonesProjection | null>
+  replayFeishuCalendarBinding(
+    query: WorkbenchFeishuCalendarBindingReplayQuery,
+    signal: AbortSignal,
+  ): Promise<BindProjectCalendarResult | null>
+  commitFeishuCalendarBinding(
+    mutation: WorkbenchFeishuCalendarBindingMutation,
+    signal: AbortSignal,
+  ): Promise<BindProjectCalendarResult>
+  reserveFeishuCalendarCreation(
+    mutation: WorkbenchFeishuCalendarCreationReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuCalendarBindingReservation>
+  claimFeishuCalendarEffect(
+    effectId: string,
+    claimedAt: string,
+    signal: AbortSignal,
+  ): Promise<boolean>
+  settleFeishuCalendarBinding(
+    effectId: string,
+    settlement: WorkbenchFeishuCalendarBindingSettlement,
+    signal: AbortSignal,
+  ): Promise<BindProjectCalendarResult>
+  replayProjectMilestoneCreation(
+    query: WorkbenchProjectMilestoneReplayQuery,
+    signal: AbortSignal,
+  ): Promise<CreateProjectMilestoneResult | null>
+  commitProjectMilestone(
+    mutation: WorkbenchProjectMilestoneMutation,
+    signal: AbortSignal,
+  ): Promise<CreateProjectMilestoneResult>
+  reserveFeishuCalendarEventCreation(
+    mutation: WorkbenchFeishuCalendarEventCreationReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuCalendarEventCreationReservation>
+  settleFeishuCalendarEventCreation(
+    effectId: string,
+    settlement: WorkbenchFeishuCalendarEventCreationSettlement,
+    signal: AbortSignal,
+  ): Promise<CreateProjectMilestoneResult>
+  reserveFeishuCalendarDateUpdate(
+    mutation: WorkbenchFeishuCalendarDateUpdateReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuCalendarDateUpdateReservation>
+  settleFeishuCalendarDateUpdate(
+    effectId: string,
+    settlement: WorkbenchFeishuCalendarDateUpdateSettlement,
+    signal: AbortSignal,
+  ): Promise<UpdateProjectMilestoneDateResult>
+  readFeishuCalendarReconciliationTarget(
+    query: WorkbenchProjectMilestonesReadQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuCalendarReconciliationTarget | null>
+  listFeishuCalendarReconciliationTargets(
+    signal: AbortSignal,
+  ): Promise<readonly WorkbenchFeishuCalendarReconciliationTarget[]>
+  commitFeishuCalendarReconciliation(
+    mutation: WorkbenchFeishuCalendarReconciliationMutation,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectCalendarResult>
+  commitFeishuCalendarReconciliationFailure(
+    mutation: WorkbenchFeishuCalendarReconciliationFailureMutation,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectCalendarResult>
+  commitFeishuCalendarEvent(
+    mutation: WorkbenchFeishuCalendarEventMutation,
+    signal: AbortSignal,
+  ): Promise<FeishuCalendarEventResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */
@@ -751,6 +1071,40 @@ export interface WorkbenchRepository {
   settleOutbox(settlement: WorkbenchOutboxSettlement, signal: AbortSignal): Promise<boolean>
   /** Release every handle after callers have stopped admission and drained work. */
   close(): Promise<void>
+}
+
+/** Detach the complete authorized Calendar projection from repository-owned objects. */
+export function projectMilestonesProjection(
+  value: ProjectMilestonesProjection,
+): ProjectMilestonesProjection {
+  return Object.freeze({
+    projectId: value.projectId,
+    revision: value.revision,
+    binding: value.binding === null ? null : Object.freeze({
+      ...value.binding,
+      identity: Object.freeze({ ...value.binding.identity }),
+    }),
+    milestones: Object.freeze(value.milestones.map(milestone => Object.freeze({
+      ...milestone,
+      schedule: Object.freeze({ ...milestone.schedule }),
+    }))),
+    sync: Object.freeze({
+      ...value.sync,
+      issue: value.sync.issue === null ? null : Object.freeze({
+        ...value.sync.issue,
+        missingScopes: Object.freeze([...value.sync.issue.missingScopes]),
+      }),
+    }),
+    effects: Object.freeze(value.effects.map(effect => Object.freeze({ ...effect }))),
+    recentChanges: Object.freeze(value.recentChanges.map(change => Object.freeze({
+      ...change,
+      changedFields: Object.freeze([...change.changedFields]),
+      beforeSchedule: change.beforeSchedule === null
+        ? null
+        : Object.freeze({ ...change.beforeSchedule }),
+      afterSchedule: Object.freeze({ ...change.afterSchedule }),
+    }))),
+  })
 }
 
 /** Detach and freeze the complete Project task workspace at a process boundary. */
