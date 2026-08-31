@@ -3461,19 +3461,39 @@ describe('WorkbenchScenario', () => {
       action: 'workbench.feishu-task-workflow.configured',
       limit: 5,
     })
+    for (const filter of [
+      {
+        projectId: 'project-safe',
+        objectType: 'project-calendar-binding' as const,
+        objectId: 'project-safe',
+        action: 'workbench.project-calendar.bound' as const,
+        limit: 5,
+      },
+      {
+        projectId: 'project-safe',
+        objectType: 'project-milestone' as const,
+        objectId: 'milestone-safe',
+        action: 'workbench.project-milestone.created' as const,
+        limit: 5,
+      },
+      {
+        projectId: 'project-safe',
+        objectType: 'project-milestone' as const,
+        objectId: 'milestone-safe',
+        action: 'workbench.project-milestone.date-update-requested' as const,
+        limit: 5,
+      },
+    ]) {
+      await scenario.activity(filter)
+      expect(repository.lastActivityQuery?.filter).toEqual(filter)
+    }
     await expect(scenario.auditIntegrity()).resolves.toMatchObject({ valid: true, eventCount: 0 })
     expect(required).toEqual([
-      'workbench.activity.read',
-      'workbench.activity.read',
-      'workbench.activity.read',
-      'workbench.activity.read',
+      ...Array.from({ length: 7 }, () => 'workbench.activity.read'),
       'workbench.audit.verify',
     ])
     expect(filtered).toEqual([
-      'workbench.activity.read',
-      'workbench.activity.read',
-      'workbench.activity.read',
-      'workbench.activity.read',
+      ...Array.from({ length: 7 }, () => 'workbench.activity.read'),
       'workbench.audit.verify',
     ])
 
@@ -3481,7 +3501,7 @@ describe('WorkbenchScenario', () => {
       const error = await scenario.activity(filter as never).catch((reason: unknown) => reason)
       expect(failureCode(error)).toBe('bad-request')
     }
-    expect(repository.activityCalls).toBe(4)
+    expect(repository.activityCalls).toBe(7)
     await scenario.close()
   })
 

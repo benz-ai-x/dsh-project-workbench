@@ -3994,7 +3994,9 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && objectType !== 'feishu-connection'
     && objectType !== 'feishu-task-list-binding'
     && objectType !== 'feishu-task'
-    && objectType !== 'feishu-task-workflow') {
+    && objectType !== 'feishu-task-workflow'
+    && objectType !== 'project-calendar-binding'
+    && objectType !== 'project-milestone') {
     throw badRequest('objectType is not supported', { field: 'objectType' })
   }
   const objectId: unknown = record.objectId
@@ -4021,7 +4023,10 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && action !== 'workbench.feishu-task-list.bound'
     && action !== 'workbench.feishu-task.referenced'
     && action !== 'workbench.feishu-task.update-requested'
-    && action !== 'workbench.feishu-task-workflow.configured') {
+    && action !== 'workbench.feishu-task-workflow.configured'
+    && action !== 'workbench.project-calendar.bound'
+    && action !== 'workbench.project-milestone.created'
+    && action !== 'workbench.project-milestone.date-update-requested') {
     throw badRequest('action is not supported', { field: 'action' })
   }
   const beforeSequence: unknown = record.beforeSequence
