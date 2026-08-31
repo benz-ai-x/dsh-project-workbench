@@ -39,6 +39,30 @@ export {
   requiresHumanSponsor,
   WorkbenchProjectTeamController,
 } from './project-team-controller.ts'
+export {
+  INITIAL_WORKBENCH_REVIEW_STATE,
+  MAX_REVIEW_CONTRIBUTORS,
+  MAX_REVIEW_EVIDENCE,
+  MAX_REVIEW_FEEDBACK_LENGTH,
+  WorkbenchReviewController,
+} from './review-controller.ts'
+export type {
+  WorkbenchReviewClientState,
+  WorkbenchReviewConflictCode,
+  WorkbenchReviewConflictIssue,
+  WorkbenchReviewControllerOptions,
+  WorkbenchReviewDecisionDraft,
+  WorkbenchReviewFilters,
+  WorkbenchReviewInputIssue,
+  WorkbenchReviewIssue,
+  WorkbenchReviewOperation,
+  WorkbenchReviewPhase,
+  WorkbenchReviewProposalDraft,
+  WorkbenchReviewRemote,
+  WorkbenchReviewSelection,
+  WorkbenchReviewTransportCode,
+  WorkbenchReviewTransportIssue,
+} from './review-controller.ts'
 export type {
   WorkbenchExternalContactMethod,
   WorkbenchHumanIdentityDraft,
@@ -99,6 +123,8 @@ export { ProjectsPanel } from './ProjectsPanel.tsx'
 export type { ProjectsPanelProps } from './ProjectsPanel.tsx'
 export { ProjectTeamPanel } from './ProjectTeamPanel.tsx'
 export type { ProjectTeamPanelProps } from './ProjectTeamPanel.tsx'
+export { ReviewCenterPanel } from './ReviewCenterPanel.tsx'
+export type { ReviewCenterPanelProps } from './ReviewCenterPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

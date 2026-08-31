@@ -75,6 +75,9 @@ describe('WorkbenchService', () => {
       { method: 'addProjectMember', invocation: { kind: 'direct' } },
       { method: 'setProjectMemberStatus', invocation: { kind: 'direct' } },
       { method: 'setProjectResponsibility', invocation: { kind: 'direct' } },
+      { method: 'reviewCenter', invocation: { kind: 'direct' } },
+      { method: 'proposeProjectResponsibilityChange', invocation: { kind: 'direct' } },
+      { method: 'decideSuggestedChange', invocation: { kind: 'direct' } },
     ])
     const auth = ctx.get('workbenchAuth') as unknown as TestWorkbenchAuthService
     await expect(ctx.workbench.snapshot(new AbortController().signal)).rejects.toMatchObject({
@@ -149,6 +152,41 @@ describe('WorkbenchService', () => {
       idempotencyKey: 'unauthorized-responsibility-key-001',
       causationId: 'unauthorized-responsibility-cause-001',
       reason: 'owner-project-responsibility-set',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.reviewCenter({
+      projectId: 'project-secret',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.proposeProjectResponsibilityChange({
+      projectId: 'project-secret',
+      candidate: {
+        accountableMemberId: 'member-secret',
+        contributorMemberIds: [],
+        humanSponsorMemberId: null,
+      },
+      expectedTeamRevision: 0,
+      evidenceRefs: [{
+        kind: 'workbench-audit-event',
+        auditEventId: 'audit-secret',
+      }],
+      idempotencyKey: 'unauthorized-suggestion-key-001',
+      causationId: 'unauthorized-suggestion-cause-001',
+      reason: 'owner-suggested-change-propose',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.decideSuggestedChange({
+      projectId: 'project-secret',
+      suggestedChangeId: 'suggested-change-secret',
+      expectedSuggestedChangeRevision: 1,
+      feedback: 'Must not pass.',
+      mode: 'reject',
+      idempotencyKey: 'unauthorized-decision-key-0001',
+      causationId: 'unauthorized-decision-cause-0001',
+      reason: 'owner-suggested-change-reject',
     }, new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })

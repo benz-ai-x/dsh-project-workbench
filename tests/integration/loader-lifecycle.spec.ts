@@ -10,9 +10,12 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import type {
   AddProjectMemberResult,
   CreateProjectResult,
+  DecideSuggestedChangeResult,
   ProjectDetailProjection,
   ProjectStartProjection,
   ProjectTeamProjection,
+  ProposeProjectResponsibilityChangeResult,
+  ReviewCenterProjection,
   SetStatusRequest,
   SetStatusResult,
   SetProjectResponsibilityResult,
@@ -590,6 +593,215 @@ describe('built Workbench Host through the real DSH Loader', () => {
       expect(serializedTeamActivity).not.toContain(protectedValue)
     }
 
+    const proposedChange: ProposeProjectResponsibilityChangeResult = await first.workbenchAuth.run(
+      () => firstService.proposeProjectResponsibilityChange({
+        projectId: createdProject.project.projectId,
+        candidate: {
+          accountableMemberId: agentMember.value.memberId,
+          contributorMemberIds: [],
+          humanSponsorMemberId: feishuMember.value.memberId,
+        },
+        expectedTeamRevision: 4,
+        evidenceRefs: [{
+          kind: 'workbench-audit-event',
+          auditEventId: responsibility.receipt.auditEventId,
+        }],
+        idempotencyKey: 'loader-suggested-change-idempotency-0001',
+        causationId: 'loader-suggested-change-causation-0001',
+        reason: 'owner-suggested-change-propose',
+      }, new AbortController().signal),
+    )
+    expect(proposedChange).toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeRevision: 1,
+        targetAdapter: 'project-responsibility.replace',
+        baseTargetVersion: 4,
+        persistedState: 'pending',
+        riskLevel: 'low',
+      },
+      receipt: {
+        commandId: expect.stringMatching(/^command-/u),
+        auditEventId: expect.stringMatching(/^audit-/u),
+        outboxId: expect.stringMatching(/^outbox-/u),
+      },
+    })
+    if (!proposedChange.ok) throw new Error('expected SuggestedChange proposal to succeed')
+
+    const pendingReview = await first.workbenchAuth.run(() => firstService.reviewCenter({
+      projectId: createdProject.project.projectId,
+      status: 'pending',
+      riskLevel: 'low',
+      limit: 10,
+    }, new AbortController().signal))
+    if (pendingReview === null) throw new Error('expected Project Review Center to be readable')
+    expect(pendingReview).toMatchObject({
+      projectId: createdProject.project.projectId,
+      proposalBuilder: {
+        projectId: createdProject.project.projectId,
+        teamRevision: 4,
+        responsibilityRevision: 1,
+        base: {
+          accountableMemberId: agentMember.value.memberId,
+          contributorMemberIds: [externalMember.value.memberId],
+          humanSponsorMemberId: feishuMember.value.memberId,
+        },
+      },
+      items: [{
+        suggestedChangeId: proposedChange.value.suggestedChangeId,
+        revision: 1,
+        source: { kind: 'owner' },
+        target: {
+          kind: 'project-responsibility',
+          adapter: 'project-responsibility.replace',
+          baseTeamRevision: 4,
+          baseResponsibilityRevision: 1,
+          currentTeamRevision: 4,
+          currentResponsibilityRevision: 1,
+        },
+        proposedDiff: {
+          kind: 'project-responsibility.diff',
+          schemaVersion: 1,
+          before: { contributorMemberIds: [externalMember.value.memberId] },
+          after: { contributorMemberIds: [] },
+          changedFields: ['contributors'],
+          digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+        },
+        evidence: [{
+          kind: 'workbench-audit-event',
+          auditEventId: responsibility.receipt.auditEventId,
+          action: 'workbench.project.responsibility-assigned',
+        }],
+        risk: {
+          proposedLevel: 'low',
+          effectiveLevel: 'low',
+          proposedReasonCodes: ['contributors-only'],
+          policyVersion: 'project-responsibility-v1',
+          batchPolicy: { policy: 'eligible-later' },
+        },
+        originCausationId: 'loader-suggested-change-causation-0001',
+        persistedState: 'pending',
+        effectiveStatus: 'pending',
+        decisions: [],
+      }],
+      nextBeforeSequence: null,
+    })
+    expect(pendingReview.items[0]?.allowedDecisions).toEqual(expect.arrayContaining([
+      'accept',
+      'edit-and-accept',
+      'reject',
+      'defer',
+    ]))
+    expect(pendingReview.proposalBuilder.memberOptions.find(
+      member => member.memberId === externalMember.value.memberId,
+    )).toMatchObject({
+      kind: 'human',
+      requiresHumanSponsor: true,
+      canBeHumanSponsor: true,
+    })
+    expect(pendingReview.proposalBuilder.memberOptions.find(
+      member => member.memberId === feishuMember.value.memberId,
+    )).toMatchObject({
+      kind: 'human',
+      requiresHumanSponsor: false,
+      canBeHumanSponsor: true,
+    })
+
+    const acceptedChange: DecideSuggestedChangeResult = await first.workbenchAuth.run(() =>
+      firstService.decideSuggestedChange({
+        projectId: createdProject.project.projectId,
+        suggestedChangeId: proposedChange.value.suggestedChangeId,
+        expectedSuggestedChangeRevision: 1,
+        mode: 'accept',
+        acknowledgedRiskLevel: 'low',
+        feedback: 'The evidence supports removing the completed contributor assignment.',
+        idempotencyKey: 'loader-suggested-change-decision-idempotency-0001',
+        causationId: 'loader-suggested-change-decision-causation-0001',
+        reason: 'owner-suggested-change-accept',
+      }, new AbortController().signal))
+    expect(acceptedChange).toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeId: proposedChange.value.suggestedChangeId,
+        suggestedChangeRevision: 2,
+        persistedState: 'accepted',
+        decisionMode: 'accepted',
+        riskLevel: 'low',
+        appliedTeamRevision: 5,
+        appliedResponsibilityRevision: 2,
+      },
+    })
+    if (!acceptedChange.ok) throw new Error('expected SuggestedChange acceptance to succeed')
+
+    const acceptedTeam = await first.workbenchAuth.run(() => firstService.projectTeam(
+      { projectId: createdProject.project.projectId },
+      new AbortController().signal,
+    ))
+    expect(acceptedTeam).toMatchObject({
+      projectId: createdProject.project.projectId,
+      teamRevision: 5,
+      responsibility: {
+        revision: 2,
+        accountableMemberId: agentMember.value.memberId,
+        contributorMemberIds: [],
+        humanSponsorMemberId: feishuMember.value.memberId,
+      },
+    })
+    if (acceptedTeam === null) throw new Error('expected accepted Responsibility to be readable')
+
+    const acceptedReviewResult = await first.workbenchAuth.run(() => firstService.reviewCenter({
+      projectId: createdProject.project.projectId,
+      status: 'accepted',
+      riskLevel: 'low',
+      limit: 10,
+    }, new AbortController().signal))
+    if (acceptedReviewResult === null) throw new Error('expected accepted Review to be readable')
+    const acceptedReview: ReviewCenterProjection = acceptedReviewResult
+    expect(acceptedReview).toMatchObject({
+      proposalBuilder: { teamRevision: 5, responsibilityRevision: 2 },
+      items: [{
+        suggestedChangeId: proposedChange.value.suggestedChangeId,
+        revision: 2,
+        target: { currentTeamRevision: 5, currentResponsibilityRevision: 2 },
+        persistedState: 'accepted',
+        effectiveStatus: 'accepted',
+        allowedDecisions: [],
+        decisions: [{
+          mode: 'accepted',
+          feedback: 'The evidence supports removing the completed contributor assignment.',
+          appliedTeamRevision: 5,
+          appliedResponsibilityRevision: 2,
+          causationId: 'loader-suggested-change-decision-causation-0001',
+        }],
+      }],
+    })
+
+    const acceptedActivity = await first.workbenchAuth.run(() => firstService.activity({
+      projectId: createdProject.project.projectId,
+      action: 'workbench.suggested-change.accepted',
+      limit: 10,
+    }, new AbortController().signal))
+    expect(acceptedActivity).toMatchObject({
+      items: [{
+        eventId: acceptedChange.receipt.auditEventId,
+        action: 'workbench.suggested-change.accepted',
+        reason: 'owner-suggested-change-accept',
+        object: {
+          type: 'suggested-change',
+          id: proposedChange.value.suggestedChangeId,
+          version: 2,
+        },
+        summaryCode: 'suggested-change-accepted',
+      }],
+      integrity: { valid: true, eventCount: 8, issue: null },
+    })
+    expect(acceptedActivity.items).toHaveLength(1)
+    const serializedAcceptedActivity = JSON.stringify(acceptedActivity)
+    expect(serializedAcceptedActivity).not.toContain(
+      'The evidence supports removing the completed contributor assignment.',
+    )
+    expect(serializedAcceptedActivity).not.toContain(responsibility.receipt.auditEventId)
+
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
     expect(first.get('workbench')).toBeUndefined()
@@ -604,7 +816,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
     ))
     expect(restartWorkspaceActivity.items).toEqual(activity.items)
     expect(restartWorkspaceActivity.nextBeforeSequence).toBe(activity.nextBeforeSequence)
-    expect(restartWorkspaceActivity.integrity).toEqual(teamActivity.integrity)
+    expect(restartWorkspaceActivity.integrity).toEqual(acceptedActivity.integrity)
     await expect(restarted.workbenchAuth.run(() => restarted.workbench.project(
       { projectId: createdProject.project.projectId },
       new AbortController().signal,
@@ -620,10 +832,16 @@ describe('built Workbench Host through the real DSH Loader', () => {
     await expect(restarted.workbenchAuth.run(() => restarted.workbench.projectTeam(
       { projectId: createdProject.project.projectId },
       new AbortController().signal,
-    ))).resolves.toEqual(committedTeam)
+    ))).resolves.toEqual(acceptedTeam)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.reviewCenter({
+      projectId: createdProject.project.projectId,
+      status: 'accepted',
+      riskLevel: 'low',
+      limit: 10,
+    }, new AbortController().signal))).resolves.toEqual(acceptedReview)
     await expect(restarted.workbenchAuth.run(() =>
       restarted.workbench.auditIntegrity(new AbortController().signal))).resolves.toEqual(
-      teamActivity.integrity,
+      acceptedActivity.integrity,
     )
     await restarted.fiber.dispose()
     contexts.splice(contexts.indexOf(restarted), 1)

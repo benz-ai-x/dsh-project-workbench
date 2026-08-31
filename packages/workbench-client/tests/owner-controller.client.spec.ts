@@ -5,6 +5,8 @@ import type {
   OwnerAuthResponse,
   ProjectDetailProjection,
   ProjectStartProjection,
+  ReviewCenterProjection,
+  SuggestedChangeProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
@@ -14,6 +16,7 @@ import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
 import type { WorkbenchRemote } from '../src/client/controller.ts'
 import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
 import type { WorkbenchProjectTeamRemote } from '../src/client/project-team-controller.ts'
+import type { WorkbenchReviewRemote } from '../src/client/review-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 
 function fakeClock(initial: string) {
@@ -162,6 +165,104 @@ function projectDetail(): ProjectDetailProjection {
   }
 }
 
+function suggestedChangeProjection(options: {
+  readonly suggestedChangeId?: string
+  readonly sequence?: number
+  readonly baseTeamRevision?: number
+  readonly currentTeamRevision?: number
+  readonly effectiveStatus?: SuggestedChangeProjection['effectiveStatus']
+} = {}): SuggestedChangeProjection {
+  const effectiveStatus = options.effectiveStatus ?? 'pending'
+  return {
+    suggestedChangeId: options.suggestedChangeId ?? 'suggestion-owner-refresh',
+    sequence: options.sequence ?? 1,
+    revision: effectiveStatus === 'accepted' ? 2 : 1,
+    projectId: 'project-1',
+    source: { kind: 'owner', actorId: 'owner-1' },
+    target: {
+      kind: 'project-responsibility',
+      adapter: 'project-responsibility.replace',
+      representationSchemaVersion: 1,
+      projectId: 'project-1',
+      baseTeamRevision: options.baseTeamRevision ?? 0,
+      baseResponsibilityRevision: null,
+      currentTeamRevision: options.currentTeamRevision ?? 0,
+      currentResponsibilityRevision: null,
+    },
+    proposedDiff: {
+      kind: 'project-responsibility.diff',
+      schemaVersion: 1,
+      before: {
+        accountableMemberId: null,
+        contributorMemberIds: [],
+        humanSponsorMemberId: null,
+      },
+      after: {
+        accountableMemberId: null,
+        contributorMemberIds: ['member-1'],
+        humanSponsorMemberId: null,
+      },
+      changedFields: ['contributors'],
+      digest: `sha256:${'b'.repeat(64)}`,
+    },
+    evidence: [],
+    risk: {
+      proposedLevel: 'low',
+      effectiveLevel: 'low',
+      proposedReasonCodes: ['contributors-only'],
+      policyVersion: 'project-responsibility-v1',
+      batchPolicy: {
+        policy: 'eligible-later',
+        homogeneityKey: 'project-responsibility.replace|low|project-responsibility-v1',
+      },
+    },
+    originCausationId: 'cause-owner-refresh',
+    persistedState: effectiveStatus === 'stale' ? 'pending' : effectiveStatus,
+    effectiveStatus,
+    decisions: [],
+    allowedDecisions: effectiveStatus === 'stale'
+      ? ['reject']
+      : effectiveStatus === 'pending' || effectiveStatus === 'deferred'
+        ? ['accept', 'edit-and-accept', 'reject', 'defer']
+        : [],
+    createdAt: '2026-08-31T12:00:00.000Z',
+    updatedAt: '2026-08-31T12:00:00.000Z',
+  }
+}
+
+function reviewCenterProjection(
+  projectId = 'project-1',
+  teamRevision = 0,
+  items: readonly SuggestedChangeProjection[] = [],
+): ReviewCenterProjection {
+  return {
+    projectId,
+    proposalBuilder: {
+      projectId,
+      teamRevision,
+      responsibilityRevision: null,
+      base: {
+        accountableMemberId: null,
+        contributorMemberIds: [],
+        humanSponsorMemberId: null,
+      },
+      memberOptions: teamRevision === 0
+        ? []
+        : [{
+            memberId: 'member-1',
+            displayName: 'Research Agent',
+            kind: 'agent',
+            status: 'active',
+            requiresHumanSponsor: true,
+            canBeHumanSponsor: false,
+          }],
+      evidenceOptions: [],
+    },
+    items,
+    nextBeforeSequence: null,
+  }
+}
+
 function completeProjectDraft(controller: NonNullable<ReturnType<OwnerController['getSnapshot']>['projects']>): void {
   const outcome = controller.getSnapshot().draft.outcomes[0]
   if (outcome === undefined) throw new Error('default Outcome missing')
@@ -192,6 +293,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
 }
 
 type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
+  & WorkbenchReviewRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -234,6 +336,18 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
     setProjectResponsibility: overrides.setProjectResponsibility ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    reviewCenter: overrides.reviewCenter ?? vi.fn(filter => Promise.resolve(remoteOk(
+      reviewCenterProjection(filter.projectId),
+    ))),
+    proposeProjectResponsibilityChange: overrides.proposeProjectResponsibilityChange
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    decideSuggestedChange: overrides.decideSuggestedChange ?? vi.fn(() => Promise.resolve(remoteOk({
       ok: false as const,
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
@@ -281,6 +395,7 @@ describe('OwnerController', () => {
       status: null,
       projects: null,
       projectTeam: null,
+      review: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -339,6 +454,7 @@ describe('OwnerController', () => {
       status: null,
       projects: null,
       projectTeam: null,
+      review: null,
       activity: null,
       recoveryCode: 'WB1-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH',
     })
@@ -437,8 +553,19 @@ describe('OwnerController', () => {
     await controller.dispose()
   })
 
-  it('refreshes Activity after a committed Project create while retaining one Project controller', async () => {
+  it('refreshes Review stale truth and its current builder after a committed Team change', async () => {
+    let currentTeamRevision = 0
     const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const reviewCenter = vi.fn(filter => Promise.resolve(remoteOk(reviewCenterProjection(
+      filter.projectId,
+      currentTeamRevision,
+      [suggestedChangeProjection({
+        suggestedChangeId: 'suggestion-before-team-change',
+        baseTeamRevision: 0,
+        currentTeamRevision,
+        effectiveStatus: currentTeamRevision === 0 ? 'pending' : 'stale',
+      })],
+    ))))
     const projectTeam = vi.fn()
       .mockResolvedValueOnce(remoteOk({
         projectId: 'project-1', teamRevision: 0, members: [], responsibility: null,
@@ -459,22 +586,25 @@ describe('OwnerController', () => {
         }],
         responsibility: null,
       }))
-    const addProjectMember = vi.fn(() => Promise.resolve(remoteOk({
-      ok: true as const,
-      value: {
-        projectId: 'project-1',
-        memberId: 'member-1',
-        kind: 'agent' as const,
-        status: 'active' as const,
-        memberRevision: 1,
-        teamRevision: 1,
-      },
-      receipt: {
-        commandId: 'command-member-created',
-        auditEventId: 'audit-member-created',
-        outboxId: 'outbox-member-created',
-      },
-    })))
+    const addProjectMember = vi.fn(() => {
+      currentTeamRevision = 1
+      return Promise.resolve(remoteOk({
+        ok: true as const,
+        value: {
+          projectId: 'project-1',
+          memberId: 'member-1',
+          kind: 'agent' as const,
+          status: 'active' as const,
+          memberRevision: 1,
+          teamRevision: 1,
+        },
+        receipt: {
+          commandId: 'command-member-created',
+          auditEventId: 'audit-member-created',
+          outboxId: 'outbox-member-created',
+        },
+      }))
+    })
     const createProject = vi.fn(() => Promise.resolve(remoteOk({
       ok: true as const,
       value: projectDetail(),
@@ -487,7 +617,13 @@ describe('OwnerController', () => {
     })))
     const controller = new OwnerController(auth({
       state: vi.fn(() => Promise.resolve(authOk(access()))),
-    }), remote({ activity: activityRemote, createProject, projectTeam, addProjectMember }))
+    }), remote({
+      activity: activityRemote,
+      createProject,
+      projectTeam,
+      addProjectMember,
+      reviewCenter,
+    }))
 
     await controller.start()
     const projects = controller.getSnapshot().projects
@@ -503,16 +639,37 @@ describe('OwnerController', () => {
       draft: { projectName: '', primaryGoalName: '' },
     })
     const retainedTeam = controller.getSnapshot().projectTeam
+    const retainedReview = controller.getSnapshot().review
     await vi.waitFor(() => {
       expect(retainedTeam?.getSnapshot()).toMatchObject({
         phase: 'ready', selection: { projectId: 'project-1' }, team: { teamRevision: 0 },
+      })
+      expect(retainedReview?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1' },
+        review: { proposalBuilder: { teamRevision: 0 } },
       })
     })
     retainedTeam?.setMemberKind('agent')
     retainedTeam?.setMemberDisplayName('Research Agent')
     await retainedTeam?.addMember()
-    await vi.waitFor(() => { expect(activityRemote).toHaveBeenCalledTimes(3) })
+    await vi.waitFor(() => {
+      expect(activityRemote).toHaveBeenCalledTimes(3)
+      expect(reviewCenter).toHaveBeenCalledTimes(2)
+      expect(retainedReview?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        review: {
+          proposalBuilder: { teamRevision: 1 },
+          items: [{
+            suggestedChangeId: 'suggestion-before-team-change',
+            effectiveStatus: 'stale',
+            target: { baseTeamRevision: 0, currentTeamRevision: 1 },
+          }],
+        },
+      })
+    })
     expect(controller.getSnapshot().projectTeam).toBe(retainedTeam)
+    expect(controller.getSnapshot().review).toBe(retainedReview)
     expect(retainedTeam?.getSnapshot()).toMatchObject({
       phase: 'ready', team: { teamRevision: 1, members: [{ memberId: 'member-1' }] },
     })
@@ -554,6 +711,7 @@ describe('OwnerController', () => {
       status: null,
       projects: null,
       projectTeam: null,
+      review: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -597,6 +755,7 @@ describe('OwnerController', () => {
       status: null,
       projects: null,
       projectTeam: null,
+      review: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -708,11 +867,19 @@ describe('OwnerController', () => {
     const state = vi.fn(() => Promise.resolve(authOk(access())))
     const projectStart = vi.fn(() => Promise.resolve(remoteOk(projectStartProjection())))
     const project = vi.fn(() => Promise.resolve(remoteOk(projectDetail())))
-    const controller = new OwnerController(auth({ state }), remote({ projectStart, project }))
+    const reviewCenter = vi.fn(filter => Promise.resolve(remoteOk(
+      reviewCenterProjection(filter.projectId),
+    )))
+    const controller = new OwnerController(auth({ state }), remote({
+      projectStart,
+      project,
+      reviewCenter,
+    }))
     await controller.start()
     const projects = controller.getSnapshot().projects
     await projects?.openProject('project-1')
     expect(project).toHaveBeenCalledOnce()
+    expect(reviewCenter).toHaveBeenCalledOnce()
 
     controller.markDisconnected()
     await controller.connectionReset()
@@ -720,9 +887,15 @@ describe('OwnerController', () => {
     expect(state).toHaveBeenCalledTimes(2)
     expect(projectStart).toHaveBeenCalledTimes(2)
     expect(project).toHaveBeenCalledTimes(2)
+    expect(reviewCenter).toHaveBeenCalledTimes(2)
     expect(projects?.getSnapshot()).toMatchObject({
       phase: 'ready',
       detail: { project: { projectId: 'project-1' } },
+    })
+    expect(controller.getSnapshot().review?.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+      review: { projectId: 'project-1' },
     })
     await controller.dispose()
   })
@@ -939,6 +1112,7 @@ describe('OwnerController', () => {
       status: null,
       projects: null,
       projectTeam: null,
+      review: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -963,6 +1137,7 @@ describe('OwnerController', () => {
       status: null,
       projects: null,
       projectTeam: null,
+      review: null,
       activity: null,
       recoveryCode: null,
       issue: null,

@@ -7,6 +7,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type {
   AddProjectMemberResult,
   CreateProjectResult,
+  DecideSuggestedChangeResult,
   GoalProjection,
   GoalSummaryProjection,
   KnowledgeWorkTemplateDefinitionV1,
@@ -17,14 +18,24 @@ import type {
   ProjectMemberProjection,
   ProjectMemberStatus,
   ProjectResponsibilityProjection,
+  ProjectResponsibilityReviewDiff,
+  ProjectResponsibilityReviewValue,
+  ProjectResponsibilitySuggestedValue,
   ProjectStartProjection,
   ProjectSummaryProjection,
   ProjectTeamProjection,
   ProjectTemplateSelection,
   ProjectTemplateSnapshotProjection,
+  ProposeProjectResponsibilityChangeResult,
+  ReviewCenterProjection,
   SetStatusResult,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityResult,
+  SuggestedChangeDecisionMode,
+  SuggestedChangeEvidenceProjection,
+  SuggestedChangePersistedState,
+  SuggestedChangeRiskLevel,
+  SuggestedChangeRiskReason,
   WorkbenchActivityItem,
   WorkbenchActivityProjection,
   WorkbenchActivitySummaryCode,
@@ -55,6 +66,7 @@ import {
 import {
   projectTeamCommandResult,
   projectTeamProjection,
+  reviewCenterProjection,
   statusResult,
   statusSnapshot,
   type WorkbenchActivityQuery,
@@ -69,11 +81,14 @@ import {
   type WorkbenchProjectResponsibilityMutation,
   type WorkbenchProjectStartQuery,
   type WorkbenchProjectTeamReadQuery,
+  type WorkbenchReviewCenterQuery,
   type WorkbenchRepository,
   type WorkbenchStatusMutation,
+  type WorkbenchSuggestedChangeDecisionMutation,
+  type WorkbenchSuggestedChangeProposalMutation,
 } from './repository.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 4
+export const WORKBENCH_SCHEMA_VERSION = 5
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -105,6 +120,35 @@ const PROJECT_RESPONSIBILITY_OBJECT_TYPE = 'project-responsibility'
 const PROJECT_RESPONSIBILITY_REASON = 'owner-project-responsibility-set'
 const PROJECT_RESPONSIBILITY_SUMMARY = 'project-responsibility-assigned'
 const PROJECT_RESPONSIBILITY_OUTBOX_TOPIC = 'workbench.project.responsibility-assigned.v1'
+const SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE = 'workbench.suggested-change.propose'
+const SUGGESTED_CHANGE_PROPOSAL_AUDIT_ACTION = 'workbench.suggested-change.proposed'
+const SUGGESTED_CHANGE_PROPOSAL_REASON = 'owner-suggested-change-propose'
+const SUGGESTED_CHANGE_PROPOSAL_SUMMARY = 'suggested-change-proposed'
+const SUGGESTED_CHANGE_PROPOSAL_OUTBOX_TOPIC = 'workbench.suggested-change.proposed.v1'
+const SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE = 'workbench.suggested-change.accept'
+const SUGGESTED_CHANGE_ACCEPT_AUDIT_ACTION = 'workbench.suggested-change.accepted'
+const SUGGESTED_CHANGE_ACCEPT_REASON = 'owner-suggested-change-accept'
+const SUGGESTED_CHANGE_ACCEPT_SUMMARY = 'suggested-change-accepted'
+const SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE = 'workbench.suggested-change.edit-accept'
+const SUGGESTED_CHANGE_EDIT_ACCEPT_AUDIT_ACTION = 'workbench.suggested-change.edited-accepted'
+const SUGGESTED_CHANGE_EDIT_ACCEPT_REASON = 'owner-suggested-change-edit-accept'
+const SUGGESTED_CHANGE_EDIT_ACCEPT_SUMMARY = 'suggested-change-edited-accepted'
+const SUGGESTED_CHANGE_REJECT_COMMAND_TYPE = 'workbench.suggested-change.reject'
+const SUGGESTED_CHANGE_REJECT_AUDIT_ACTION = 'workbench.suggested-change.rejected'
+const SUGGESTED_CHANGE_REJECT_REASON = 'owner-suggested-change-reject'
+const SUGGESTED_CHANGE_REJECT_SUMMARY = 'suggested-change-rejected'
+const SUGGESTED_CHANGE_DEFER_COMMAND_TYPE = 'workbench.suggested-change.defer'
+const SUGGESTED_CHANGE_DEFER_AUDIT_ACTION = 'workbench.suggested-change.deferred'
+const SUGGESTED_CHANGE_DEFER_REASON = 'owner-suggested-change-defer'
+const SUGGESTED_CHANGE_DEFER_SUMMARY = 'suggested-change-deferred'
+const SUGGESTED_CHANGE_DECISION_OUTBOX_TOPIC = 'workbench.suggested-change.decided.v1'
+const SUGGESTED_CHANGE_OBJECT_TYPE = 'suggested-change'
+const SUGGESTED_CHANGE_TARGET_ADAPTER = 'project-responsibility.replace'
+const SUGGESTED_CHANGE_POLICY_VERSION = 'project-responsibility-v1'
+const SUGGESTED_CHANGE_REPRESENTATION_VERSION = 1
+const MAX_REVIEW_CENTER_LIMIT = 50
+const MAX_SUGGESTED_CHANGE_EVIDENCE = 20
+const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
 const MAX_ACTIVITY_LIMIT = 100
 const MAX_PROJECT_PAGE_LIMIT = 100
 const MAX_PROJECT_OUTCOMES = 20
@@ -182,6 +226,57 @@ interface ProjectResponsibilityRow {
 interface ProjectResponsibilityContributorRow {
   readonly member_id: string
   readonly ordinal: number
+}
+
+interface SuggestedChangeRow {
+  readonly sequence: number
+  readonly id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly project_id: string
+  readonly source_actor_id: string
+  readonly target_adapter: string
+  readonly representation_schema_version: number
+  readonly base_team_revision: number
+  readonly base_responsibility_revision: number | null
+  readonly candidate_json: string
+  readonly proposed_diff_json: string
+  readonly proposed_diff_digest: string
+  readonly proposed_risk_level: string
+  readonly proposed_risk_reasons_json: string
+  readonly policy_version: string
+  readonly origin_causation_id: string
+  readonly proposal_command_id: string
+  readonly revision: number
+  readonly persisted_state: string
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface SuggestedChangeDecisionRow {
+  readonly id: string
+  readonly suggested_change_id: string
+  readonly suggested_change_revision: number
+  readonly mode: string
+  readonly actor_id: string
+  readonly feedback: string
+  readonly applied_candidate_json: string | null
+  readonly applied_diff_json: string | null
+  readonly applied_risk_level: string | null
+  readonly applied_risk_reasons_json: string
+  readonly applied_team_revision: number | null
+  readonly applied_responsibility_revision: number | null
+  readonly causation_id: string
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly outbox_id: string
+  readonly decided_at: string
+}
+
+interface SuggestedChangeEvidenceRow {
+  readonly suggested_change_id: string
+  readonly ordinal: number
+  readonly audit_event_id: string
 }
 
 interface TemplateVersionRow {
@@ -388,6 +483,13 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_project_responsibility_no_delete',
   'workbench_project_responsibility_contributor_no_update',
   'workbench_project_responsibility_contributor_no_delete',
+  'workbench_suggested_change_envelope_no_update',
+  'workbench_suggested_change_head_transition',
+  'workbench_suggested_change_no_delete',
+  'workbench_suggested_change_evidence_no_update',
+  'workbench_suggested_change_evidence_no_delete',
+  'workbench_suggested_change_decision_no_update',
+  'workbench_suggested_change_decision_no_delete',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -1168,126 +1270,20 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       }
 
       assertValidLedger(database)
-      const head = readProjectTeamHead(database, mutation)
-      if (head === null) {
-        database.exec('ROLLBACK')
-        began = false
-        return projectNotFound<SetProjectResponsibilityResult>(mutation.projectId)
-      }
-      if (head.team_revision !== mutation.expectedTeamRevision) {
-        database.exec('ROLLBACK')
-        began = false
-        return teamRevisionConflict<SetProjectResponsibilityResult>(
-          mutation.expectedTeamRevision,
-          head.team_revision,
-        )
-      }
-      if (head.current_responsibility_revision !== mutation.expectedResponsibilityRevision) {
+      const replacement = responsibilityReplacementInput(mutation)
+      const plan = planProjectResponsibilityReplacement(database, replacement)
+      if (!plan.ok) {
         database.exec('ROLLBACK')
         began = false
         return projectTeamCommandResult({
           ok: false,
-          error: {
-            code: 'responsibility-revision-conflict',
-            message: 'Workbench Project Responsibility revision changed',
-            expectedResponsibilityRevision: mutation.expectedResponsibilityRevision,
-            currentResponsibilityRevision: head.current_responsibility_revision,
-          },
-        })
+          error: plan.error,
+        } as SetProjectResponsibilityResult)
       }
-      if (mutation.contributorMemberIds.includes(mutation.accountableMemberId)) {
-        database.exec('ROLLBACK')
-        began = false
-        return projectTeamCommandResult({
-          ok: false,
-          error: {
-            code: 'accountable-also-contributor',
-            message: `Workbench Accountable ${mutation.accountableMemberId} cannot also be a Contributor`,
-            memberId: mutation.accountableMemberId,
-          },
-        })
-      }
-      const referencedIds = [
-        mutation.accountableMemberId,
-        ...mutation.contributorMemberIds,
-        ...(mutation.humanSponsorMemberId === null ? [] : [mutation.humanSponsorMemberId]),
-      ]
-      const members = new Map<string, ProjectMemberRow>()
-      for (const memberId of referencedIds) {
-        const member = readProjectMember(database, mutation.projectId, memberId)
-        if (member === null) {
-          database.exec('ROLLBACK')
-          began = false
-          return memberNotFound<SetProjectResponsibilityResult>(memberId)
-        }
-        if (member.status !== 'active') {
-          database.exec('ROLLBACK')
-          began = false
-          return projectTeamCommandResult({
-            ok: false,
-            error: {
-              code: 'member-inactive',
-              message: `Workbench ProjectMember ${memberId} is inactive`,
-              memberId,
-            },
-          })
-        }
-        members.set(memberId, member)
-      }
-      const accountable = members.get(mutation.accountableMemberId)
-      if (accountable === undefined) throw new Error('Workbench Accountable member disappeared')
-      const sponsor = mutation.humanSponsorMemberId === null
-        ? null
-        : members.get(mutation.humanSponsorMemberId) ?? null
-      const sponsorRequired = accountable.kind === 'agent' || accountable.identity_type === 'external'
-      if (sponsorRequired && sponsor === null) {
-        database.exec('ROLLBACK')
-        began = false
-        return projectTeamCommandResult({
-          ok: false,
-          error: {
-            code: 'human-sponsor-required',
-            message: `Workbench Accountable member ${mutation.accountableMemberId} requires a human Sponsor`,
-            accountableMemberId: mutation.accountableMemberId,
-          },
-        })
-      }
-      if (!sponsorRequired && sponsor !== null) {
-        database.exec('ROLLBACK')
-        began = false
-        return projectTeamCommandResult({
-          ok: false,
-          error: {
-            code: 'human-sponsor-forbidden',
-            message: `Workbench declared-Feishu human ${mutation.accountableMemberId} cannot have a Sponsor`,
-            accountableMemberId: mutation.accountableMemberId,
-          },
-        })
-      }
-      if (sponsor !== null
-        && (sponsor.kind !== 'human' || sponsor.id === accountable.id)) {
-        database.exec('ROLLBACK')
-        began = false
-        return projectTeamCommandResult({
-          ok: false,
-          error: {
-            code: 'human-sponsor-invalid',
-            message: `Workbench Sponsor ${sponsor.id} must be a distinct active human`,
-            humanSponsorMemberId: sponsor.id,
-          },
-        })
-      }
-
-      const responsibilityRevision = (head.current_responsibility_revision ?? 0) + 1
-      if (!Number.isSafeInteger(responsibilityRevision)) {
-        throw new Error('Workbench Project Responsibility revision exhausted')
-      }
-      insertProjectResponsibility(database, mutation, responsibilityRevision)
-      const teamRevision = advanceProjectTeamHead(
+      const { responsibilityRevision, teamRevision } = applyProjectResponsibilityPlan(
         database,
-        head,
-        mutation.updatedAt,
-        responsibilityRevision,
+        replacement,
+        plan,
       )
       const committed = projectTeamCommandResult({
         ok: true,
@@ -1316,6 +1312,407 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
           teamRevision,
         },
         result: committed,
+      })
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async readReviewCenter(
+    query: WorkbenchReviewCenterQuery,
+    signal: AbortSignal,
+  ): Promise<ReviewCenterProjection | null> {
+    throwIfAborted(signal)
+    validateReviewCenterQuery(query)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN')
+      began = true
+      assertValidLedger(database)
+      const projection = readReviewCenterSync(database, query)
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return projection
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitSuggestedChangeProposal(
+    mutation: WorkbenchSuggestedChangeProposalMutation,
+    signal: AbortSignal,
+  ): Promise<ProposeProjectResponsibilityChangeResult> {
+    throwIfAborted(signal)
+    validateSuggestedChangeProposalMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = suggestedChangeProposalRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findReceipt(database, mutation, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return suggestedChangeIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeSuggestedChangeProposalResult(receipt.result_json, receipt)
+        throwIfAborted(signal)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+
+      assertValidLedger(database)
+      const head = readProjectTeamHead(database, {
+        organizationId: mutation.command.actor.organizationId,
+        teamId: mutation.command.actor.teamId,
+        projectId: mutation.projectId,
+      })
+      if (head === null) {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeProjectNotFound(mutation.projectId)
+      }
+      if (head.team_revision !== mutation.expectedTeamRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeTeamRevisionConflict(
+          mutation.expectedTeamRevision,
+          head.team_revision,
+        )
+      }
+      const replacement: ResponsibilityReplacementInput = {
+        projectId: mutation.projectId,
+        accountableMemberId: mutation.candidate.accountableMemberId,
+        contributorMemberIds: mutation.candidate.contributorMemberIds,
+        humanSponsorMemberId: mutation.candidate.humanSponsorMemberId,
+        expectedTeamRevision: mutation.expectedTeamRevision,
+        expectedResponsibilityRevision: head.current_responsibility_revision,
+        updatedAt: mutation.createdAt,
+        organizationId: mutation.command.actor.organizationId,
+        teamId: mutation.command.actor.teamId,
+      }
+      const plan = planProjectResponsibilityReplacement(database, replacement)
+      if (!plan.ok) {
+        database.exec('ROLLBACK')
+        began = false
+        return responsibilityErrorForProposal(plan.error)
+      }
+      const before = responsibilityReviewValue(database, head)
+      const proposedDiff = projectResponsibilityReviewDiff(before, mutation.candidate)
+      if (proposedDiff.changedFields.length === 0) {
+        database.exec('ROLLBACK')
+        began = false
+        return noOpSuggestedChangeProposal()
+      }
+      const proposedRisk = suggestedChangeRisk(before, mutation.candidate)
+      const evidence = resolveSuggestedChangeEvidence(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.projectId,
+        mutation.evidenceRefs.map(reference => reference.auditEventId),
+      )
+      if (!evidence.ok) {
+        database.exec('ROLLBACK')
+        began = false
+        return evidenceError(evidence.reason)
+      }
+
+      insertSuggestedChangeProposal(
+        database,
+        mutation,
+        head.current_responsibility_revision,
+        proposedDiff,
+        proposedRisk,
+      )
+      insertSuggestedChangeEvidence(database, mutation.suggestedChangeId, evidence.rows)
+      const committed = Object.freeze({
+        ok: true,
+        value: Object.freeze({
+          suggestedChangeId: mutation.suggestedChangeId,
+          suggestedChangeRevision: 1 as const,
+          targetAdapter: SUGGESTED_CHANGE_TARGET_ADAPTER,
+          baseTargetVersion: mutation.expectedTeamRevision,
+          persistedState: 'pending' as const,
+          riskLevel: proposedRisk.level,
+        }),
+        receipt: commandReceipt(mutation),
+      }) satisfies Extract<ProposeProjectResponsibilityChangeResult, { readonly ok: true }>
+      appendSuggestedChangeLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE,
+        auditAction: SUGGESTED_CHANGE_PROPOSAL_AUDIT_ACTION,
+        objectId: mutation.suggestedChangeId,
+        objectVersion: 1,
+        projectId: mutation.projectId,
+        summaryCode: SUGGESTED_CHANGE_PROPOSAL_SUMMARY,
+        changedFields: ['proposal', 'risk', 'evidence'],
+        outboxTopic: SUGGESTED_CHANGE_PROPOSAL_OUTBOX_TOPIC,
+        payload: {
+          projectId: mutation.projectId,
+          suggestedChangeId: mutation.suggestedChangeId,
+          suggestedChangeRevision: 1,
+          riskLevel: proposedRisk.level,
+        },
+        result: committed,
+      })
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitSuggestedChangeDecision(
+    mutation: WorkbenchSuggestedChangeDecisionMutation,
+    signal: AbortSignal,
+  ): Promise<DecideSuggestedChangeResult> {
+    throwIfAborted(signal)
+    validateSuggestedChangeDecisionMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = suggestedChangeDecisionRequestHash(mutation)
+    const vocabulary = suggestedChangeDecisionVocabulary(mutation.mode)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findReceipt(database, mutation, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== vocabulary.commandType
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return suggestedChangeDecisionIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeSuggestedChangeDecisionResult(receipt.result_json, receipt)
+        throwIfAborted(signal)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+
+      assertValidLedger(database)
+      const head = readProjectTeamHead(database, {
+        organizationId: mutation.command.actor.organizationId,
+        teamId: mutation.command.actor.teamId,
+        projectId: mutation.projectId,
+      })
+      if (head === null) {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeDecisionProjectNotFound(mutation.projectId)
+      }
+      const stored = readSuggestedChange(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.projectId,
+        mutation.suggestedChangeId,
+      )
+      if (stored === null) {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeNotFound(mutation.suggestedChangeId)
+      }
+      if (stored.revision !== mutation.expectedSuggestedChangeRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeRevisionConflict(
+          mutation.expectedSuggestedChangeRevision,
+          stored.revision,
+        )
+      }
+      const effectiveStatus = suggestedChangeEffectiveStatus(stored, head.team_revision)
+      if (stored.persisted_state === 'accepted' || stored.persisted_state === 'rejected') {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeStateConflict(effectiveStatus, mutation.mode)
+      }
+      if (effectiveStatus === 'stale' && mutation.mode !== 'reject') {
+        database.exec('ROLLBACK')
+        began = false
+        return mutation.mode === 'accept' || mutation.mode === 'edit-and-accept'
+          ? suggestedChangeStale(stored.base_team_revision, head.team_revision)
+          : suggestedChangeStateConflict('stale', mutation.mode)
+      }
+      if (stored.persisted_state === 'deferred' && mutation.mode === 'defer') {
+        database.exec('ROLLBACK')
+        began = false
+        return suggestedChangeStateConflict('deferred', mutation.mode)
+      }
+
+      const proposedDiff = decodeProjectResponsibilityReviewDiff(stored.proposed_diff_json)
+      const proposedRiskLevel = suggestedChangeRiskLevel(stored.proposed_risk_level)
+      let appliedCandidate: ProjectResponsibilitySuggestedValue | null = null
+      let appliedDiff: ProjectResponsibilityReviewDiff | null = null
+      let appliedRiskLevel: SuggestedChangeRiskLevel | null = null
+      let appliedRiskReasons: readonly SuggestedChangeRiskReason[] = Object.freeze([])
+      let appliedTeamRevision: number | null = null
+      let appliedResponsibilityRevision: number | null = null
+      let effectiveRiskLevel = proposedRiskLevel
+
+      if (mutation.mode === 'accept' || mutation.mode === 'edit-and-accept') {
+        const evidenceIds = readSuggestedChangeEvidenceRows(database, stored.id)
+          .map(row => row.audit_event_id)
+        const evidence = resolveSuggestedChangeEvidence(
+          database,
+          stored.organization_id,
+          stored.team_id,
+          stored.project_id,
+          evidenceIds,
+          suggestedChangeProposalAuditSequence(database, stored),
+        )
+        if (!evidence.ok) {
+          database.exec('ROLLBACK')
+          began = false
+          return evidence.reason === 'integrity-failed'
+            ? suggestedChangeStale(stored.base_team_revision, head.team_revision)
+            : suggestedChangeStateConflict(effectiveStatus, mutation.mode)
+        }
+        appliedCandidate = mutation.mode === 'accept'
+          ? decodeProjectResponsibilitySuggestedValue(stored.candidate_json)
+          : mutation.candidate
+        appliedDiff = projectResponsibilityReviewDiff(proposedDiff.before, appliedCandidate)
+        if (appliedDiff.changedFields.length === 0) {
+          database.exec('ROLLBACK')
+          began = false
+          return noOpSuggestedChangeDecision()
+        }
+        const appliedRisk = suggestedChangeRisk(proposedDiff.before, appliedCandidate)
+        appliedRiskLevel = appliedRisk.level
+        appliedRiskReasons = appliedRisk.reasons
+        effectiveRiskLevel = maxSuggestedChangeRisk(proposedRiskLevel, appliedRisk.level)
+        if (mutation.acknowledgedRiskLevel !== effectiveRiskLevel) {
+          database.exec('ROLLBACK')
+          began = false
+          return riskAcknowledgementMismatch(effectiveRiskLevel)
+        }
+        if (head.team_revision !== stored.base_team_revision
+          || head.current_responsibility_revision !== stored.base_responsibility_revision) {
+          database.exec('ROLLBACK')
+          began = false
+          return suggestedChangeStale(stored.base_team_revision, head.team_revision)
+        }
+        const replacement: ResponsibilityReplacementInput = {
+          projectId: stored.project_id,
+          accountableMemberId: appliedCandidate.accountableMemberId,
+          contributorMemberIds: appliedCandidate.contributorMemberIds,
+          humanSponsorMemberId: appliedCandidate.humanSponsorMemberId,
+          expectedTeamRevision: stored.base_team_revision,
+          expectedResponsibilityRevision: stored.base_responsibility_revision,
+          updatedAt: mutation.decidedAt,
+          organizationId: stored.organization_id,
+          teamId: stored.team_id,
+        }
+        const plan = planProjectResponsibilityReplacement(database, replacement)
+        if (!plan.ok) {
+          database.exec('ROLLBACK')
+          began = false
+          return responsibilityErrorForDecision(plan.error, stored.base_team_revision, head.team_revision)
+        }
+        const applied = applyProjectResponsibilityPlan(database, replacement, plan)
+        appliedTeamRevision = applied.teamRevision
+        appliedResponsibilityRevision = applied.responsibilityRevision
+      }
+
+      const nextRevision = stored.revision + 1
+      if (!Number.isSafeInteger(nextRevision)) {
+        throw new Error('Workbench SuggestedChange revision exhausted')
+      }
+      const persistedState: SuggestedChangePersistedState = mutation.mode === 'accept'
+        || mutation.mode === 'edit-and-accept'
+        ? 'accepted'
+        : mutation.mode === 'reject' ? 'rejected' : 'deferred'
+      const decisionMode: SuggestedChangeDecisionMode = mutation.mode === 'accept'
+        ? 'accepted'
+        : mutation.mode === 'edit-and-accept' ? 'edited-accepted' : persistedState
+      const advanced = database.prepare(`
+        UPDATE workbench_suggested_change
+        SET revision = ?, persisted_state = ?, updated_at = ?
+        WHERE id = ? AND organization_id = ? AND team_id = ? AND project_id = ?
+          AND revision = ? AND persisted_state = ?
+      `).run(
+        nextRevision,
+        persistedState,
+        mutation.decidedAt,
+        stored.id,
+        stored.organization_id,
+        stored.team_id,
+        stored.project_id,
+        stored.revision,
+        stored.persisted_state,
+      )
+      if (advanced.changes !== 1) {
+        throw new Error('Workbench SuggestedChange head did not advance exactly once')
+      }
+      const committed = Object.freeze({
+        ok: true,
+        value: Object.freeze({
+          suggestedChangeId: stored.id,
+          suggestedChangeRevision: nextRevision,
+          persistedState,
+          decisionMode,
+          riskLevel: effectiveRiskLevel,
+          appliedTeamRevision,
+          appliedResponsibilityRevision,
+        }),
+        receipt: commandReceipt(mutation),
+      }) satisfies Extract<DecideSuggestedChangeResult, { readonly ok: true }>
+      appendSuggestedChangeLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: vocabulary.commandType,
+        auditAction: vocabulary.auditAction,
+        objectId: stored.id,
+        objectVersion: nextRevision,
+        projectId: stored.project_id,
+        summaryCode: vocabulary.summaryCode,
+        changedFields: mutation.mode === 'accept' || mutation.mode === 'edit-and-accept'
+          ? ['decision', 'target']
+          : ['decision'],
+        outboxTopic: SUGGESTED_CHANGE_DECISION_OUTBOX_TOPIC,
+        payload: {
+          projectId: stored.project_id,
+          suggestedChangeId: stored.id,
+          suggestedChangeRevision: nextRevision,
+          persistedState,
+          decisionMode,
+          riskLevel: effectiveRiskLevel,
+          ...(appliedTeamRevision === null ? {} : { appliedTeamRevision }),
+          ...(appliedResponsibilityRevision === null ? {} : { appliedResponsibilityRevision }),
+        },
+        result: committed,
+      })
+      insertSuggestedChangeDecision(database, {
+        mutation,
+        suggestedChangeRevision: nextRevision,
+        decisionMode,
+        appliedCandidate,
+        appliedDiff,
+        appliedRiskLevel,
+        appliedRiskReasons,
+        appliedTeamRevision,
+        appliedResponsibilityRevision,
       })
       throwIfAborted(signal)
       database.exec('COMMIT')
@@ -2021,8 +2418,8 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     }
     return
   }
-  if (targetVersion !== 4) throw new Error(`missing Workbench migration ${targetVersion}`)
-  database.exec(`
+  if (targetVersion === 4) {
+    database.exec(`
     CREATE TABLE workbench_project_team_head (
       project_id TEXT PRIMARY KEY CHECK (length(project_id) BETWEEN 1 AND 128),
       organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
@@ -2157,7 +2554,141 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     CREATE TRIGGER workbench_project_responsibility_contributor_no_delete
       BEFORE DELETE ON workbench_project_responsibility_contributor
     BEGIN SELECT RAISE(ABORT, 'workbench Project Responsibility contributors cannot be deleted'); END
-  `)
+    `)
+    return
+  }
+  if (targetVersion === 5) {
+    database.exec(`
+      CREATE TABLE workbench_suggested_change (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        source_actor_id TEXT NOT NULL CHECK (length(source_actor_id) BETWEEN 1 AND 128),
+        target_adapter TEXT NOT NULL CHECK (target_adapter = '${SUGGESTED_CHANGE_TARGET_ADAPTER}'),
+        representation_schema_version INTEGER NOT NULL
+          CHECK (representation_schema_version = ${SUGGESTED_CHANGE_REPRESENTATION_VERSION}),
+        base_team_revision INTEGER NOT NULL CHECK (base_team_revision >= 0),
+        base_responsibility_revision INTEGER
+          CHECK (base_responsibility_revision IS NULL OR base_responsibility_revision > 0),
+        candidate_json TEXT NOT NULL CHECK (length(candidate_json) > 0),
+        proposed_diff_json TEXT NOT NULL CHECK (length(proposed_diff_json) > 0),
+        proposed_diff_digest TEXT NOT NULL CHECK (
+          length(proposed_diff_digest) = 71
+          AND substr(proposed_diff_digest, 1, 7) = 'sha256:'
+        ),
+        proposed_risk_level TEXT NOT NULL CHECK (proposed_risk_level IN ('low', 'high')),
+        proposed_risk_reasons_json TEXT NOT NULL CHECK (length(proposed_risk_reasons_json) > 0),
+        policy_version TEXT NOT NULL CHECK (policy_version = '${SUGGESTED_CHANGE_POLICY_VERSION}'),
+        origin_causation_id TEXT NOT NULL CHECK (length(origin_causation_id) BETWEEN 1 AND 128),
+        proposal_command_id TEXT NOT NULL UNIQUE CHECK (length(proposal_command_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        persisted_state TEXT NOT NULL
+          CHECK (persisted_state IN ('pending', 'accepted', 'rejected', 'deferred')),
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (id, organization_id, team_id, project_id),
+        FOREIGN KEY (project_id, organization_id, team_id)
+          REFERENCES workbench_project_team_head (project_id, organization_id, team_id),
+        FOREIGN KEY (proposal_command_id) REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_suggested_change_evidence (
+        suggested_change_id TEXT NOT NULL
+          REFERENCES workbench_suggested_change (id),
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND ${MAX_SUGGESTED_CHANGE_EVIDENCE}),
+        audit_event_id TEXT NOT NULL REFERENCES workbench_audit_event (id),
+        PRIMARY KEY (suggested_change_id, ordinal),
+        UNIQUE (suggested_change_id, audit_event_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_suggested_change_decision (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        suggested_change_id TEXT NOT NULL REFERENCES workbench_suggested_change (id),
+        suggested_change_revision INTEGER NOT NULL CHECK (suggested_change_revision > 1),
+        mode TEXT NOT NULL CHECK (mode IN ('accepted', 'edited-accepted', 'rejected', 'deferred')),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        feedback TEXT NOT NULL
+          CHECK (length(feedback) BETWEEN 1 AND ${MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH}),
+        applied_candidate_json TEXT,
+        applied_diff_json TEXT,
+        applied_risk_level TEXT CHECK (applied_risk_level IS NULL OR applied_risk_level IN ('low', 'high')),
+        applied_risk_reasons_json TEXT NOT NULL CHECK (length(applied_risk_reasons_json) > 0),
+        applied_team_revision INTEGER CHECK (applied_team_revision IS NULL OR applied_team_revision > 0),
+        applied_responsibility_revision INTEGER
+          CHECK (applied_responsibility_revision IS NULL OR applied_responsibility_revision > 0),
+        causation_id TEXT NOT NULL CHECK (length(causation_id) BETWEEN 1 AND 128),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id),
+        audit_event_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (id),
+        outbox_id TEXT NOT NULL UNIQUE REFERENCES workbench_outbox (id),
+        decided_at TEXT NOT NULL CHECK (length(decided_at) > 0),
+        UNIQUE (suggested_change_id, suggested_change_revision),
+        CHECK (
+          (mode IN ('accepted', 'edited-accepted')
+            AND applied_candidate_json IS NOT NULL AND applied_diff_json IS NOT NULL
+            AND applied_risk_level IS NOT NULL AND applied_team_revision IS NOT NULL
+            AND applied_responsibility_revision IS NOT NULL)
+          OR (mode IN ('rejected', 'deferred')
+            AND applied_candidate_json IS NULL AND applied_diff_json IS NULL
+            AND applied_risk_level IS NULL AND applied_team_revision IS NULL
+            AND applied_responsibility_revision IS NULL)
+        )
+      ) STRICT;
+
+      CREATE INDEX workbench_suggested_change_scope_sequence
+        ON workbench_suggested_change (organization_id, team_id, project_id, sequence DESC);
+      CREATE INDEX workbench_suggested_change_state_risk_sequence
+        ON workbench_suggested_change (
+          organization_id, team_id, project_id, persisted_state,
+          proposed_risk_level, sequence DESC
+        );
+      CREATE INDEX workbench_suggested_change_decision_order
+        ON workbench_suggested_change_decision (
+          suggested_change_id, suggested_change_revision
+        );
+
+      CREATE TRIGGER workbench_suggested_change_envelope_no_update BEFORE UPDATE OF
+        sequence, id, organization_id, team_id, project_id, source_actor_id,
+        target_adapter, representation_schema_version, base_team_revision,
+        base_responsibility_revision, candidate_json, proposed_diff_json,
+        proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+        policy_version, origin_causation_id, proposal_command_id, created_at
+        ON workbench_suggested_change
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange envelopes are immutable'); END;
+      CREATE TRIGGER workbench_suggested_change_head_transition BEFORE UPDATE OF
+        revision, persisted_state, updated_at ON workbench_suggested_change
+      WHEN NOT (
+        NEW.revision = OLD.revision + 1
+        AND NEW.updated_at >= OLD.updated_at
+        AND (
+          (OLD.persisted_state = 'pending'
+            AND NEW.persisted_state IN ('deferred', 'accepted', 'rejected'))
+          OR (OLD.persisted_state = 'deferred'
+            AND NEW.persisted_state IN ('accepted', 'rejected'))
+        )
+      )
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange head transition is invalid'); END;
+      CREATE TRIGGER workbench_suggested_change_no_delete
+        BEFORE DELETE ON workbench_suggested_change
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChanges cannot be deleted'); END;
+      CREATE TRIGGER workbench_suggested_change_evidence_no_update
+        BEFORE UPDATE ON workbench_suggested_change_evidence
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange evidence is immutable'); END;
+      CREATE TRIGGER workbench_suggested_change_evidence_no_delete
+        BEFORE DELETE ON workbench_suggested_change_evidence
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange evidence cannot be deleted'); END;
+      CREATE TRIGGER workbench_suggested_change_decision_no_update
+        BEFORE UPDATE ON workbench_suggested_change_decision
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange decisions are append-only'); END;
+      CREATE TRIGGER workbench_suggested_change_decision_no_delete
+        BEFORE DELETE ON workbench_suggested_change_decision
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange decisions cannot be deleted'); END
+    `)
+    return
+  }
+  throw new Error(`missing Workbench migration ${targetVersion}`)
 }
 
 function validateSchema(database: DatabaseSync): void {
@@ -2202,6 +2733,19 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare(`
     SELECT project_id, responsibility_revision, member_id, ordinal
     FROM workbench_project_responsibility_contributor LIMIT 1
+  `)
+  database.prepare(`
+    SELECT sequence, id, project_id, base_team_revision,
+      base_responsibility_revision, revision, persisted_state
+    FROM workbench_suggested_change LIMIT 1
+  `)
+  database.prepare(`
+    SELECT suggested_change_id, ordinal, audit_event_id
+    FROM workbench_suggested_change_evidence LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, suggested_change_id, suggested_change_revision, mode, command_id
+    FROM workbench_suggested_change_decision LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
@@ -2475,9 +3019,192 @@ function insertProjectMember(
   if (result.changes !== 1) throw new Error('Workbench ProjectMember was not inserted exactly once')
 }
 
+interface ResponsibilityReplacementInput {
+  readonly projectId: string
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly expectedTeamRevision: number
+  readonly expectedResponsibilityRevision: number | null
+  readonly updatedAt: string
+  readonly organizationId: string
+  readonly teamId: string
+}
+
+type ResponsibilityReplacementError = Extract<
+SetProjectResponsibilityResult,
+{ readonly ok: false }
+>['error']
+
+type ResponsibilityReplacementPlan =
+  | {
+    readonly ok: true
+    readonly head: ProjectTeamHeadRow
+    readonly responsibilityRevision: number
+  }
+  | { readonly ok: false; readonly error: ResponsibilityReplacementError }
+
+function responsibilityReplacementInput(
+  mutation: WorkbenchProjectResponsibilityMutation,
+): ResponsibilityReplacementInput {
+  return {
+    projectId: mutation.projectId,
+    accountableMemberId: mutation.accountableMemberId,
+    contributorMemberIds: mutation.contributorMemberIds,
+    humanSponsorMemberId: mutation.humanSponsorMemberId,
+    expectedTeamRevision: mutation.expectedTeamRevision,
+    expectedResponsibilityRevision: mutation.expectedResponsibilityRevision,
+    updatedAt: mutation.updatedAt,
+    organizationId: mutation.command.actor.organizationId,
+    teamId: mutation.command.actor.teamId,
+  }
+}
+
+/** Shared synchronous T05/T06 invariant planner; it never writes or opens a transaction. */
+function planProjectResponsibilityReplacement(
+  database: DatabaseSync,
+  input: ResponsibilityReplacementInput,
+): ResponsibilityReplacementPlan {
+  const head = database.prepare(`
+    SELECT project_id, organization_id, team_id, team_revision,
+      current_responsibility_revision, updated_at
+    FROM workbench_project_team_head
+    WHERE project_id = ? AND organization_id = ? AND team_id = ?
+  `).get(input.projectId, input.organizationId, input.teamId) as ProjectTeamHeadRow | undefined
+  if (head === undefined) {
+    return {
+      ok: false,
+      error: {
+        code: 'project-not-found',
+        message: `Workbench Project ${input.projectId} was not found in the authorized scope`,
+        projectId: input.projectId,
+      },
+    }
+  }
+  projectTeamHeadValues(head)
+  if (head.team_revision !== input.expectedTeamRevision) {
+    return {
+      ok: false,
+      error: {
+        code: 'team-revision-conflict',
+        message: `Workbench Project Team revision changed (expected ${String(input.expectedTeamRevision)}, current ${String(head.team_revision)})`,
+        expectedTeamRevision: input.expectedTeamRevision,
+        currentTeamRevision: head.team_revision,
+      },
+    }
+  }
+  if (head.current_responsibility_revision !== input.expectedResponsibilityRevision) {
+    return {
+      ok: false,
+      error: {
+        code: 'responsibility-revision-conflict',
+        message: 'Workbench Project Responsibility revision changed',
+        expectedResponsibilityRevision: input.expectedResponsibilityRevision,
+        currentResponsibilityRevision: head.current_responsibility_revision,
+      },
+    }
+  }
+  if (input.contributorMemberIds.includes(input.accountableMemberId)) {
+    return {
+      ok: false,
+      error: {
+        code: 'accountable-also-contributor',
+        message: `Workbench Accountable ${input.accountableMemberId} cannot also be a Contributor`,
+        memberId: input.accountableMemberId,
+      },
+    }
+  }
+  const referencedIds = [
+    input.accountableMemberId,
+    ...input.contributorMemberIds,
+    ...(input.humanSponsorMemberId === null ? [] : [input.humanSponsorMemberId]),
+  ]
+  const members = new Map<string, ProjectMemberRow>()
+  for (const memberId of referencedIds) {
+    const member = readProjectMember(database, input.projectId, memberId)
+    if (member === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'member-not-found',
+          message: `Workbench ProjectMember ${memberId} was not found in this Project`,
+          memberId,
+        },
+      }
+    }
+    if (member.status !== 'active') {
+      return {
+        ok: false,
+        error: {
+          code: 'member-inactive',
+          message: `Workbench ProjectMember ${memberId} is inactive`,
+          memberId,
+        },
+      }
+    }
+    members.set(memberId, member)
+  }
+  const accountable = members.get(input.accountableMemberId)
+  if (accountable === undefined) throw new Error('Workbench Accountable member disappeared')
+  const sponsor = input.humanSponsorMemberId === null
+    ? null
+    : members.get(input.humanSponsorMemberId) ?? null
+  const sponsorRequired = accountable.kind === 'agent' || accountable.identity_type === 'external'
+  if (sponsorRequired && sponsor === null) {
+    return {
+      ok: false,
+      error: {
+        code: 'human-sponsor-required',
+        message: `Workbench Accountable member ${input.accountableMemberId} requires a human Sponsor`,
+        accountableMemberId: input.accountableMemberId,
+      },
+    }
+  }
+  if (!sponsorRequired && sponsor !== null) {
+    return {
+      ok: false,
+      error: {
+        code: 'human-sponsor-forbidden',
+        message: `Workbench declared-Feishu human ${input.accountableMemberId} cannot have a Sponsor`,
+        accountableMemberId: input.accountableMemberId,
+      },
+    }
+  }
+  if (sponsor !== null && (sponsor.kind !== 'human' || sponsor.id === accountable.id)) {
+    return {
+      ok: false,
+      error: {
+        code: 'human-sponsor-invalid',
+        message: `Workbench Sponsor ${sponsor.id} must be a distinct active human`,
+        humanSponsorMemberId: sponsor.id,
+      },
+    }
+  }
+  const responsibilityRevision = (head.current_responsibility_revision ?? 0) + 1
+  if (!Number.isSafeInteger(responsibilityRevision)) {
+    throw new Error('Workbench Project Responsibility revision exhausted')
+  }
+  return { ok: true, head, responsibilityRevision }
+}
+
+function applyProjectResponsibilityPlan(
+  database: DatabaseSync,
+  input: ResponsibilityReplacementInput,
+  plan: Extract<ResponsibilityReplacementPlan, { readonly ok: true }>,
+): { readonly responsibilityRevision: number; readonly teamRevision: number } {
+  insertProjectResponsibility(database, input, plan.responsibilityRevision)
+  const teamRevision = advanceProjectTeamHead(
+    database,
+    plan.head,
+    input.updatedAt,
+    plan.responsibilityRevision,
+  )
+  return { responsibilityRevision: plan.responsibilityRevision, teamRevision }
+}
+
 function insertProjectResponsibility(
   database: DatabaseSync,
-  mutation: WorkbenchProjectResponsibilityMutation,
+  mutation: ResponsibilityReplacementInput,
   revision: number,
 ): void {
   const inserted = database.prepare(`
@@ -2487,8 +3214,8 @@ function insertProjectResponsibility(
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     mutation.projectId,
-    mutation.command.actor.organizationId,
-    mutation.command.actor.teamId,
+    mutation.organizationId,
+    mutation.teamId,
     revision,
     mutation.accountableMemberId,
     mutation.humanSponsorMemberId,
@@ -2508,8 +3235,8 @@ function insertProjectResponsibility(
     if (memberId === undefined) throw new Error('Workbench Contributor order is sparse')
     const result = insertContributor.run(
       mutation.projectId,
-      mutation.command.actor.organizationId,
-      mutation.command.actor.teamId,
+      mutation.organizationId,
+      mutation.teamId,
       revision,
       memberId,
       index + 1,
@@ -2683,6 +3410,947 @@ function appendProjectTeamLedger(database: DatabaseSync, input: ProjectTeamLedge
   if (receipt.changes !== 1) {
     throw new Error('Workbench Project Team command receipt was not inserted exactly once')
   }
+}
+
+interface SuggestedChangeRiskMaterial {
+  readonly level: SuggestedChangeRiskLevel
+  readonly reasons: readonly SuggestedChangeRiskReason[]
+}
+
+function responsibilityReviewValue(
+  database: DatabaseSync,
+  head: ProjectTeamHeadRow,
+): ProjectResponsibilityReviewValue {
+  if (head.current_responsibility_revision === null) {
+    return Object.freeze({
+      accountableMemberId: null,
+      contributorMemberIds: Object.freeze([]),
+      humanSponsorMemberId: null,
+    })
+  }
+  const current = readProjectResponsibility(
+    database,
+    head,
+    head.current_responsibility_revision,
+    true,
+  )
+  return Object.freeze({
+    accountableMemberId: current.accountableMemberId,
+    contributorMemberIds: Object.freeze([...current.contributorMemberIds]),
+    humanSponsorMemberId: current.humanSponsorMemberId,
+  })
+}
+
+function projectResponsibilityReviewDiff(
+  before: ProjectResponsibilityReviewValue,
+  after: ProjectResponsibilitySuggestedValue,
+): ProjectResponsibilityReviewDiff {
+  const changedFields: Array<'accountable' | 'contributors' | 'human-sponsor'> = []
+  if (before.accountableMemberId !== after.accountableMemberId) changedFields.push('accountable')
+  if (before.contributorMemberIds.length !== after.contributorMemberIds.length
+    || before.contributorMemberIds.some((memberId, index) =>
+      memberId !== after.contributorMemberIds[index])) {
+    changedFields.push('contributors')
+  }
+  if (before.humanSponsorMemberId !== after.humanSponsorMemberId) {
+    changedFields.push('human-sponsor')
+  }
+  const normalizedBefore = Object.freeze({
+    accountableMemberId: before.accountableMemberId,
+    contributorMemberIds: Object.freeze([...before.contributorMemberIds]),
+    humanSponsorMemberId: before.humanSponsorMemberId,
+  })
+  const normalizedAfter = Object.freeze({
+    accountableMemberId: after.accountableMemberId,
+    contributorMemberIds: Object.freeze([...after.contributorMemberIds]),
+    humanSponsorMemberId: after.humanSponsorMemberId,
+  })
+  const digest = contentDigest(canonicalizeJson({
+    kind: 'project-responsibility.diff',
+    schemaVersion: 1,
+    before: normalizedBefore,
+    after: normalizedAfter,
+    changedFields,
+  }))
+  return Object.freeze({
+    kind: 'project-responsibility.diff',
+    schemaVersion: 1,
+    before: normalizedBefore,
+    after: normalizedAfter,
+    changedFields: Object.freeze(changedFields),
+    digest,
+  })
+}
+
+function suggestedChangeRisk(
+  before: ProjectResponsibilityReviewValue,
+  after: ProjectResponsibilitySuggestedValue,
+): SuggestedChangeRiskMaterial {
+  if (before.accountableMemberId === null) {
+    return Object.freeze({
+      level: 'high',
+      reasons: Object.freeze(['initial-responsibility'] as const),
+    })
+  }
+  const reasons: SuggestedChangeRiskReason[] = []
+  if (before.accountableMemberId !== after.accountableMemberId) {
+    reasons.push('accountable-changed')
+  }
+  if (before.humanSponsorMemberId !== after.humanSponsorMemberId) {
+    reasons.push('human-sponsor-changed')
+  }
+  if (reasons.length > 0) {
+    return Object.freeze({ level: 'high', reasons: Object.freeze(reasons) })
+  }
+  return Object.freeze({
+    level: 'low',
+    reasons: Object.freeze(['contributors-only'] as const),
+  })
+}
+
+function maxSuggestedChangeRisk(
+  proposed: SuggestedChangeRiskLevel,
+  applied: SuggestedChangeRiskLevel,
+): SuggestedChangeRiskLevel {
+  return proposed === 'high' || applied === 'high' ? 'high' : 'low'
+}
+
+interface SuggestedChangeLedgerInput {
+  readonly command: WorkbenchCommandMetadata
+  readonly requestHash: string
+  readonly commandType: AuditEvent['command']['type']
+  readonly auditAction: WorkbenchAuditAction
+  readonly objectId: string
+  readonly objectVersion: number
+  readonly projectId: string
+  readonly summaryCode: WorkbenchActivitySummaryCode
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+  readonly payload: Readonly<Record<string, string | number>>
+  readonly result:
+    | Extract<ProposeProjectResponsibilityChangeResult, { readonly ok: true }>
+    | Extract<DecideSuggestedChangeResult, { readonly ok: true }>
+}
+
+function appendSuggestedChangeLedger(
+  database: DatabaseSync,
+  input: SuggestedChangeLedgerInput,
+): void {
+  const payload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: input.command.commandId,
+    auditEventId: input.command.auditEventId,
+    requestHash: input.requestHash,
+    ...input.payload,
+    causationId: input.command.causationId,
+  })
+  const outbox = database.prepare(`
+    INSERT INTO workbench_outbox (
+      id, command_id, organization_id, topic, effect_key, project_id,
+      object_type, object_id, object_version, causation_id, payload_json,
+      state, attempt_count, created_at, updated_at, error_code
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
+  `).run(
+    input.command.outboxId,
+    input.command.commandId,
+    input.command.actor.organizationId,
+    input.outboxTopic,
+    `workbench:${input.command.outboxId}`,
+    input.projectId,
+    SUGGESTED_CHANGE_OBJECT_TYPE,
+    input.objectId,
+    input.objectVersion,
+    input.command.causationId,
+    payload,
+    input.command.occurredAt,
+    input.command.occurredAt,
+  )
+  if (outbox.changes !== 1) {
+    throw new Error('Workbench SuggestedChange Outbox intent was not inserted exactly once')
+  }
+  const head = readAuditHead(database)
+  if (head.sequence >= Number.MAX_SAFE_INTEGER) throw new Error('Workbench audit sequence exhausted')
+  const sequence = head.sequence + 1
+  const event = createAuditEvent({
+    sequence: String(sequence),
+    previousHash: auditHash(head.head_hash),
+    auditId: input.command.auditEventId,
+    occurredAt: input.command.occurredAt,
+    actor: { kind: input.command.actor.kind, id: input.command.actor.id },
+    action: input.auditAction,
+    scope: {
+      organizationId: input.command.actor.organizationId,
+      teamId: input.command.actor.teamId,
+      projectId: input.projectId,
+    },
+    reason: { code: input.command.reason },
+    object: {
+      type: SUGGESTED_CHANGE_OBJECT_TYPE,
+      id: input.objectId,
+      version: String(input.objectVersion),
+    },
+    command: { id: input.command.commandId, type: input.commandType },
+    causation: { id: input.command.causationId },
+    outbox: { id: input.command.outboxId, state: 'pending' },
+    outcome: 'committed',
+    summary: { code: input.summaryCode, changedFields: input.changedFields },
+  })
+  insertAuditEvent(database, event)
+  const advanced = database.prepare(`
+    UPDATE workbench_audit_head SET sequence = ?, head_hash = ?
+    WHERE singleton = 1 AND sequence = ? AND head_hash = ?
+  `).run(sequence, event.eventHash, head.sequence, head.head_hash)
+  if (advanced.changes !== 1) throw new Error('Workbench audit head did not advance exactly once')
+  const receipt = database.prepare(`
+    INSERT INTO workbench_command_receipt (
+      organization_id, actor_id, idempotency_key_hash, command_type,
+      request_hash, command_id, audit_event_id, outbox_id, result_json, committed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.command.actor.organizationId,
+    input.command.actor.id,
+    idempotencyKeyHash(input.command.idempotencyKey),
+    input.commandType,
+    input.requestHash,
+    input.command.commandId,
+    input.command.auditEventId,
+    input.command.outboxId,
+    canonicalizeJson(input.result),
+    input.command.occurredAt,
+  )
+  if (receipt.changes !== 1) {
+    throw new Error('Workbench SuggestedChange receipt was not inserted exactly once')
+  }
+}
+
+function insertSuggestedChangeProposal(
+  database: DatabaseSync,
+  mutation: WorkbenchSuggestedChangeProposalMutation,
+  baseResponsibilityRevision: number | null,
+  proposedDiff: ProjectResponsibilityReviewDiff,
+  risk: SuggestedChangeRiskMaterial,
+): void {
+  const inserted = database.prepare(`
+    INSERT INTO workbench_suggested_change (
+      id, organization_id, team_id, project_id, source_actor_id, target_adapter,
+      representation_schema_version, base_team_revision,
+      base_responsibility_revision, candidate_json, proposed_diff_json,
+      proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+      policy_version, origin_causation_id, proposal_command_id,
+      revision, persisted_state, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?)
+  `).run(
+    mutation.suggestedChangeId,
+    mutation.command.actor.organizationId,
+    mutation.command.actor.teamId,
+    mutation.projectId,
+    mutation.command.actor.id,
+    SUGGESTED_CHANGE_TARGET_ADAPTER,
+    SUGGESTED_CHANGE_REPRESENTATION_VERSION,
+    mutation.expectedTeamRevision,
+    baseResponsibilityRevision,
+    canonicalizeJson(mutation.candidate),
+    canonicalizeJson(proposedDiff),
+    proposedDiff.digest,
+    risk.level,
+    canonicalizeJson(risk.reasons),
+    SUGGESTED_CHANGE_POLICY_VERSION,
+    mutation.command.causationId,
+    mutation.command.commandId,
+    mutation.createdAt,
+    mutation.createdAt,
+  )
+  if (inserted.changes !== 1) {
+    throw new Error('Workbench SuggestedChange proposal was not inserted exactly once')
+  }
+}
+
+function insertSuggestedChangeEvidence(
+  database: DatabaseSync,
+  suggestedChangeId: string,
+  rows: readonly AuditRow[],
+): void {
+  const statement = database.prepare(`
+    INSERT INTO workbench_suggested_change_evidence (
+      suggested_change_id, ordinal, audit_event_id
+    ) VALUES (?, ?, ?)
+  `)
+  rows.forEach((row, index) => {
+    const inserted = statement.run(suggestedChangeId, index + 1, row.id)
+    if (inserted.changes !== 1) {
+      throw new Error('Workbench SuggestedChange EvidenceRef was not inserted exactly once')
+    }
+  })
+}
+
+interface SuggestedChangeDecisionInsert {
+  readonly mutation: WorkbenchSuggestedChangeDecisionMutation
+  readonly suggestedChangeRevision: number
+  readonly decisionMode: SuggestedChangeDecisionMode
+  readonly appliedCandidate: ProjectResponsibilitySuggestedValue | null
+  readonly appliedDiff: ProjectResponsibilityReviewDiff | null
+  readonly appliedRiskLevel: SuggestedChangeRiskLevel | null
+  readonly appliedRiskReasons: readonly SuggestedChangeRiskReason[]
+  readonly appliedTeamRevision: number | null
+  readonly appliedResponsibilityRevision: number | null
+}
+
+function insertSuggestedChangeDecision(
+  database: DatabaseSync,
+  input: SuggestedChangeDecisionInsert,
+): void {
+  const inserted = database.prepare(`
+    INSERT INTO workbench_suggested_change_decision (
+      id, suggested_change_id, suggested_change_revision, mode, actor_id,
+      feedback, applied_candidate_json, applied_diff_json, applied_risk_level,
+      applied_risk_reasons_json, applied_team_revision,
+      applied_responsibility_revision, causation_id, command_id,
+      audit_event_id, outbox_id, decided_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.mutation.decisionId,
+    input.mutation.suggestedChangeId,
+    input.suggestedChangeRevision,
+    input.decisionMode,
+    input.mutation.command.actor.id,
+    input.mutation.feedback,
+    input.appliedCandidate === null ? null : canonicalizeJson(input.appliedCandidate),
+    input.appliedDiff === null ? null : canonicalizeJson(input.appliedDiff),
+    input.appliedRiskLevel,
+    canonicalizeJson(input.appliedRiskReasons),
+    input.appliedTeamRevision,
+    input.appliedResponsibilityRevision,
+    input.mutation.command.causationId,
+    input.mutation.command.commandId,
+    input.mutation.command.auditEventId,
+    input.mutation.command.outboxId,
+    input.mutation.decidedAt,
+  )
+  if (inserted.changes !== 1) {
+    throw new Error('Workbench SuggestedChange decision was not inserted exactly once')
+  }
+}
+
+function readSuggestedChange(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+  projectId: string,
+  suggestedChangeId: string,
+): SuggestedChangeRow | null {
+  const row = database.prepare(`
+    SELECT sequence, id, organization_id, team_id, project_id, source_actor_id,
+      target_adapter, representation_schema_version, base_team_revision,
+      base_responsibility_revision, candidate_json, proposed_diff_json,
+      proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+      policy_version, origin_causation_id, proposal_command_id, revision,
+      persisted_state, created_at, updated_at
+    FROM workbench_suggested_change
+    WHERE id = ? AND organization_id = ? AND team_id = ? AND project_id = ?
+  `).get(
+    suggestedChangeId,
+    organizationId,
+    teamId,
+    projectId,
+  ) as SuggestedChangeRow | undefined
+  if (row === undefined) return null
+  validateSuggestedChangeRow(row)
+  return row
+}
+
+function readSuggestedChangeEvidenceRows(
+  database: DatabaseSync,
+  suggestedChangeId: string,
+): readonly SuggestedChangeEvidenceRow[] {
+  const rows = database.prepare(`
+    SELECT suggested_change_id, ordinal, audit_event_id
+    FROM workbench_suggested_change_evidence
+    WHERE suggested_change_id = ? ORDER BY ordinal
+  `).all(suggestedChangeId) as unknown as SuggestedChangeEvidenceRow[]
+  if (rows.length < 1 || rows.length > MAX_SUGGESTED_CHANGE_EVIDENCE) {
+    throw new Error('Workbench SuggestedChange has an invalid EvidenceRef count')
+  }
+  rows.forEach((row, index) => {
+    if (row.suggested_change_id !== suggestedChangeId || row.ordinal !== index + 1) {
+      throw new Error('Workbench SuggestedChange EvidenceRef order is invalid')
+    }
+    boundedReference(row.audit_event_id, 'SuggestedChange EvidenceRef audit id')
+    const previous = rows[index - 1]
+    if (previous !== undefined && previous.audit_event_id >= row.audit_event_id) {
+      throw new Error('Workbench SuggestedChange EvidenceRefs lost their canonical order')
+    }
+  })
+  return rows
+}
+
+type SuggestedChangeEvidenceResolution =
+  | { readonly ok: true; readonly rows: readonly AuditRow[] }
+  | {
+    readonly ok: false
+    readonly reason: 'duplicate' | 'unavailable' | 'wrong-project' | 'integrity-failed'
+  }
+
+function resolveSuggestedChangeEvidence(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+  projectId: string,
+  auditEventIds: readonly string[],
+  beforeSequence?: number,
+): SuggestedChangeEvidenceResolution {
+  if (auditEventIds.length < 1 || auditEventIds.length > MAX_SUGGESTED_CHANGE_EVIDENCE) {
+    return { ok: false, reason: 'unavailable' }
+  }
+  if (new Set(auditEventIds).size !== auditEventIds.length) {
+    return { ok: false, reason: 'duplicate' }
+  }
+  if (!verifyAuditChainSync(database).valid) {
+    return { ok: false, reason: 'integrity-failed' }
+  }
+  const rows: AuditRow[] = []
+  for (const auditEventId of auditEventIds) {
+    const row = readAuditRow(database, auditEventId)
+    if (row === null) return { ok: false, reason: 'unavailable' }
+    if (row.organization_id !== organizationId
+      || row.team_id !== teamId
+      || row.project_id !== projectId) {
+      return { ok: false, reason: 'wrong-project' }
+    }
+    if (beforeSequence !== undefined && row.sequence >= beforeSequence) {
+      return { ok: false, reason: 'unavailable' }
+    }
+    auditEventFromRow(row)
+    rows.push(row)
+  }
+  return { ok: true, rows: Object.freeze(rows) }
+}
+
+function suggestedChangeProposalAuditSequence(
+  database: DatabaseSync,
+  suggested: Pick<SuggestedChangeRow, 'proposal_command_id'>,
+): number {
+  const row = database.prepare(`
+    SELECT sequence FROM workbench_audit_event WHERE command_id = ?
+      AND command_type = ?
+  `).get(
+    suggested.proposal_command_id,
+    SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE,
+  ) as { readonly sequence: number } | undefined
+  if (row === undefined) throw new Error('Workbench SuggestedChange lost its proposal audit')
+  return positiveInteger(row.sequence, 'SuggestedChange proposal audit sequence')
+}
+
+function readAuditRow(database: DatabaseSync, auditEventId: string): AuditRow | null {
+  const row = database.prepare(`
+    SELECT sequence, id, occurred_at, actor_kind, actor_id, organization_id,
+      team_id, project_id, action, reason_code, reason_detail, object_type,
+      object_id, object_version, command_id, command_type, causation_id,
+      outbox_id, outbox_state, outcome, summary_code, summary_fields_json,
+      previous_hash, event_hash, canonical_envelope
+    FROM workbench_audit_event WHERE id = ?
+  `).get(auditEventId) as AuditRow | undefined
+  return row ?? null
+}
+
+function readReviewCenterSync(
+  database: DatabaseSync,
+  query: WorkbenchReviewCenterQuery,
+): ReviewCenterProjection | null {
+  const head = readProjectTeamHead(database, {
+    organizationId: query.organizationId,
+    teamId: query.teamId,
+    projectId: query.filter.projectId,
+  })
+  if (head === null) return null
+  const limit = query.filter.limit ?? 20
+  const effectiveStatusSql = `CASE
+    WHEN suggested.persisted_state IN ('pending', 'deferred')
+      AND suggested.base_team_revision <> ? THEN 'stale'
+    ELSE suggested.persisted_state END`
+  const effectiveRiskSql = `CASE
+    WHEN suggested.proposed_risk_level = 'high' OR EXISTS (
+      SELECT 1 FROM workbench_suggested_change_decision AS risk_decision
+      WHERE risk_decision.suggested_change_id = suggested.id
+        AND risk_decision.applied_risk_level = 'high'
+    ) THEN 'high' ELSE 'low' END`
+  const where = [
+    'suggested.organization_id = ?',
+    'suggested.team_id = ?',
+    'suggested.project_id = ?',
+  ]
+  const parameters: Array<string | number> = [
+    query.organizationId,
+    query.teamId,
+    query.filter.projectId,
+  ]
+  if (query.filter.status !== undefined) {
+    where.push(`${effectiveStatusSql} = ?`)
+    parameters.push(head.team_revision, query.filter.status)
+  }
+  if (query.filter.riskLevel !== undefined) {
+    where.push(`${effectiveRiskSql} = ?`)
+    parameters.push(query.filter.riskLevel)
+  }
+  if (query.filter.beforeSequence !== undefined) {
+    where.push('suggested.sequence < ?')
+    parameters.push(query.filter.beforeSequence)
+  }
+  parameters.push(limit + 1)
+  const rows = database.prepare(`
+    SELECT suggested.sequence, suggested.id, suggested.organization_id,
+      suggested.team_id, suggested.project_id, suggested.source_actor_id,
+      suggested.target_adapter, suggested.representation_schema_version,
+      suggested.base_team_revision, suggested.base_responsibility_revision,
+      suggested.candidate_json, suggested.proposed_diff_json,
+      suggested.proposed_diff_digest, suggested.proposed_risk_level,
+      suggested.proposed_risk_reasons_json, suggested.policy_version,
+      suggested.origin_causation_id, suggested.proposal_command_id,
+      suggested.revision, suggested.persisted_state,
+      suggested.created_at, suggested.updated_at
+    FROM workbench_suggested_change AS suggested
+    WHERE ${where.join(' AND ')}
+    ORDER BY suggested.sequence DESC
+    LIMIT ?
+  `).all(...parameters) as unknown as SuggestedChangeRow[]
+  const hasMore = rows.length > limit
+  const visible = hasMore ? rows.slice(0, limit) : rows
+  const items = visible.map(row => suggestedChangeProjectionFromRow(database, row, head))
+  const memberRows = database.prepare(`
+    SELECT id, organization_id, team_id, project_id, kind, display_name, status,
+      identity_type, feishu_app_id, feishu_open_id, external_method,
+      external_value, revision, created_at, updated_at
+    FROM workbench_project_member WHERE project_id = ? ORDER BY created_at, id
+  `).all(head.project_id) as unknown as ProjectMemberRow[]
+  const memberOptions = memberRows.map(row => {
+    const member = projectMemberFromRow(row)
+    return Object.freeze({
+      memberId: member.memberId,
+      displayName: member.displayName,
+      kind: member.kind,
+      status: member.status,
+      requiresHumanSponsor: member.kind === 'agent'
+        || (member.kind === 'human' && member.identity.type === 'external'),
+      canBeHumanSponsor: member.kind === 'human' && member.status === 'active',
+    })
+  })
+  const evidenceOptions = readRecentProjectEvidence(database, head.project_id)
+  return reviewCenterProjection({
+    projectId: head.project_id,
+    proposalBuilder: {
+      projectId: head.project_id,
+      teamRevision: head.team_revision,
+      responsibilityRevision: head.current_responsibility_revision,
+      base: responsibilityReviewValue(database, head),
+      memberOptions,
+      evidenceOptions,
+    },
+    items,
+    nextBeforeSequence: hasMore ? items.at(-1)?.sequence ?? null : null,
+  })
+}
+
+function suggestedChangeProjectionFromRow(
+  database: DatabaseSync,
+  row: SuggestedChangeRow,
+  currentHead: ProjectTeamHeadRow,
+): ReviewCenterProjection['items'][number] {
+  validateSuggestedChangeRow(row)
+  const proposedDiff = decodeProjectResponsibilityReviewDiff(row.proposed_diff_json)
+  if (proposedDiff.digest !== row.proposed_diff_digest) {
+    throw new Error('Workbench SuggestedChange diff digest does not match its envelope')
+  }
+  const proposedLevel = suggestedChangeRiskLevel(row.proposed_risk_level)
+  const proposedReasonCodes = decodeSuggestedChangeRiskReasons(
+    row.proposed_risk_reasons_json,
+  )
+  const evidenceRows = readSuggestedChangeEvidenceRows(database, row.id)
+  const evidence = evidenceRows.map(evidenceRow => {
+    const audit = readAuditRow(database, evidenceRow.audit_event_id)
+    if (audit === null) throw new Error('Workbench SuggestedChange lost an EvidenceRef')
+    if (audit.project_id !== row.project_id) {
+      throw new Error('Workbench SuggestedChange EvidenceRef escaped its Project')
+    }
+    return suggestedChangeEvidenceProjection(audit)
+  })
+  const decisionRows = database.prepare(`
+    SELECT id, suggested_change_id, suggested_change_revision, mode, actor_id,
+      feedback, applied_candidate_json, applied_diff_json, applied_risk_level,
+      applied_risk_reasons_json, applied_team_revision,
+      applied_responsibility_revision, causation_id, command_id,
+      audit_event_id, outbox_id, decided_at
+    FROM workbench_suggested_change_decision
+    WHERE suggested_change_id = ? ORDER BY suggested_change_revision
+  `).all(row.id) as unknown as SuggestedChangeDecisionRow[]
+  const decisions = decisionRows.map(decision =>
+    suggestedChangeDecisionProjectionFromRow(decision, row.id))
+  const effectiveStatus = suggestedChangeEffectiveStatus(row, currentHead.team_revision)
+  const appliedHigh = decisions.some(decision => decision.appliedRiskLevel === 'high')
+  const effectiveLevel: SuggestedChangeRiskLevel = proposedLevel === 'high' || appliedHigh
+    ? 'high'
+    : 'low'
+  const actionable = effectiveStatus === 'pending' || effectiveStatus === 'deferred'
+  const allowedDecisions = effectiveStatus === 'stale'
+    ? ['reject'] as const
+    : effectiveStatus === 'pending'
+      ? ['accept', 'edit-and-accept', 'reject', 'defer'] as const
+      : effectiveStatus === 'deferred'
+        ? ['accept', 'edit-and-accept', 'reject'] as const
+        : [] as const
+  return Object.freeze({
+    suggestedChangeId: row.id,
+    sequence: row.sequence,
+    revision: row.revision,
+    projectId: row.project_id,
+    source: Object.freeze({ kind: 'owner', actorId: row.source_actor_id }),
+    target: Object.freeze({
+      kind: 'project-responsibility',
+      adapter: SUGGESTED_CHANGE_TARGET_ADAPTER,
+      representationSchemaVersion: 1,
+      projectId: row.project_id,
+      baseTeamRevision: row.base_team_revision,
+      baseResponsibilityRevision: row.base_responsibility_revision,
+      currentTeamRevision: currentHead.team_revision,
+      currentResponsibilityRevision: currentHead.current_responsibility_revision,
+    }),
+    proposedDiff,
+    evidence: Object.freeze(evidence),
+    risk: Object.freeze({
+      proposedLevel,
+      effectiveLevel,
+      proposedReasonCodes,
+      policyVersion: SUGGESTED_CHANGE_POLICY_VERSION,
+      batchPolicy: effectiveLevel === 'low' && actionable
+        ? Object.freeze({
+          policy: 'eligible-later' as const,
+          homogeneityKey: 'project-responsibility.replace|low|project-responsibility-v1' as const,
+        })
+        : Object.freeze({
+          policy: 'forbidden' as const,
+          reason: !actionable ? 'not-actionable' as const : 'high-risk' as const,
+        }),
+    }),
+    originCausationId: row.origin_causation_id,
+    persistedState: suggestedChangePersistedState(row.persisted_state),
+    effectiveStatus,
+    decisions: Object.freeze(decisions),
+    allowedDecisions: Object.freeze([...allowedDecisions]),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function suggestedChangeDecisionProjectionFromRow(
+  row: SuggestedChangeDecisionRow,
+  suggestedChangeId: string,
+): ReviewCenterProjection['items'][number]['decisions'][number] {
+  if (row.suggested_change_id !== suggestedChangeId) {
+    throw new Error('Workbench SuggestedChange decision escaped its envelope')
+  }
+  const mode = suggestedChangeDecisionMode(row.mode)
+  const accepting = mode === 'accepted' || mode === 'edited-accepted'
+  const appliedDiff = row.applied_diff_json === null
+    ? null
+    : decodeProjectResponsibilityReviewDiff(row.applied_diff_json)
+  if (accepting !== (appliedDiff !== null)
+    || accepting !== (row.applied_risk_level !== null)
+    || accepting !== (row.applied_team_revision !== null)
+    || accepting !== (row.applied_responsibility_revision !== null)) {
+    throw new Error('Workbench SuggestedChange decision has inconsistent applied material')
+  }
+  if (row.applied_candidate_json !== null) {
+    const candidate = decodeProjectResponsibilitySuggestedValue(row.applied_candidate_json)
+    if (appliedDiff === null
+      || canonicalizeJson(candidate) !== canonicalizeJson(appliedDiff.after)) {
+      throw new Error('Workbench SuggestedChange applied candidate does not match its diff')
+    }
+  } else if (accepting) {
+    throw new Error('Workbench accepted SuggestedChange is missing its applied candidate')
+  }
+  const appliedRiskReasonCodes = decodeSuggestedChangeRiskReasons(
+    row.applied_risk_reasons_json,
+    !accepting,
+  )
+  return Object.freeze({
+    decisionId: boundedReference(row.id, 'SuggestedChange decision id'),
+    suggestedChangeRevision: positiveInteger(
+      row.suggested_change_revision,
+      'SuggestedChange decision revision',
+    ),
+    mode,
+    actor: Object.freeze({
+      kind: 'owner',
+      id: boundedReference(row.actor_id, 'SuggestedChange decision actor id'),
+    }),
+    feedback: storedText(
+      row.feedback,
+      'SuggestedChange decision feedback',
+      MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH,
+    ),
+    appliedDiff,
+    appliedRiskLevel: row.applied_risk_level === null
+      ? null
+      : suggestedChangeRiskLevel(row.applied_risk_level),
+    appliedRiskReasonCodes,
+    appliedTeamRevision: row.applied_team_revision === null
+      ? null
+      : positiveInteger(row.applied_team_revision, 'SuggestedChange applied Team revision'),
+    appliedResponsibilityRevision: row.applied_responsibility_revision === null
+      ? null
+      : positiveInteger(
+        row.applied_responsibility_revision,
+        'SuggestedChange applied Responsibility revision',
+      ),
+    causationId: boundedReference(row.causation_id, 'SuggestedChange decision causation id'),
+    receipt: Object.freeze({
+      commandId: boundedReference(row.command_id, 'SuggestedChange decision command id'),
+      auditEventId: boundedReference(row.audit_event_id, 'SuggestedChange decision audit id'),
+      outboxId: boundedReference(row.outbox_id, 'SuggestedChange decision Outbox id'),
+    }),
+    decidedAt: canonicalInstant(row.decided_at, 'SuggestedChange decision decidedAt'),
+  })
+}
+
+function suggestedChangeEvidenceProjection(row: AuditRow): SuggestedChangeEvidenceProjection {
+  const event = auditEventFromRow(row)
+  return Object.freeze({
+    kind: 'workbench-audit-event',
+    auditEventId: event.auditId,
+    occurredAt: event.occurredAt,
+    action: event.action,
+    summaryCode: event.summary.code,
+    object: Object.freeze({
+      type: event.object.type,
+      id: event.object.id,
+      version: positiveInteger(Number(event.object.version), 'Evidence object version'),
+    }),
+  })
+}
+
+function readRecentProjectEvidence(
+  database: DatabaseSync,
+  projectId: string,
+): readonly SuggestedChangeEvidenceProjection[] {
+  const rows = database.prepare(`
+    SELECT sequence, id, occurred_at, actor_kind, actor_id, organization_id,
+      team_id, project_id, action, reason_code, reason_detail, object_type,
+      object_id, object_version, command_id, command_type, causation_id,
+      outbox_id, outbox_state, outcome, summary_code, summary_fields_json,
+      previous_hash, event_hash, canonical_envelope
+    FROM workbench_audit_event WHERE project_id = ?
+    ORDER BY sequence DESC LIMIT ${MAX_SUGGESTED_CHANGE_EVIDENCE}
+  `).all(projectId) as unknown as AuditRow[]
+  return Object.freeze(rows.map(suggestedChangeEvidenceProjection))
+}
+
+function validateSuggestedChangeRow(row: SuggestedChangeRow): void {
+  positiveInteger(row.sequence, 'SuggestedChange sequence')
+  boundedReference(row.id, 'SuggestedChange id')
+  boundedReference(row.organization_id, 'SuggestedChange organization id')
+  boundedReference(row.team_id, 'SuggestedChange team id')
+  boundedReference(row.project_id, 'SuggestedChange Project id')
+  boundedReference(row.source_actor_id, 'SuggestedChange source actor id')
+  if (row.target_adapter !== SUGGESTED_CHANGE_TARGET_ADAPTER
+    || row.representation_schema_version !== SUGGESTED_CHANGE_REPRESENTATION_VERSION
+    || row.policy_version !== SUGGESTED_CHANGE_POLICY_VERSION) {
+    throw new Error('Workbench SuggestedChange has an unsupported target contract')
+  }
+  positiveInteger(row.base_team_revision, 'SuggestedChange base Team revision', true)
+  if (row.base_responsibility_revision !== null) {
+    positiveInteger(
+      row.base_responsibility_revision,
+      'SuggestedChange base Responsibility revision',
+    )
+  }
+  const candidate = decodeProjectResponsibilitySuggestedValue(row.candidate_json)
+  const diff = decodeProjectResponsibilityReviewDiff(row.proposed_diff_json)
+  if (canonicalizeJson(candidate) !== canonicalizeJson(diff.after)
+    || diff.digest !== row.proposed_diff_digest
+    || diff.changedFields.length === 0) {
+    throw new Error('Workbench SuggestedChange candidate and proposed diff are inconsistent')
+  }
+  const risk = suggestedChangeRisk(diff.before, diff.after)
+  const storedLevel = suggestedChangeRiskLevel(row.proposed_risk_level)
+  const storedReasons = decodeSuggestedChangeRiskReasons(row.proposed_risk_reasons_json)
+  if (risk.level !== storedLevel
+    || canonicalizeJson(risk.reasons) !== canonicalizeJson(storedReasons)) {
+    throw new Error('Workbench SuggestedChange risk does not match its semantic diff')
+  }
+  boundedReference(row.origin_causation_id, 'SuggestedChange origin causation id')
+  boundedReference(row.proposal_command_id, 'SuggestedChange proposal command id')
+  positiveInteger(row.revision, 'SuggestedChange revision')
+  suggestedChangePersistedState(row.persisted_state)
+  const createdAt = canonicalInstant(row.created_at, 'SuggestedChange createdAt')
+  const updatedAt = canonicalInstant(row.updated_at, 'SuggestedChange updatedAt')
+  if (updatedAt < createdAt) throw new Error('Workbench SuggestedChange updatedAt precedes createdAt')
+}
+
+function decodeProjectResponsibilitySuggestedValue(
+  json: string,
+): ProjectResponsibilitySuggestedValue {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    throw new Error('Workbench SuggestedChange candidate contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== json) {
+    throw new Error('Workbench SuggestedChange candidate is not canonical JSON')
+  }
+  const record = exactStoredObject(parsed, 'SuggestedChange candidate', [
+    'accountableMemberId', 'contributorMemberIds', 'humanSponsorMemberId',
+  ])
+  const contributors = decodeCanonicalContributorIds(record.contributorMemberIds)
+  return Object.freeze({
+    accountableMemberId: boundedReference(
+      record.accountableMemberId,
+      'SuggestedChange Accountable member id',
+    ),
+    contributorMemberIds: contributors,
+    humanSponsorMemberId: record.humanSponsorMemberId === null
+      ? null
+      : boundedReference(
+        record.humanSponsorMemberId,
+        'SuggestedChange Human Sponsor member id',
+      ),
+  })
+}
+
+function decodeProjectResponsibilityReviewValue(
+  value: unknown,
+): ProjectResponsibilityReviewValue {
+  const record = exactStoredObject(value, 'SuggestedChange Responsibility before value', [
+    'accountableMemberId', 'contributorMemberIds', 'humanSponsorMemberId',
+  ])
+  return Object.freeze({
+    accountableMemberId: record.accountableMemberId === null
+      ? null
+      : boundedReference(record.accountableMemberId, 'Review Accountable member id'),
+    contributorMemberIds: decodeCanonicalContributorIds(record.contributorMemberIds),
+    humanSponsorMemberId: record.humanSponsorMemberId === null
+      ? null
+      : boundedReference(record.humanSponsorMemberId, 'Review Human Sponsor member id'),
+  })
+}
+
+function decodeProjectResponsibilitySuggestedValueFromValue(
+  value: unknown,
+): ProjectResponsibilitySuggestedValue {
+  const record = exactStoredObject(value, 'SuggestedChange Responsibility after value', [
+    'accountableMemberId', 'contributorMemberIds', 'humanSponsorMemberId',
+  ])
+  return Object.freeze({
+    accountableMemberId: boundedReference(record.accountableMemberId, 'Review Accountable member id'),
+    contributorMemberIds: decodeCanonicalContributorIds(record.contributorMemberIds),
+    humanSponsorMemberId: record.humanSponsorMemberId === null
+      ? null
+      : boundedReference(record.humanSponsorMemberId, 'Review Human Sponsor member id'),
+  })
+}
+
+function decodeCanonicalContributorIds(value: unknown): readonly string[] {
+  const values = arrayValue(value, 'SuggestedChange Contributor ids')
+  if (values.length > MAX_RESPONSIBILITY_CONTRIBUTORS) {
+    throw new Error('Workbench SuggestedChange has too many Contributors')
+  }
+  const contributors = values.map(memberId =>
+    boundedReference(memberId, 'SuggestedChange Contributor member id'))
+  if (new Set(contributors).size !== contributors.length
+    || contributors.some((memberId, index) => index > 0 && contributors[index - 1]! > memberId)) {
+    throw new Error('Workbench SuggestedChange Contributor ids are not a canonical set')
+  }
+  return Object.freeze(contributors)
+}
+
+function decodeProjectResponsibilityReviewDiff(json: string): ProjectResponsibilityReviewDiff {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    throw new Error('Workbench SuggestedChange diff contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== json) {
+    throw new Error('Workbench SuggestedChange diff is not canonical JSON')
+  }
+  const record = exactStoredObject(parsed, 'SuggestedChange diff', [
+    'kind', 'schemaVersion', 'before', 'after', 'changedFields', 'digest',
+  ])
+  if (record.kind !== 'project-responsibility.diff' || record.schemaVersion !== 1) {
+    throw new Error('Workbench SuggestedChange diff schema is unsupported')
+  }
+  const before = decodeProjectResponsibilityReviewValue(record.before)
+  const after = decodeProjectResponsibilitySuggestedValueFromValue(record.after)
+  const expected = projectResponsibilityReviewDiff(before, after)
+  const changedFields = arrayValue(record.changedFields, 'SuggestedChange changed fields')
+  if (canonicalizeJson(changedFields) !== canonicalizeJson(expected.changedFields)
+    || record.digest !== expected.digest) {
+    throw new Error('Workbench SuggestedChange typed diff or digest is invalid')
+  }
+  return expected
+}
+
+function decodeSuggestedChangeRiskReasons(
+  json: string,
+  allowEmpty = false,
+): readonly SuggestedChangeRiskReason[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    throw new Error('Workbench SuggestedChange risk reasons contain invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== json || !Array.isArray(parsed)) {
+    throw new Error('Workbench SuggestedChange risk reasons are not a canonical array')
+  }
+  if ((!allowEmpty && parsed.length < 1) || parsed.length > 2) {
+    throw new Error('Workbench SuggestedChange risk reasons have an invalid count')
+  }
+  const reasons = parsed.map(reason => {
+    if (reason !== 'initial-responsibility'
+      && reason !== 'accountable-changed'
+      && reason !== 'human-sponsor-changed'
+      && reason !== 'contributors-only') {
+      throw new Error('Workbench SuggestedChange risk reason is unsupported')
+    }
+    return reason
+  })
+  if (new Set(reasons).size !== reasons.length) {
+    throw new Error('Workbench SuggestedChange risk reasons are duplicated')
+  }
+  return Object.freeze(reasons)
+}
+
+function suggestedChangeRiskLevel(value: unknown): SuggestedChangeRiskLevel {
+  if (value !== 'low' && value !== 'high') {
+    throw new Error('Workbench SuggestedChange risk level is unsupported')
+  }
+  return value
+}
+
+function suggestedChangePersistedState(value: unknown): SuggestedChangePersistedState {
+  if (value !== 'pending' && value !== 'accepted'
+    && value !== 'rejected' && value !== 'deferred') {
+    throw new Error('Workbench SuggestedChange persisted state is unsupported')
+  }
+  return value
+}
+
+function suggestedChangeDecisionMode(value: unknown): SuggestedChangeDecisionMode {
+  if (value !== 'accepted' && value !== 'edited-accepted'
+    && value !== 'rejected' && value !== 'deferred') {
+    throw new Error('Workbench SuggestedChange decision mode is unsupported')
+  }
+  return value
+}
+
+function suggestedChangeEffectiveStatus(
+  row: Pick<SuggestedChangeRow, 'persisted_state' | 'base_team_revision'>,
+  currentTeamRevision: number,
+): ReviewCenterProjection['items'][number]['effectiveStatus'] {
+  const persisted = suggestedChangePersistedState(row.persisted_state)
+  return (persisted === 'pending' || persisted === 'deferred')
+    && row.base_team_revision !== currentTeamRevision
+    ? 'stale'
+    : persisted
 }
 
 function readProjectDetailSync(
@@ -3296,25 +4964,56 @@ function assertValidProjectTeams(database: DatabaseSync): void {
           head.project_id,
           revision,
         ) as (ReceiptRow & { readonly occurred_at: string }) | undefined
-        if (receipt === undefined) {
-          throw new Error('Workbench Project Responsibility is missing its command')
-        }
-        const committed = decodeProjectResponsibilityResult(receipt.result_json, receipt)
-        if (committed.value.projectId !== head.project_id
-          || committed.value.responsibilityRevision !== revision
-          || responsibility.updatedAt !== receipt.occurred_at) {
-          throw new Error('Workbench Project Responsibility does not match its command')
+        if (receipt !== undefined) {
+          const committed = decodeProjectResponsibilityResult(receipt.result_json, receipt)
+          if (committed.value.projectId !== head.project_id
+            || committed.value.responsibilityRevision !== revision
+            || responsibility.updatedAt !== receipt.occurred_at) {
+            throw new Error('Workbench Project Responsibility does not match its command')
+          }
+        } else {
+          const accepted = database.prepare(`
+            SELECT receipt.command_type, receipt.request_hash, receipt.command_id,
+              receipt.audit_event_id, receipt.outbox_id, receipt.result_json,
+              audit.occurred_at
+            FROM workbench_suggested_change_decision AS decision
+            INNER JOIN workbench_suggested_change AS suggested
+              ON suggested.id = decision.suggested_change_id
+            INNER JOIN workbench_command_receipt AS receipt
+              ON receipt.command_id = decision.command_id
+            INNER JOIN workbench_audit_event AS audit
+              ON audit.id = receipt.audit_event_id
+            WHERE suggested.project_id = ?
+              AND decision.applied_responsibility_revision = ?
+              AND decision.mode IN ('accepted', 'edited-accepted')
+          `).get(
+            head.project_id,
+            revision,
+          ) as (ReceiptRow & { readonly occurred_at: string }) | undefined
+          if (accepted === undefined) {
+            throw new Error('Workbench Project Responsibility is missing its command')
+          }
+          const committed = decodeSuggestedChangeDecisionResult(
+            accepted.result_json,
+            accepted,
+          )
+          if (committed.value.appliedResponsibilityRevision !== revision
+            || responsibility.updatedAt !== accepted.occurred_at) {
+            throw new Error('Workbench accepted Responsibility does not match its decision')
+          }
         }
       }
     }
     const teamEvents = integerField(database.prepare(`
       SELECT COUNT(*) AS count FROM workbench_audit_event
-      WHERE project_id = ? AND command_type IN (?, ?, ?)
+      WHERE project_id = ? AND command_type IN (?, ?, ?, ?, ?)
     `).get(
       head.project_id,
       PROJECT_MEMBER_COMMAND_TYPE,
       PROJECT_MEMBER_STATUS_COMMAND_TYPE,
       PROJECT_RESPONSIBILITY_COMMAND_TYPE,
+      SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+      SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
     ), 'count')
     if (head.team_revision !== teamEvents) {
       throw new Error('Workbench Project Team revision does not match its command history')
@@ -3326,13 +5025,15 @@ function assertValidProjectTeams(database: DatabaseSync): void {
     } else {
       const latest = database.prepare(`
         SELECT occurred_at FROM workbench_audit_event
-        WHERE project_id = ? AND command_type IN (?, ?, ?)
+        WHERE project_id = ? AND command_type IN (?, ?, ?, ?, ?)
         ORDER BY sequence DESC LIMIT 1
       `).get(
         head.project_id,
         PROJECT_MEMBER_COMMAND_TYPE,
         PROJECT_MEMBER_STATUS_COMMAND_TYPE,
         PROJECT_RESPONSIBILITY_COMMAND_TYPE,
+        SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+        SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
       ) as { readonly occurred_at: string } | undefined
       if (latest === undefined || head.updated_at !== latest.occurred_at) {
         throw new Error('Workbench Project Team does not match its latest command instant')
@@ -3549,6 +5250,36 @@ function auditEventFromRow(row: AuditRow): AuditEvent {
       summary: { code: PROJECT_RESPONSIBILITY_SUMMARY, changedFields: Object.freeze(expectedFields) },
     }
   }
+  const suggestedVocabulary = storedSuggestedChangeVocabulary(row.command_type)
+  if (suggestedVocabulary !== null) {
+    const projectId = nullableString(row.project_id, 'Audit Project id')
+    if (projectId === null
+      || row.action !== suggestedVocabulary.auditAction
+      || row.reason_code !== suggestedVocabulary.reason
+      || row.object_type !== SUGGESTED_CHANGE_OBJECT_TYPE
+      || row.summary_code !== suggestedVocabulary.summaryCode
+      || changedFields.length !== suggestedVocabulary.changedFields.length
+      || changedFields.some((field, index) =>
+        field !== suggestedVocabulary.changedFields[index])) {
+      throw new Error('Workbench database contains unsupported SuggestedChange audit fields')
+    }
+    return {
+      ...common,
+      action: suggestedVocabulary.auditAction,
+      scope: { organizationId, teamId, projectId },
+      reason: { code: suggestedVocabulary.reason },
+      object: {
+        type: SUGGESTED_CHANGE_OBJECT_TYPE,
+        id: objectId,
+        version: objectVersion,
+      },
+      command: { id: commandId, type: suggestedVocabulary.commandType },
+      summary: {
+        code: suggestedVocabulary.summaryCode,
+        changedFields: Object.freeze([...suggestedVocabulary.changedFields]),
+      },
+    }
+  }
   throw new Error('Workbench database contains an unsupported audit command type')
 }
 
@@ -3581,9 +5312,267 @@ function assertValidAudit(database: DatabaseSync): void {
   }
 }
 
+function assertValidSuggestedChanges(database: DatabaseSync): void {
+  const rows = database.prepare(`
+    SELECT sequence, id, organization_id, team_id, project_id, source_actor_id,
+      target_adapter, representation_schema_version, base_team_revision,
+      base_responsibility_revision, candidate_json, proposed_diff_json,
+      proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+      policy_version, origin_causation_id, proposal_command_id, revision,
+      persisted_state, created_at, updated_at
+    FROM workbench_suggested_change ORDER BY sequence
+  `).all() as unknown as SuggestedChangeRow[]
+  const proposalAuditCount = integerField(database.prepare(`
+    SELECT COUNT(*) AS count FROM workbench_audit_event WHERE command_type = ?
+  `).get(SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE), 'count')
+  if (proposalAuditCount !== rows.length) {
+    throw new Error('Workbench SuggestedChange proposals do not match their audit history')
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    if (row === undefined || row.sequence !== index + 1) {
+      throw new Error('Workbench SuggestedChange sequence is not contiguous')
+    }
+    validateSuggestedChangeRow(row)
+    const head = readProjectTeamHead(database, {
+      organizationId: row.organization_id,
+      teamId: row.team_id,
+      projectId: row.project_id,
+    })
+    if (head === null || row.base_team_revision > head.team_revision) {
+      throw new Error('Workbench SuggestedChange base escaped its Project Team history')
+    }
+    const proposalAudit = database.prepare(`
+      SELECT sequence, actor_id, organization_id, team_id, project_id, occurred_at,
+        causation_id, object_id, object_version
+      FROM workbench_audit_event WHERE command_id = ? AND command_type = ?
+    `).get(
+      row.proposal_command_id,
+      SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE,
+    ) as {
+      readonly sequence: number
+      readonly actor_id: string
+      readonly organization_id: string
+      readonly team_id: string
+      readonly project_id: string | null
+      readonly occurred_at: string
+      readonly causation_id: string
+      readonly object_id: string
+      readonly object_version: number
+    } | undefined
+    if (proposalAudit === undefined
+      || proposalAudit.actor_id !== row.source_actor_id
+      || proposalAudit.organization_id !== row.organization_id
+      || proposalAudit.team_id !== row.team_id
+      || proposalAudit.project_id !== row.project_id
+      || proposalAudit.occurred_at !== row.created_at
+      || proposalAudit.causation_id !== row.origin_causation_id
+      || proposalAudit.object_id !== row.id
+      || proposalAudit.object_version !== 1) {
+      throw new Error('Workbench SuggestedChange envelope does not match its proposal audit')
+    }
+    const baseTeamOrdinal = integerField(database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_audit_event
+      WHERE project_id = ? AND sequence < ?
+        AND command_type IN (?, ?, ?, ?, ?)
+    `).get(
+      row.project_id,
+      proposalAudit.sequence,
+      PROJECT_MEMBER_COMMAND_TYPE,
+      PROJECT_MEMBER_STATUS_COMMAND_TYPE,
+      PROJECT_RESPONSIBILITY_COMMAND_TYPE,
+      SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+      SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
+    ), 'count')
+    if (baseTeamOrdinal !== row.base_team_revision) {
+      throw new Error('Workbench SuggestedChange base Team revision is not historical truth')
+    }
+    const baseResponsibilityOrdinal = integerField(database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_audit_event
+      WHERE project_id = ? AND sequence < ?
+        AND command_type IN (?, ?, ?)
+    `).get(
+      row.project_id,
+      proposalAudit.sequence,
+      PROJECT_RESPONSIBILITY_COMMAND_TYPE,
+      SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+      SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
+    ), 'count')
+    const historicalResponsibilityRevision = baseResponsibilityOrdinal === 0
+      ? null
+      : baseResponsibilityOrdinal
+    if (row.base_responsibility_revision !== historicalResponsibilityRevision) {
+      throw new Error(
+        'Workbench SuggestedChange base Responsibility revision is not historical truth',
+      )
+    }
+    const historicalBefore = responsibilityReviewValueAtRevision(
+      database,
+      head,
+      row.base_responsibility_revision,
+    )
+    const candidate = decodeProjectResponsibilitySuggestedValue(row.candidate_json)
+    const expectedDiff = projectResponsibilityReviewDiff(historicalBefore, candidate)
+    const storedDiff = decodeProjectResponsibilityReviewDiff(row.proposed_diff_json)
+    const expectedRisk = suggestedChangeRisk(historicalBefore, candidate)
+    if (canonicalizeJson(expectedDiff) !== canonicalizeJson(storedDiff)
+      || row.proposed_diff_digest !== expectedDiff.digest
+      || row.proposed_risk_level !== expectedRisk.level
+      || row.proposed_risk_reasons_json !== canonicalizeJson(expectedRisk.reasons)) {
+      throw new Error('Workbench SuggestedChange review material is not bound to target history')
+    }
+    const evidenceRows = readSuggestedChangeEvidenceRows(database, row.id)
+    for (const evidence of evidenceRows) {
+      const audit = readAuditRow(database, evidence.audit_event_id)
+      if (audit === null
+        || audit.organization_id !== row.organization_id
+        || audit.team_id !== row.team_id
+        || audit.project_id !== row.project_id
+        || audit.sequence >= proposalAudit.sequence) {
+        throw new Error('Workbench SuggestedChange evidence escaped its Project')
+      }
+      auditEventFromRow(audit)
+    }
+    const decisions = database.prepare(`
+      SELECT id, suggested_change_id, suggested_change_revision, mode, actor_id,
+        feedback, applied_candidate_json, applied_diff_json, applied_risk_level,
+        applied_risk_reasons_json, applied_team_revision,
+        applied_responsibility_revision, causation_id, command_id,
+        audit_event_id, outbox_id, decided_at
+      FROM workbench_suggested_change_decision
+      WHERE suggested_change_id = ? ORDER BY suggested_change_revision
+    `).all(row.id) as unknown as SuggestedChangeDecisionRow[]
+    if (decisions.length !== row.revision - 1) {
+      throw new Error('Workbench SuggestedChange revision does not match decision history')
+    }
+    let state: SuggestedChangePersistedState = 'pending'
+    let latestAt = row.created_at
+    let deferred = false
+    for (let decisionIndex = 0; decisionIndex < decisions.length; decisionIndex += 1) {
+      const decision = decisions[decisionIndex]
+      if (decision === undefined
+        || decision.suggested_change_revision !== decisionIndex + 2) {
+        throw new Error('Workbench SuggestedChange decision revisions are not contiguous')
+      }
+      const projection = suggestedChangeDecisionProjectionFromRow(decision, row.id)
+      if (projection.decidedAt < latestAt) {
+        throw new Error('Workbench SuggestedChange decisions are not time ordered')
+      }
+      latestAt = projection.decidedAt
+      if (state === 'accepted' || state === 'rejected') {
+        throw new Error('Workbench terminal SuggestedChange has a later decision')
+      }
+      const expectedCommandType = projection.mode === 'accepted'
+        ? SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE
+        : projection.mode === 'edited-accepted'
+          ? SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE
+          : projection.mode === 'rejected'
+            ? SUGGESTED_CHANGE_REJECT_COMMAND_TYPE
+            : SUGGESTED_CHANGE_DEFER_COMMAND_TYPE
+      const receipt = database.prepare(`
+        SELECT command_type, request_hash, command_id, audit_event_id, outbox_id, result_json
+        FROM workbench_command_receipt WHERE command_id = ?
+      `).get(decision.command_id) as ReceiptRow | undefined
+      if (receipt === undefined
+        || receipt.command_type !== expectedCommandType
+        || receipt.command_id !== decision.command_id
+        || receipt.audit_event_id !== decision.audit_event_id
+        || receipt.outbox_id !== decision.outbox_id) {
+        throw new Error(
+          'Workbench SuggestedChange decision does not match its formal command ledger',
+        )
+      }
+      if (projection.mode === 'deferred') {
+        if (state !== 'pending' || deferred) {
+          throw new Error('Workbench SuggestedChange was deferred more than once')
+        }
+        deferred = true
+        state = 'deferred'
+        continue
+      }
+      if (projection.mode === 'rejected') {
+        state = 'rejected'
+        continue
+      }
+      const appliedCandidate = decodeProjectResponsibilitySuggestedValue(
+        stringValue(decision.applied_candidate_json, 'Applied candidate JSON'),
+      )
+      if (projection.mode === 'accepted'
+        && canonicalizeJson(appliedCandidate) !== canonicalizeJson(candidate)) {
+        throw new Error(
+          'Workbench accepted SuggestedChange does not apply its immutable proposal candidate',
+        )
+      }
+      const appliedDiff = projectResponsibilityReviewDiff(historicalBefore, appliedCandidate)
+      const storedAppliedDiff = decodeProjectResponsibilityReviewDiff(
+        stringValue(decision.applied_diff_json, 'Applied diff JSON'),
+      )
+      const appliedRisk = suggestedChangeRisk(historicalBefore, appliedCandidate)
+      if (canonicalizeJson(appliedDiff) !== canonicalizeJson(storedAppliedDiff)
+        || decision.applied_risk_level !== appliedRisk.level
+        || decision.applied_risk_reasons_json !== canonicalizeJson(appliedRisk.reasons)
+        || decision.applied_team_revision !== row.base_team_revision + 1
+        || decision.applied_responsibility_revision
+          !== (row.base_responsibility_revision ?? 0) + 1) {
+        throw new Error('Workbench accepted SuggestedChange has invalid applied target facts')
+      }
+      const appliedResponsibility = readProjectResponsibility(
+        database,
+        head,
+        decision.applied_responsibility_revision,
+        false,
+      )
+      if (canonicalizeJson({
+        accountableMemberId: appliedResponsibility.accountableMemberId,
+        contributorMemberIds: appliedResponsibility.contributorMemberIds,
+        humanSponsorMemberId: appliedResponsibility.humanSponsorMemberId,
+      }) !== canonicalizeJson(appliedCandidate)
+        || appliedResponsibility.updatedAt !== decision.decided_at) {
+        throw new Error('Workbench accepted SuggestedChange does not match Responsibility history')
+      }
+      const result = decodeSuggestedChangeDecisionResult(receipt.result_json, receipt)
+      const effectiveRisk = maxSuggestedChangeRisk(
+        suggestedChangeRiskLevel(row.proposed_risk_level),
+        appliedRisk.level,
+      )
+      if (result.value.riskLevel !== effectiveRisk
+        || result.value.appliedTeamRevision !== decision.applied_team_revision
+        || result.value.appliedResponsibilityRevision
+          !== decision.applied_responsibility_revision) {
+        throw new Error('Workbench accepted SuggestedChange receipt downgraded applied risk or version')
+      }
+      state = 'accepted'
+    }
+    if (state !== row.persisted_state || latestAt !== row.updated_at) {
+      throw new Error('Workbench SuggestedChange head does not match its decision history')
+    }
+  }
+}
+
+function responsibilityReviewValueAtRevision(
+  database: DatabaseSync,
+  head: ProjectTeamHeadRow,
+  revision: number | null,
+): ProjectResponsibilityReviewValue {
+  if (revision === null) {
+    return Object.freeze({
+      accountableMemberId: null,
+      contributorMemberIds: Object.freeze([]),
+      humanSponsorMemberId: null,
+    })
+  }
+  const responsibility = readProjectResponsibility(database, head, revision, false)
+  return Object.freeze({
+    accountableMemberId: responsibility.accountableMemberId,
+    contributorMemberIds: Object.freeze([...responsibility.contributorMemberIds]),
+    humanSponsorMemberId: responsibility.humanSponsorMemberId,
+  })
+}
+
 function assertValidLedger(database: DatabaseSync): void {
   assertValidProjectDomain(database)
   assertValidAudit(database)
+  assertValidSuggestedChanges(database)
   const counts = database.prepare(`
     SELECT
       (SELECT COUNT(*) FROM workbench_audit_event) AS audit_count,
@@ -3671,6 +5660,10 @@ function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrity
   }
   if (row.command_type === PROJECT_RESPONSIBILITY_COMMAND_TYPE) {
     assertValidProjectResponsibilityReceipt(database, row)
+    return
+  }
+  if (storedSuggestedChangeVocabulary(row.command_type) !== null) {
+    assertValidSuggestedChangeReceipt(database, row)
     return
   }
   throw new Error('Workbench command receipt has an unsupported command type')
@@ -3944,9 +5937,11 @@ function assertValidProjectResponsibilityReceipt(
   assertTeamCommandOrdinal(database, row, decoded.value.teamRevision)
   const responsibilityOrdinal = integerField(database.prepare(`
     SELECT COUNT(*) AS count FROM workbench_audit_event
-    WHERE command_type = ? AND project_id = ? AND sequence <= ?
+    WHERE command_type IN (?, ?, ?) AND project_id = ? AND sequence <= ?
   `).get(
     PROJECT_RESPONSIBILITY_COMMAND_TYPE,
+    SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+    SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
     decoded.value.projectId,
     row.audit_sequence,
   ), 'count')
@@ -3995,6 +5990,170 @@ function assertValidProjectResponsibilityReceipt(
   }
 }
 
+function assertValidSuggestedChangeReceipt(
+  database: DatabaseSync,
+  row: ReceiptIntegrityRow,
+): void {
+  const vocabulary = storedSuggestedChangeVocabulary(row.command_type)
+  if (vocabulary === null
+    || row.audit_action !== vocabulary.auditAction
+    || row.audit_reason_code !== vocabulary.reason
+    || row.audit_object_type !== SUGGESTED_CHANGE_OBJECT_TYPE
+    || row.audit_summary_code !== vocabulary.summaryCode
+    || row.audit_project_id === null
+    || row.outbox_topic !== vocabulary.outboxTopic
+    || row.outbox_project_id !== row.audit_project_id
+    || row.outbox_object_type !== SUGGESTED_CHANGE_OBJECT_TYPE
+    || row.outbox_object_id !== row.audit_object_id) {
+    throw new Error('Workbench SuggestedChange receipt has mismatched audit or Outbox vocabulary')
+  }
+  if (row.command_type === SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE) {
+    const suggested = database.prepare(`
+      SELECT sequence, id, organization_id, team_id, project_id, source_actor_id,
+        target_adapter, representation_schema_version, base_team_revision,
+        base_responsibility_revision, candidate_json, proposed_diff_json,
+        proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+        policy_version, origin_causation_id, proposal_command_id, revision,
+        persisted_state, created_at, updated_at
+      FROM workbench_suggested_change WHERE proposal_command_id = ?
+    `).get(row.command_id) as SuggestedChangeRow | undefined
+    if (suggested === undefined) {
+      throw new Error('Workbench SuggestedChange proposal receipt lost its envelope')
+    }
+    validateSuggestedChangeRow(suggested)
+    const decoded = decodeSuggestedChangeProposalResult(row.result_json, row)
+    if (decoded.value.suggestedChangeId !== suggested.id
+      || decoded.value.baseTargetVersion !== suggested.base_team_revision
+      || decoded.value.riskLevel !== suggested.proposed_risk_level
+      || row.audit_object_id !== suggested.id
+      || row.audit_object_version !== 1
+      || suggested.source_actor_id !== row.audit_actor_id
+      || suggested.organization_id !== row.audit_organization_id
+      || suggested.team_id !== row.audit_team_id
+      || suggested.project_id !== row.audit_project_id
+      || suggested.created_at !== row.audit_occurred_at
+      || suggested.origin_causation_id !== row.audit_causation_id) {
+      throw new Error('Workbench SuggestedChange proposal receipt does not match its envelope')
+    }
+    const candidate = decodeProjectResponsibilitySuggestedValue(suggested.candidate_json)
+    const evidenceRefs = readSuggestedChangeEvidenceRows(database, suggested.id).map(evidence => ({
+      kind: 'workbench-audit-event' as const,
+      auditEventId: evidence.audit_event_id,
+    }))
+    const expectedRequestHash = digest(canonicalizeJson({
+      commandType: SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE,
+      target: SUGGESTED_CHANGE_TARGET_ADAPTER,
+      scope: {
+        organizationId: suggested.organization_id,
+        teamId: suggested.team_id,
+        projectId: suggested.project_id,
+      },
+      candidate,
+      evidenceRefs,
+      expectedTeamRevision: suggested.base_team_revision,
+      expectedRevision: null,
+      reason: SUGGESTED_CHANGE_PROPOSAL_REASON,
+      causationId: suggested.origin_causation_id,
+    }))
+    const expectedPayload = suggestedChangeOutboxPayload(row, {
+      projectId: suggested.project_id,
+      suggestedChangeId: suggested.id,
+      suggestedChangeRevision: 1,
+      riskLevel: suggested.proposed_risk_level,
+    })
+    if (row.request_hash !== expectedRequestHash || row.outbox_payload_json !== expectedPayload) {
+      throw new Error('Workbench SuggestedChange proposal receipt has invalid redacted ledger facts')
+    }
+    return
+  }
+
+  const decision = database.prepare(`
+    SELECT id, suggested_change_id, suggested_change_revision, mode, actor_id,
+      feedback, applied_candidate_json, applied_diff_json, applied_risk_level,
+      applied_risk_reasons_json, applied_team_revision,
+      applied_responsibility_revision, causation_id, command_id,
+      audit_event_id, outbox_id, decided_at
+    FROM workbench_suggested_change_decision WHERE command_id = ?
+  `).get(row.command_id) as SuggestedChangeDecisionRow | undefined
+  if (decision === undefined) {
+    throw new Error('Workbench SuggestedChange decision receipt lost its decision')
+  }
+  const suggested = database.prepare(`
+    SELECT sequence, id, organization_id, team_id, project_id, source_actor_id,
+      target_adapter, representation_schema_version, base_team_revision,
+      base_responsibility_revision, candidate_json, proposed_diff_json,
+      proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+      policy_version, origin_causation_id, proposal_command_id, revision,
+      persisted_state, created_at, updated_at
+    FROM workbench_suggested_change WHERE id = ?
+  `).get(decision.suggested_change_id) as SuggestedChangeRow | undefined
+  if (suggested === undefined) throw new Error('Workbench SuggestedChange decision lost its envelope')
+  validateSuggestedChangeRow(suggested)
+  const projection = suggestedChangeDecisionProjectionFromRow(decision, suggested.id)
+  const decoded = decodeSuggestedChangeDecisionResult(row.result_json, row)
+  if (decoded.value.suggestedChangeId !== suggested.id
+    || decoded.value.suggestedChangeRevision !== decision.suggested_change_revision
+    || decoded.value.decisionMode !== decision.mode
+    || decoded.value.appliedTeamRevision !== decision.applied_team_revision
+    || decoded.value.appliedResponsibilityRevision !== decision.applied_responsibility_revision
+    || row.audit_object_id !== suggested.id
+    || row.audit_object_version !== decision.suggested_change_revision
+    || decision.actor_id !== row.audit_actor_id
+    || decision.audit_event_id !== row.audit_event_id
+    || decision.outbox_id !== row.outbox_id
+    || decision.decided_at !== row.audit_occurred_at
+    || decision.causation_id !== row.audit_causation_id
+    || suggested.project_id !== row.audit_project_id) {
+    throw new Error('Workbench SuggestedChange decision receipt does not match its history')
+  }
+  const requestMode = row.command_type === SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE
+    ? 'accept'
+    : row.command_type === SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE
+      ? 'edit-and-accept'
+      : row.command_type === SUGGESTED_CHANGE_REJECT_COMMAND_TYPE ? 'reject' : 'defer'
+  const expectedRequestHash = digest(canonicalizeJson({
+    commandType: row.command_type,
+    target: SUGGESTED_CHANGE_OBJECT_TYPE,
+    scope: {
+      organizationId: row.audit_organization_id,
+      teamId: row.audit_team_id,
+      projectId: suggested.project_id,
+    },
+    suggestedChangeId: suggested.id,
+    expectedSuggestedChangeRevision: decision.suggested_change_revision - 1,
+    mode: requestMode,
+    feedback: decision.feedback,
+    ...(requestMode === 'accept' || requestMode === 'edit-and-accept'
+      ? { acknowledgedRiskLevel: decoded.value.riskLevel }
+      : {}),
+    ...(requestMode === 'edit-and-accept'
+      ? {
+        candidate: decodeProjectResponsibilitySuggestedValue(
+          stringValue(decision.applied_candidate_json, 'Edited candidate JSON'),
+        ),
+      }
+      : {}),
+    reason: vocabulary.reason,
+    causationId: decision.causation_id,
+  }))
+  const expectedPayload = suggestedChangeOutboxPayload(row, {
+    projectId: suggested.project_id,
+    suggestedChangeId: suggested.id,
+    suggestedChangeRevision: decision.suggested_change_revision,
+    persistedState: decoded.value.persistedState,
+    decisionMode: decoded.value.decisionMode,
+    riskLevel: decoded.value.riskLevel,
+    ...(decoded.value.appliedTeamRevision === null
+      ? {} : { appliedTeamRevision: decoded.value.appliedTeamRevision }),
+    ...(decoded.value.appliedResponsibilityRevision === null
+      ? {} : { appliedResponsibilityRevision: decoded.value.appliedResponsibilityRevision }),
+  })
+  if (row.request_hash !== expectedRequestHash || row.outbox_payload_json !== expectedPayload
+    || projection.mode !== decoded.value.decisionMode) {
+    throw new Error('Workbench SuggestedChange decision receipt has invalid redacted ledger facts')
+  }
+}
+
 function assertTeamCommandOrdinal(
   database: DatabaseSync,
   row: ReceiptIntegrityRow,
@@ -4005,12 +6164,14 @@ function assertTeamCommandOrdinal(
   }
   const ordinal = integerField(database.prepare(`
     SELECT COUNT(*) AS count FROM workbench_audit_event
-    WHERE project_id = ? AND command_type IN (?, ?, ?) AND sequence <= ?
+    WHERE project_id = ? AND command_type IN (?, ?, ?, ?, ?) AND sequence <= ?
   `).get(
     row.audit_project_id,
     PROJECT_MEMBER_COMMAND_TYPE,
     PROJECT_MEMBER_STATUS_COMMAND_TYPE,
     PROJECT_RESPONSIBILITY_COMMAND_TYPE,
+    SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+    SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
     row.audit_sequence,
   ), 'count')
   if (teamRevision !== ordinal) {
@@ -4019,6 +6180,20 @@ function assertTeamCommandOrdinal(
 }
 
 function projectTeamOutboxPayload(
+  row: ReceiptIntegrityRow,
+  value: Readonly<Record<string, string | number>>,
+): string {
+  return canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    requestHash: row.request_hash,
+    ...value,
+    causationId: row.audit_causation_id,
+  })
+}
+
+function suggestedChangeOutboxPayload(
   row: ReceiptIntegrityRow,
   value: Readonly<Record<string, string | number>>,
 ): string {
@@ -4128,7 +6303,21 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
       objectType: PROJECT_RESPONSIBILITY_OBJECT_TYPE,
     }
   } else {
-    throw new Error('Workbench database contains an unsupported Activity command type')
+    const suggestedVocabulary = storedSuggestedChangeVocabulary(row.command_type)
+    if (suggestedVocabulary === null
+      || row.action !== suggestedVocabulary.auditAction
+      || row.reason_code !== suggestedVocabulary.reason
+      || row.object_type !== SUGGESTED_CHANGE_OBJECT_TYPE
+      || row.summary_code !== suggestedVocabulary.summaryCode
+      || projectId === null) {
+      throw new Error('Workbench database contains an unsupported Activity command type')
+    }
+    vocabulary = {
+      action: suggestedVocabulary.auditAction,
+      reason: suggestedVocabulary.reason,
+      summaryCode: suggestedVocabulary.summaryCode,
+      objectType: SUGGESTED_CHANGE_OBJECT_TYPE,
+    }
   }
   return Object.freeze({
     sequence: positiveInteger(row.sequence, 'Activity sequence'),
@@ -4507,6 +6696,290 @@ function validateProjectResponsibilityMutation(
   )
 }
 
+function validateReviewCenterQuery(query: WorkbenchReviewCenterQuery): void {
+  validateBoundedReference(query.organizationId, 'Review Center organization id')
+  validateBoundedReference(query.teamId, 'Review Center team id')
+  validateBoundedReference(query.filter.projectId, 'Review Center Project id')
+  if (query.filter.status !== undefined
+    && query.filter.status !== 'pending'
+    && query.filter.status !== 'deferred'
+    && query.filter.status !== 'stale'
+    && query.filter.status !== 'accepted'
+    && query.filter.status !== 'rejected') {
+    throw new TypeError('Review Center status filter is unsupported')
+  }
+  if (query.filter.riskLevel !== undefined
+    && query.filter.riskLevel !== 'low'
+    && query.filter.riskLevel !== 'high') {
+    throw new TypeError('Review Center risk filter is unsupported')
+  }
+  if (query.filter.beforeSequence !== undefined
+    && (!Number.isSafeInteger(query.filter.beforeSequence)
+      || query.filter.beforeSequence < 1)) {
+    throw new TypeError('Review Center beforeSequence must be a positive safe integer')
+  }
+  const limit = query.filter.limit ?? 20
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_REVIEW_CENTER_LIMIT) {
+    throw new TypeError(`Review Center limit must be an integer from 1 to ${MAX_REVIEW_CENTER_LIMIT}`)
+  }
+}
+
+function validateSuggestedResponsibilityCandidate(
+  candidate: ProjectResponsibilitySuggestedValue,
+): void {
+  validateExactMutationKeys(candidate, 'SuggestedChange candidate', [
+    'accountableMemberId', 'contributorMemberIds', 'humanSponsorMemberId',
+  ])
+  validateBoundedReference(candidate.accountableMemberId, 'SuggestedChange Accountable member id')
+  if (!Array.isArray(candidate.contributorMemberIds)
+    || candidate.contributorMemberIds.length > MAX_RESPONSIBILITY_CONTRIBUTORS) {
+    throw new TypeError(
+      `SuggestedChange candidate may contain at most ${MAX_RESPONSIBILITY_CONTRIBUTORS} Contributors`,
+    )
+  }
+  let previous: string | undefined
+  const seen = new Set<string>()
+  for (const memberId of candidate.contributorMemberIds) {
+    validateBoundedReference(memberId, 'SuggestedChange Contributor member id')
+    if (seen.has(memberId) || (previous !== undefined && previous > memberId)) {
+      throw new TypeError('SuggestedChange Contributor ids must be a canonical unique set')
+    }
+    previous = memberId
+    seen.add(memberId)
+  }
+  if (candidate.humanSponsorMemberId !== null) {
+    validateBoundedReference(
+      candidate.humanSponsorMemberId,
+      'SuggestedChange Human Sponsor member id',
+    )
+  }
+}
+
+function validateSuggestedChangeProposalMutation(
+  mutation: WorkbenchSuggestedChangeProposalMutation,
+): void {
+  validateExactMutationKeys(mutation, 'SuggestedChange proposal mutation', [
+    'suggestedChangeId', 'projectId', 'candidate', 'evidenceRefs',
+    'expectedTeamRevision', 'expectedRevision', 'createdAt', 'command',
+  ])
+  validateBoundedReference(mutation.suggestedChangeId, 'SuggestedChange id')
+  validateBoundedReference(mutation.projectId, 'SuggestedChange Project id')
+  validateSuggestedResponsibilityCandidate(mutation.candidate)
+  if (!Array.isArray(mutation.evidenceRefs)
+    || mutation.evidenceRefs.length < 1
+    || mutation.evidenceRefs.length > MAX_SUGGESTED_CHANGE_EVIDENCE) {
+    throw new TypeError(
+      `SuggestedChange requires 1 to ${MAX_SUGGESTED_CHANGE_EVIDENCE} EvidenceRefs`,
+    )
+  }
+  let previousEvidenceId: string | undefined
+  for (const evidence of mutation.evidenceRefs) {
+    validateExactMutationKeys(evidence, 'SuggestedChange EvidenceRef', ['kind', 'auditEventId'])
+    if (evidence.kind !== 'workbench-audit-event') {
+      throw new TypeError('SuggestedChange EvidenceRef kind is unsupported')
+    }
+    validateBoundedReference(evidence.auditEventId, 'SuggestedChange EvidenceRef audit id')
+    if (previousEvidenceId !== undefined && previousEvidenceId > evidence.auditEventId) {
+      throw new TypeError('SuggestedChange EvidenceRefs must use canonical audit id order')
+    }
+    previousEvidenceId = evidence.auditEventId
+  }
+  if (!Number.isSafeInteger(mutation.expectedTeamRevision)
+    || mutation.expectedTeamRevision < 0) {
+    throw new TypeError('SuggestedChange expected Team revision must be non-negative')
+  }
+  if (mutation.expectedRevision !== null) {
+    throw new TypeError('New SuggestedChange expected revision must be null')
+  }
+  validateInstant(mutation.createdAt, 'SuggestedChange createdAt')
+  validateProjectTeamCommand(
+    mutation.command,
+    SUGGESTED_CHANGE_PROPOSAL_REASON,
+    mutation.createdAt,
+  )
+}
+
+function validateSuggestedChangeDecisionMutation(
+  mutation: WorkbenchSuggestedChangeDecisionMutation,
+): void {
+  const common = [
+    'decisionId', 'projectId', 'suggestedChangeId', 'expectedSuggestedChangeRevision',
+    'feedback', 'decidedAt', 'mode', 'command',
+  ]
+  validateExactMutationKeys(
+    mutation,
+    'SuggestedChange decision mutation',
+    mutation.mode === 'accept'
+      ? [...common, 'acknowledgedRiskLevel']
+      : mutation.mode === 'edit-and-accept'
+        ? [...common, 'acknowledgedRiskLevel', 'candidate']
+        : common,
+  )
+  validateBoundedReference(mutation.decisionId, 'SuggestedChange decision id')
+  validateBoundedReference(mutation.projectId, 'SuggestedChange decision Project id')
+  validateBoundedReference(mutation.suggestedChangeId, 'SuggestedChange decision target id')
+  if (!Number.isSafeInteger(mutation.expectedSuggestedChangeRevision)
+    || mutation.expectedSuggestedChangeRevision < 1) {
+    throw new TypeError('SuggestedChange expected revision must be positive')
+  }
+  validateDomainText(
+    mutation.feedback,
+    'SuggestedChange decision feedback',
+    MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH,
+  )
+  if (mutation.mode === 'accept' || mutation.mode === 'edit-and-accept') {
+    suggestedChangeRiskLevel(mutation.acknowledgedRiskLevel)
+    if (mutation.mode === 'edit-and-accept') {
+      validateSuggestedResponsibilityCandidate(mutation.candidate)
+    }
+  }
+  const vocabulary = suggestedChangeDecisionVocabulary(mutation.mode)
+  validateInstant(mutation.decidedAt, 'SuggestedChange decidedAt')
+  validateProjectTeamCommand(mutation.command, vocabulary.reason, mutation.decidedAt)
+}
+
+function suggestedChangeProposalRequestHash(
+  mutation: WorkbenchSuggestedChangeProposalMutation,
+): string {
+  return digest(canonicalizeJson({
+    commandType: SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE,
+    target: SUGGESTED_CHANGE_TARGET_ADAPTER,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    candidate: mutation.candidate,
+    evidenceRefs: mutation.evidenceRefs,
+    expectedTeamRevision: mutation.expectedTeamRevision,
+    expectedRevision: mutation.expectedRevision,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+function suggestedChangeDecisionRequestHash(
+  mutation: WorkbenchSuggestedChangeDecisionMutation,
+): string {
+  return digest(canonicalizeJson({
+    commandType: suggestedChangeDecisionVocabulary(mutation.mode).commandType,
+    target: SUGGESTED_CHANGE_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    suggestedChangeId: mutation.suggestedChangeId,
+    expectedSuggestedChangeRevision: mutation.expectedSuggestedChangeRevision,
+    mode: mutation.mode,
+    feedback: mutation.feedback,
+    ...(mutation.mode === 'accept' || mutation.mode === 'edit-and-accept'
+      ? { acknowledgedRiskLevel: mutation.acknowledgedRiskLevel }
+      : {}),
+    ...(mutation.mode === 'edit-and-accept' ? { candidate: mutation.candidate } : {}),
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+function suggestedChangeDecisionVocabulary(
+  mode: WorkbenchSuggestedChangeDecisionMutation['mode'],
+): {
+  readonly commandType: AuditEvent['command']['type']
+  readonly auditAction: WorkbenchAuditAction
+  readonly reason: WorkbenchCommandMetadata['reason']
+  readonly summaryCode: WorkbenchActivitySummaryCode
+} {
+  switch (mode) {
+    case 'accept': return {
+      commandType: SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+      auditAction: SUGGESTED_CHANGE_ACCEPT_AUDIT_ACTION,
+      reason: SUGGESTED_CHANGE_ACCEPT_REASON,
+      summaryCode: SUGGESTED_CHANGE_ACCEPT_SUMMARY,
+    }
+    case 'edit-and-accept': return {
+      commandType: SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
+      auditAction: SUGGESTED_CHANGE_EDIT_ACCEPT_AUDIT_ACTION,
+      reason: SUGGESTED_CHANGE_EDIT_ACCEPT_REASON,
+      summaryCode: SUGGESTED_CHANGE_EDIT_ACCEPT_SUMMARY,
+    }
+    case 'reject': return {
+      commandType: SUGGESTED_CHANGE_REJECT_COMMAND_TYPE,
+      auditAction: SUGGESTED_CHANGE_REJECT_AUDIT_ACTION,
+      reason: SUGGESTED_CHANGE_REJECT_REASON,
+      summaryCode: SUGGESTED_CHANGE_REJECT_SUMMARY,
+    }
+    case 'defer': return {
+      commandType: SUGGESTED_CHANGE_DEFER_COMMAND_TYPE,
+      auditAction: SUGGESTED_CHANGE_DEFER_AUDIT_ACTION,
+      reason: SUGGESTED_CHANGE_DEFER_REASON,
+      summaryCode: SUGGESTED_CHANGE_DEFER_SUMMARY,
+    }
+  }
+}
+
+interface StoredSuggestedChangeVocabulary {
+  readonly commandType: AuditEvent['command']['type']
+  readonly auditAction: WorkbenchAuditAction
+  readonly reason: WorkbenchCommandMetadata['reason']
+  readonly summaryCode: WorkbenchActivitySummaryCode
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+}
+
+function storedSuggestedChangeVocabulary(
+  commandType: string,
+): StoredSuggestedChangeVocabulary | null {
+  switch (commandType) {
+    case SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE:
+      return {
+        commandType: SUGGESTED_CHANGE_PROPOSAL_COMMAND_TYPE,
+        auditAction: SUGGESTED_CHANGE_PROPOSAL_AUDIT_ACTION,
+        reason: SUGGESTED_CHANGE_PROPOSAL_REASON,
+        summaryCode: SUGGESTED_CHANGE_PROPOSAL_SUMMARY,
+        changedFields: ['proposal', 'risk', 'evidence'],
+        outboxTopic: SUGGESTED_CHANGE_PROPOSAL_OUTBOX_TOPIC,
+      }
+    case SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE:
+      return {
+        commandType: SUGGESTED_CHANGE_ACCEPT_COMMAND_TYPE,
+        auditAction: SUGGESTED_CHANGE_ACCEPT_AUDIT_ACTION,
+        reason: SUGGESTED_CHANGE_ACCEPT_REASON,
+        summaryCode: SUGGESTED_CHANGE_ACCEPT_SUMMARY,
+        changedFields: ['decision', 'target'],
+        outboxTopic: SUGGESTED_CHANGE_DECISION_OUTBOX_TOPIC,
+      }
+    case SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE:
+      return {
+        commandType: SUGGESTED_CHANGE_EDIT_ACCEPT_COMMAND_TYPE,
+        auditAction: SUGGESTED_CHANGE_EDIT_ACCEPT_AUDIT_ACTION,
+        reason: SUGGESTED_CHANGE_EDIT_ACCEPT_REASON,
+        summaryCode: SUGGESTED_CHANGE_EDIT_ACCEPT_SUMMARY,
+        changedFields: ['decision', 'target'],
+        outboxTopic: SUGGESTED_CHANGE_DECISION_OUTBOX_TOPIC,
+      }
+    case SUGGESTED_CHANGE_REJECT_COMMAND_TYPE:
+      return {
+        commandType: SUGGESTED_CHANGE_REJECT_COMMAND_TYPE,
+        auditAction: SUGGESTED_CHANGE_REJECT_AUDIT_ACTION,
+        reason: SUGGESTED_CHANGE_REJECT_REASON,
+        summaryCode: SUGGESTED_CHANGE_REJECT_SUMMARY,
+        changedFields: ['decision'],
+        outboxTopic: SUGGESTED_CHANGE_DECISION_OUTBOX_TOPIC,
+      }
+    case SUGGESTED_CHANGE_DEFER_COMMAND_TYPE:
+      return {
+        commandType: SUGGESTED_CHANGE_DEFER_COMMAND_TYPE,
+        auditAction: SUGGESTED_CHANGE_DEFER_AUDIT_ACTION,
+        reason: SUGGESTED_CHANGE_DEFER_REASON,
+        summaryCode: SUGGESTED_CHANGE_DEFER_SUMMARY,
+        changedFields: ['decision'],
+        outboxTopic: SUGGESTED_CHANGE_DECISION_OUTBOX_TOPIC,
+      }
+    default: return null
+  }
+}
+
 function validateProjectTeamCommand(
   command: WorkbenchCommandMetadata,
   reason: string,
@@ -4592,13 +7065,17 @@ type ProjectTeamMutation = WorkbenchProjectMemberMutation
   | WorkbenchProjectMemberStatusMutation
   | WorkbenchProjectResponsibilityMutation
 
+type ReceiptMutation = ProjectTeamMutation
+  | WorkbenchSuggestedChangeProposalMutation
+  | WorkbenchSuggestedChangeDecisionMutation
+
 function idempotencyKeyHash(value: string): string {
   return digest(`project-workbench.idempotency.v1\0${value}`)
 }
 
 function findReceipt(
   database: DatabaseSync,
-  mutation: ProjectTeamMutation,
+  mutation: ReceiptMutation,
   keyHash: string,
 ): ReceiptRow | undefined {
   return database.prepare(`
@@ -4612,7 +7089,7 @@ function findReceipt(
   ) as ReceiptRow | undefined
 }
 
-function commandReceipt(mutation: ProjectTeamMutation) {
+function commandReceipt(mutation: ReceiptMutation) {
   return Object.freeze({
     commandId: mutation.command.commandId,
     auditEventId: mutation.command.auditEventId,
@@ -4669,6 +7146,329 @@ function memberNotFound<T extends ProjectTeamCommandResult>(memberId: string): T
       memberId,
     }),
   }) as T
+}
+
+function suggestedChangeIdempotencyConflict(): ProposeProjectResponsibilityChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict',
+      message: 'Workbench idempotency key was already used for different intent',
+    }),
+  })
+}
+
+function suggestedChangeDecisionIdempotencyConflict(): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict',
+      message: 'Workbench idempotency key was already used for different intent',
+    }),
+  })
+}
+
+function suggestedChangeProjectNotFound(
+  projectId: string,
+): ProposeProjectResponsibilityChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found',
+      message: `Workbench Project ${projectId} was not found in the authorized scope`,
+      projectId,
+    }),
+  })
+}
+
+function suggestedChangeDecisionProjectNotFound(projectId: string): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found',
+      message: `Workbench Project ${projectId} was not found in the authorized scope`,
+      projectId,
+    }),
+  })
+}
+
+function suggestedChangeTeamRevisionConflict(
+  expectedTeamRevision: number,
+  currentTeamRevision: number,
+): ProposeProjectResponsibilityChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'team-revision-conflict',
+      message: `Workbench Project Team revision changed (expected ${String(expectedTeamRevision)}, current ${String(currentTeamRevision)})`,
+      expectedTeamRevision,
+      currentTeamRevision,
+    }),
+  })
+}
+
+function noOpSuggestedChangeProposal(): ProposeProjectResponsibilityChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'no-op-suggested-change',
+      message: 'Workbench SuggestedChange does not change Project Responsibility',
+    }),
+  })
+}
+
+function noOpSuggestedChangeDecision(): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'no-op-suggested-change',
+      message: 'Workbench edited SuggestedChange does not change Project Responsibility',
+    }),
+  })
+}
+
+function evidenceError(
+  reason: 'duplicate' | 'unavailable' | 'wrong-project' | 'integrity-failed',
+): ProposeProjectResponsibilityChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'evidence-invalid',
+      message: 'Workbench SuggestedChange evidence could not be admitted',
+      reason,
+    }),
+  })
+}
+
+function suggestedChangeNotFound(suggestedChangeId: string): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'suggested-change-not-found',
+      message: 'Workbench SuggestedChange was not found in the authorized Project',
+      suggestedChangeId,
+    }),
+  })
+}
+
+function suggestedChangeRevisionConflict(
+  expectedSuggestedChangeRevision: number,
+  currentSuggestedChangeRevision: number,
+): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'suggested-change-revision-conflict',
+      message: 'Workbench SuggestedChange revision changed',
+      expectedSuggestedChangeRevision,
+      currentSuggestedChangeRevision,
+    }),
+  })
+}
+
+function suggestedChangeStale(
+  baseTeamRevision: number,
+  currentTeamRevision: number,
+): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'suggested-change-stale',
+      message: 'Workbench SuggestedChange target base is stale',
+      baseTeamRevision,
+      currentTeamRevision,
+    }),
+  })
+}
+
+function suggestedChangeStateConflict(
+  status: ReviewCenterProjection['items'][number]['effectiveStatus'],
+  attemptedMode: WorkbenchSuggestedChangeDecisionMutation['mode'],
+): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'suggested-change-state-conflict',
+      message: 'Workbench SuggestedChange cannot accept this decision in its current state',
+      status,
+      attemptedMode,
+    }),
+  })
+}
+
+function riskAcknowledgementMismatch(
+  requiredRiskLevel: SuggestedChangeRiskLevel,
+): DecideSuggestedChangeResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'risk-acknowledgement-mismatch',
+      message: 'Workbench SuggestedChange risk acknowledgement is stale',
+      requiredRiskLevel,
+    }),
+  })
+}
+
+function responsibilityErrorForProposal(
+  error: ResponsibilityReplacementError,
+): ProposeProjectResponsibilityChangeResult {
+  if (error.code === 'responsibility-revision-conflict'
+    || error.code === 'idempotency-conflict') {
+    throw new Error('Workbench proposal planner returned an impossible conflict')
+  }
+  if (error.code === 'project-not-found') return suggestedChangeProjectNotFound(error.projectId)
+  if (error.code === 'team-revision-conflict') {
+    return suggestedChangeTeamRevisionConflict(
+      error.expectedTeamRevision,
+      error.currentTeamRevision,
+    )
+  }
+  return Object.freeze({ ok: false, error: Object.freeze({ ...error }) }) as unknown as ProposeProjectResponsibilityChangeResult
+}
+
+function responsibilityErrorForDecision(
+  error: ResponsibilityReplacementError,
+  baseTeamRevision: number,
+  currentTeamRevision: number,
+): DecideSuggestedChangeResult {
+  if (error.code === 'project-not-found') {
+    return suggestedChangeDecisionProjectNotFound(error.projectId)
+  }
+  if (error.code === 'team-revision-conflict'
+    || error.code === 'responsibility-revision-conflict') {
+    return suggestedChangeStale(baseTeamRevision, currentTeamRevision)
+  }
+  if (error.code === 'idempotency-conflict') {
+    throw new Error('Workbench decision planner returned an impossible idempotency conflict')
+  }
+  return Object.freeze({ ok: false, error: Object.freeze({ ...error }) }) as unknown as DecideSuggestedChangeResult
+}
+
+interface DecodedSuggestedChangeReceipt {
+  readonly value: Record<string, unknown>
+  readonly receipt: {
+    readonly commandId: string
+    readonly auditEventId: string
+    readonly outboxId: string
+  }
+}
+
+function decodeSuggestedChangeReceipt(
+  value: string,
+  stored: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): DecodedSuggestedChangeReceipt {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('Workbench SuggestedChange receipt contains invalid JSON')
+  }
+  const record = exactStoredObject(parsed, 'SuggestedChange receipt', ['ok', 'value', 'receipt'])
+  if (record.ok !== true) throw new Error('Workbench SuggestedChange receipt is not committed')
+  const acknowledgement = objectValue(record.value, 'SuggestedChange acknowledgement')
+  const receiptRecord = exactStoredObject(record.receipt, 'SuggestedChange receipt identities', [
+    'commandId', 'auditEventId', 'outboxId',
+  ])
+  const receipt = Object.freeze({
+    commandId: boundedReference(receiptRecord.commandId, 'Receipt command id'),
+    auditEventId: boundedReference(receiptRecord.auditEventId, 'Receipt audit event id'),
+    outboxId: boundedReference(receiptRecord.outboxId, 'Receipt Outbox id'),
+  })
+  if (receipt.commandId !== stored.command_id
+    || receipt.auditEventId !== stored.audit_event_id
+    || receipt.outboxId !== stored.outbox_id) {
+    throw new Error('Workbench SuggestedChange receipt identities do not match durable references')
+  }
+  return Object.freeze({ value: acknowledgement, receipt })
+}
+
+function decodeSuggestedChangeProposalResult(
+  value: string,
+  stored: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): Extract<ProposeProjectResponsibilityChangeResult, { readonly ok: true }> {
+  const decoded = decodeSuggestedChangeReceipt(value, stored)
+  assertExactStoredKeys(decoded.value, 'SuggestedChange proposal acknowledgement', [
+    'suggestedChangeId', 'suggestedChangeRevision', 'targetAdapter',
+    'baseTargetVersion', 'persistedState', 'riskLevel',
+  ])
+  if (decoded.value.suggestedChangeRevision !== 1
+    || decoded.value.targetAdapter !== SUGGESTED_CHANGE_TARGET_ADAPTER
+    || decoded.value.persistedState !== 'pending') {
+    throw new Error('Workbench SuggestedChange proposal acknowledgement is unsupported')
+  }
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      suggestedChangeId: boundedReference(decoded.value.suggestedChangeId, 'Receipt SuggestedChange id'),
+      suggestedChangeRevision: 1,
+      targetAdapter: SUGGESTED_CHANGE_TARGET_ADAPTER,
+      baseTargetVersion: positiveInteger(
+        decoded.value.baseTargetVersion,
+        'Receipt SuggestedChange base target version',
+        true,
+      ),
+      persistedState: 'pending',
+      riskLevel: suggestedChangeRiskLevel(decoded.value.riskLevel),
+    }),
+    receipt: decoded.receipt,
+  })
+}
+
+function decodeSuggestedChangeDecisionResult(
+  value: string,
+  stored: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): Extract<DecideSuggestedChangeResult, { readonly ok: true }> {
+  const decoded = decodeSuggestedChangeReceipt(value, stored)
+  assertExactStoredKeys(decoded.value, 'SuggestedChange decision acknowledgement', [
+    'suggestedChangeId', 'suggestedChangeRevision', 'persistedState',
+    'decisionMode', 'riskLevel', 'appliedTeamRevision',
+    'appliedResponsibilityRevision',
+  ])
+  const persistedState = suggestedChangePersistedState(decoded.value.persistedState)
+  if (persistedState === 'pending') {
+    throw new Error('Workbench SuggestedChange decision receipt remained pending')
+  }
+  const decisionMode = suggestedChangeDecisionMode(decoded.value.decisionMode)
+  const expectedPersistedState: SuggestedChangePersistedState = decisionMode === 'accepted'
+    || decisionMode === 'edited-accepted'
+    ? 'accepted'
+    : decisionMode === 'rejected'
+      ? 'rejected'
+      : 'deferred'
+  if (persistedState !== expectedPersistedState) {
+    throw new Error('Workbench SuggestedChange decision receipt has inconsistent state')
+  }
+  const hasAppliedVersions = decoded.value.appliedTeamRevision !== null
+    && decoded.value.appliedResponsibilityRevision !== null
+  const accepted = decisionMode === 'accepted' || decisionMode === 'edited-accepted'
+  if (accepted !== hasAppliedVersions
+    || (decoded.value.appliedTeamRevision === null)
+      !== (decoded.value.appliedResponsibilityRevision === null)) {
+    throw new Error('Workbench SuggestedChange decision receipt has inconsistent applied versions')
+  }
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      suggestedChangeId: boundedReference(decoded.value.suggestedChangeId, 'Receipt SuggestedChange id'),
+      suggestedChangeRevision: positiveInteger(
+        decoded.value.suggestedChangeRevision,
+        'Receipt SuggestedChange revision',
+      ),
+      persistedState,
+      decisionMode,
+      riskLevel: suggestedChangeRiskLevel(decoded.value.riskLevel),
+      appliedTeamRevision: decoded.value.appliedTeamRevision === null
+        ? null
+        : positiveInteger(decoded.value.appliedTeamRevision, 'Receipt applied Team revision'),
+      appliedResponsibilityRevision: decoded.value.appliedResponsibilityRevision === null
+        ? null
+        : positiveInteger(
+          decoded.value.appliedResponsibilityRevision,
+          'Receipt applied Responsibility revision',
+        ),
+    }),
+    receipt: decoded.receipt,
+  })
 }
 
 interface DecodedProjectTeamReceipt {

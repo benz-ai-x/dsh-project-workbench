@@ -87,3 +87,43 @@ _Avoid_: Agent supervisor process, optional reviewer
 **Inactive Member**:
 A retained ProjectMember who cannot receive new responsibility but remains visible through historical IDs, responsibility versions, evidence, and audit attribution.
 _Avoid_: Deleted member
+
+**Review Center**:
+The authorized Project-scoped projection in which an Owner inspects evidence-backed SuggestedChanges, their typed differences, risk, lifecycle, and retained human decisions.
+_Avoid_: Approval queue, arbitrary command console
+
+**SuggestedChange**:
+An immutable proposal to apply one closed semantic command candidate to one exact target version. It is not authority to mutate the target and never silently rebases when the target advances.
+_Avoid_: Patch request, pending fact
+
+**SuggestedChange Source**:
+The Host-derived principal or producer identity that created a SuggestedChange. T06 admits only the authenticated Owner; later trusted producers require new closed variants.
+_Avoid_: Evidence, reviewer, browser-supplied actor
+
+**Review Target**:
+The typed aggregate and immutable base version against which a SuggestedChange was formed. T06's only Review Target is one Project's Project Responsibility at an exact Project Team revision.
+_Avoid_: Arbitrary object path, latest state
+
+**Review Diff**:
+The Host-derived, versioned before/after representation and changed-field set for one typed Review Target. It is inspectable intent, not a generic patch execution format.
+_Avoid_: Caller-supplied JSON Patch, unbounded object diff
+
+**EvidenceRef**:
+A stable reference to an authorized record that supports a SuggestedChange without copying the evidence body into the proposal or generic command ledger. T06 admits immutable, same-Project Workbench audit-event references.
+_Avoid_: Source identity, free-text justification
+
+**Review Risk**:
+The Host-derived `low` or `high` impact classification produced by a versioned target policy. It is distinct from model confidence and cannot be downgraded by the caller.
+_Avoid_: Confidence score, browser-selected severity
+
+**Review Decision**:
+An append-only Owner disposition with mandatory feedback: accept, edited accept, reject, or defer. Accepted means the target mutation committed in the same transaction.
+_Avoid_: Mutable approval flag, optional comment
+
+**Deferred SuggestedChange**:
+An unresolved SuggestedChange intentionally postponed by the Owner. It remains actionable only while its immutable Review Target base version is current.
+_Avoid_: Rejected change, scheduled job
+
+**Stale SuggestedChange**:
+An unresolved SuggestedChange whose Review Target has advanced beyond its immutable base version. Stale is Host-derived, cannot be accepted or deferred, and requires a new proposal rather than force or rebase.
+_Avoid_: Transport stale, rejected change

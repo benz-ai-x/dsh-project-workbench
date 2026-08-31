@@ -547,6 +547,394 @@ export type SetProjectResponsibilityResult =
     }
   }
 
+/** Persisted human-review lifecycle; stale is always derived from target truth. */
+export type SuggestedChangePersistedState = 'pending' | 'accepted' | 'rejected' | 'deferred'
+export type SuggestedChangeEffectiveStatus = SuggestedChangePersistedState | 'stale'
+export type SuggestedChangeRiskLevel = 'low' | 'high'
+export type SuggestedChangeRiskReason =
+  | 'initial-responsibility'
+  | 'accountable-changed'
+  | 'human-sponsor-changed'
+  | 'contributors-only'
+export type SuggestedChangeDecisionMode =
+  | 'accepted'
+  | 'edited-accepted'
+  | 'rejected'
+  | 'deferred'
+
+/** Canonical complete Review representation; null Accountable means not configured. */
+export interface ProjectResponsibilityReviewValue {
+  readonly accountableMemberId: string | null
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+}
+
+/** Complete typed candidate admitted by the only T06 target. */
+export interface ProjectResponsibilitySuggestedValue {
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+}
+
+export type ProjectResponsibilityReviewField =
+  | 'accountable'
+  | 'contributors'
+  | 'human-sponsor'
+
+/** Host-derived typed diff; it is never interpreted as an arbitrary patch. */
+export interface ProjectResponsibilityReviewDiff {
+  readonly kind: 'project-responsibility.diff'
+  readonly schemaVersion: 1
+  readonly before: ProjectResponsibilityReviewValue
+  readonly after: ProjectResponsibilitySuggestedValue
+  readonly changedFields: readonly ProjectResponsibilityReviewField[]
+  readonly digest: WorkbenchDigest
+}
+
+/** T06 evidence is one immutable, same-Project audit fact. */
+export interface SuggestedChangeEvidenceRef {
+  readonly kind: 'workbench-audit-event'
+  readonly auditEventId: string
+}
+
+export interface SuggestedChangeEvidenceProjection extends SuggestedChangeEvidenceRef {
+  readonly occurredAt: string
+  readonly action: WorkbenchAuditAction
+  readonly summaryCode: WorkbenchActivitySummaryCode
+  readonly object: WorkbenchActivityObject
+}
+
+/** Safe member label used by the one-round-trip proposal builder. */
+export interface SuggestedChangeMemberOption {
+  readonly memberId: string
+  readonly displayName: string
+  readonly kind: 'human' | 'agent'
+  readonly status: ProjectMemberStatus
+  /** True for an Agent or external-contact Accountable. */
+  readonly requiresHumanSponsor: boolean
+  readonly canBeHumanSponsor: boolean
+}
+
+export interface SuggestedChangeSourceProjection {
+  readonly kind: 'owner'
+  readonly actorId: string
+}
+
+export interface ProjectResponsibilityReviewTargetProjection {
+  readonly kind: 'project-responsibility'
+  readonly adapter: 'project-responsibility.replace'
+  readonly representationSchemaVersion: 1
+  readonly projectId: string
+  readonly baseTeamRevision: number
+  readonly baseResponsibilityRevision: number | null
+  readonly currentTeamRevision: number
+  readonly currentResponsibilityRevision: number | null
+}
+
+export type SuggestedChangeBatchPolicy =
+  | {
+    readonly policy: 'eligible-later'
+    readonly homogeneityKey:
+      'project-responsibility.replace|low|project-responsibility-v1'
+  }
+  | {
+    readonly policy: 'forbidden'
+    readonly reason: 'high-risk' | 'not-actionable'
+  }
+
+export interface SuggestedChangeRiskProjection {
+  readonly proposedLevel: SuggestedChangeRiskLevel
+  readonly effectiveLevel: SuggestedChangeRiskLevel
+  readonly proposedReasonCodes: readonly SuggestedChangeRiskReason[]
+  readonly policyVersion: 'project-responsibility-v1'
+  readonly batchPolicy: SuggestedChangeBatchPolicy
+}
+
+export interface SuggestedChangeDecisionProjection {
+  readonly decisionId: string
+  readonly suggestedChangeRevision: number
+  readonly mode: SuggestedChangeDecisionMode
+  readonly actor: WorkbenchActivityActor
+  readonly feedback: string
+  readonly appliedDiff: ProjectResponsibilityReviewDiff | null
+  readonly appliedRiskLevel: SuggestedChangeRiskLevel | null
+  readonly appliedRiskReasonCodes: readonly SuggestedChangeRiskReason[]
+  readonly appliedTeamRevision: number | null
+  readonly appliedResponsibilityRevision: number | null
+  readonly causationId: string
+  readonly receipt: WorkbenchCommandReceipt
+  readonly decidedAt: string
+}
+
+export type SuggestedChangeAllowedDecision =
+  | 'accept'
+  | 'edit-and-accept'
+  | 'reject'
+  | 'defer'
+
+/** One complete authorized Review card. */
+export interface SuggestedChangeProjection {
+  readonly suggestedChangeId: string
+  readonly sequence: number
+  readonly revision: number
+  readonly projectId: string
+  readonly source: SuggestedChangeSourceProjection
+  readonly target: ProjectResponsibilityReviewTargetProjection
+  readonly proposedDiff: ProjectResponsibilityReviewDiff
+  readonly evidence: readonly SuggestedChangeEvidenceProjection[]
+  readonly risk: SuggestedChangeRiskProjection
+  readonly originCausationId: string
+  readonly persistedState: SuggestedChangePersistedState
+  readonly effectiveStatus: SuggestedChangeEffectiveStatus
+  readonly decisions: readonly SuggestedChangeDecisionProjection[]
+  readonly allowedDecisions: readonly SuggestedChangeAllowedDecision[]
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export interface ReviewCenterFilter {
+  readonly projectId: string
+  readonly status?: SuggestedChangeEffectiveStatus
+  readonly riskLevel?: SuggestedChangeRiskLevel
+  readonly beforeSequence?: number
+  readonly limit?: number
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+/** Project context and bounded recent evidence needed to form a proposal safely. */
+export interface SuggestedChangeProposalBuilderProjection {
+  readonly projectId: string
+  readonly teamRevision: number
+  readonly responsibilityRevision: number | null
+  readonly base: ProjectResponsibilityReviewValue
+  readonly memberOptions: readonly SuggestedChangeMemberOption[]
+  readonly evidenceOptions: readonly SuggestedChangeEvidenceProjection[]
+}
+
+export interface ReviewCenterProjection {
+  readonly projectId: string
+  readonly proposalBuilder: SuggestedChangeProposalBuilderProjection
+  readonly items: readonly SuggestedChangeProjection[]
+  readonly nextBeforeSequence: number | null
+}
+
+export interface ProposeProjectResponsibilityChangeRequest {
+  readonly projectId: string
+  readonly candidate: ProjectResponsibilitySuggestedValue
+  readonly expectedTeamRevision: number
+  readonly evidenceRefs: readonly SuggestedChangeEvidenceRef[]
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-suggested-change-propose'
+  readonly actor?: never
+  readonly source?: never
+  readonly target?: never
+  readonly diff?: never
+  readonly risk?: never
+  readonly digest?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+  readonly suggestedChangeId?: never
+}
+
+export interface SuggestedChangeProposalAcknowledgement {
+  readonly suggestedChangeId: string
+  readonly suggestedChangeRevision: 1
+  readonly targetAdapter: 'project-responsibility.replace'
+  readonly baseTargetVersion: number
+  readonly persistedState: 'pending'
+  readonly riskLevel: SuggestedChangeRiskLevel
+}
+
+export type ProposeProjectResponsibilityChangeResult =
+  | {
+    readonly ok: true
+    readonly value: SuggestedChangeProposalAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectTeamRevisionConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'no-op-suggested-change' | 'evidence-required'
+      readonly message: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'evidence-invalid'
+      readonly message: string
+      readonly reason: 'duplicate' | 'unavailable' | 'wrong-project' | 'integrity-failed'
+    }
+  }
+  | { readonly ok: false; readonly error: ProjectMemberNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-inactive' | 'accountable-also-contributor'
+      readonly message: string
+      readonly memberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-required' | 'human-sponsor-forbidden'
+      readonly message: string
+      readonly accountableMemberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-invalid'
+      readonly message: string
+      readonly humanSponsorMemberId: string
+    }
+  }
+
+interface SuggestedChangeDecisionRequestBase {
+  readonly projectId: string
+  readonly suggestedChangeId: string
+  readonly expectedSuggestedChangeRevision: number
+  readonly feedback: string
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly actor?: never
+  readonly source?: never
+  readonly target?: never
+  readonly expectedTargetVersion?: never
+  readonly diff?: never
+  readonly risk?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+export type DecideSuggestedChangeRequest =
+  | SuggestedChangeDecisionRequestBase & {
+    readonly mode: 'accept'
+    readonly acknowledgedRiskLevel: SuggestedChangeRiskLevel
+    readonly reason: 'owner-suggested-change-accept'
+    readonly candidate?: never
+  }
+  | SuggestedChangeDecisionRequestBase & {
+    readonly mode: 'edit-and-accept'
+    readonly acknowledgedRiskLevel: SuggestedChangeRiskLevel
+    readonly candidate: ProjectResponsibilitySuggestedValue
+    readonly reason: 'owner-suggested-change-edit-accept'
+  }
+  | SuggestedChangeDecisionRequestBase & {
+    readonly mode: 'reject'
+    readonly acknowledgedRiskLevel?: never
+    readonly candidate?: never
+    readonly reason: 'owner-suggested-change-reject'
+  }
+  | SuggestedChangeDecisionRequestBase & {
+    readonly mode: 'defer'
+    readonly acknowledgedRiskLevel?: never
+    readonly candidate?: never
+    readonly reason: 'owner-suggested-change-defer'
+  }
+
+export interface SuggestedChangeDecisionAcknowledgement {
+  readonly suggestedChangeId: string
+  readonly suggestedChangeRevision: number
+  readonly persistedState: 'accepted' | 'rejected' | 'deferred'
+  readonly decisionMode: SuggestedChangeDecisionMode
+  readonly riskLevel: SuggestedChangeRiskLevel
+  readonly appliedTeamRevision: number | null
+  readonly appliedResponsibilityRevision: number | null
+}
+
+export type DecideSuggestedChangeResult =
+  | {
+    readonly ok: true
+    readonly value: SuggestedChangeDecisionAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'suggested-change-not-found'
+      readonly message: string
+      readonly suggestedChangeId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'suggested-change-revision-conflict'
+      readonly message: string
+      readonly expectedSuggestedChangeRevision: number
+      readonly currentSuggestedChangeRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'suggested-change-stale'
+      readonly message: string
+      readonly baseTeamRevision: number
+      readonly currentTeamRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'suggested-change-state-conflict'
+      readonly message: string
+      readonly status: SuggestedChangeEffectiveStatus
+      readonly attemptedMode: DecideSuggestedChangeRequest['mode']
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'risk-acknowledgement-mismatch'
+      readonly message: string
+      readonly requiredRiskLevel: SuggestedChangeRiskLevel
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'no-op-suggested-change'
+      readonly message: string
+    }
+  }
+  | { readonly ok: false; readonly error: ProjectMemberNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-inactive' | 'accountable-also-contributor'
+      readonly message: string
+      readonly memberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-required' | 'human-sponsor-forbidden'
+      readonly message: string
+      readonly accountableMemberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-invalid'
+      readonly message: string
+      readonly humanSponsorMemberId: string
+    }
+  }
+
 /** Durable truth about one committed integration intent. */
 export type WorkbenchOutboxState = 'pending' | 'delivered' | 'unknown' | 'failed'
 
@@ -562,27 +950,45 @@ export type WorkbenchProjectTeamReason =
   | 'owner-project-member-add'
   | 'owner-project-member-status-change'
   | 'owner-project-responsibility-set'
+export type WorkbenchSuggestedChangeReason =
+  | 'owner-suggested-change-propose'
+  | 'owner-suggested-change-accept'
+  | 'owner-suggested-change-edit-accept'
+  | 'owner-suggested-change-reject'
+  | 'owner-suggested-change-defer'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
   | WorkbenchProjectTeamReason
+  | WorkbenchSuggestedChangeReason
 export type WorkbenchAuditAction =
   | 'workbench.status.updated'
   | 'workbench.project.created'
   | 'workbench.project-member.created'
   | 'workbench.project-member.status-changed'
   | 'workbench.project.responsibility-assigned'
+  | 'workbench.suggested-change.proposed'
+  | 'workbench.suggested-change.accepted'
+  | 'workbench.suggested-change.edited-accepted'
+  | 'workbench.suggested-change.rejected'
+  | 'workbench.suggested-change.deferred'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
   | 'project-member'
   | 'project-responsibility'
+  | 'suggested-change'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
   | 'project-member-created'
   | 'project-member-status-changed'
   | 'project-responsibility-assigned'
+  | 'suggested-change-proposed'
+  | 'suggested-change-accepted'
+  | 'suggested-change-edited-accepted'
+  | 'suggested-change-rejected'
+  | 'suggested-change-deferred'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

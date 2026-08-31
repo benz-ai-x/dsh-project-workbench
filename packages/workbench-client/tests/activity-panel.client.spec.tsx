@@ -95,6 +95,17 @@ function projectTeamItems(): readonly WorkbenchActivityItem[] {
   ]
 }
 
+function suggestedChangeItem(): WorkbenchActivityItem {
+  return {
+    ...item(9, 'pending'),
+    projectId: 'project-9',
+    action: 'workbench.suggested-change.edited-accepted',
+    reason: 'owner-suggested-change-edit-accept',
+    object: { type: 'suggested-change', id: 'suggested-change-9', version: 2 },
+    summaryCode: 'suggested-change-edited-accepted',
+  }
+}
+
 function ready(
   items: readonly WorkbenchActivityItem[] = [],
   integrity: WorkbenchAuditIntegrityProjection = {
@@ -300,6 +311,26 @@ describe('ActivityPanel', () => {
     expect(controller.setFilter).toHaveBeenCalledWith({
       objectType: 'project-responsibility',
       action: 'workbench.project.responsibility-assigned',
+    })
+  })
+
+  it('submits the visible SuggestedChange object and edited-accepted action filters', () => {
+    const controller = new PanelController(ready([suggestedChangeItem()]))
+    render(<ActivityPanel controller={controller} copy={DEFAULT_ACTIVITY_PANEL_COPY} />)
+
+    expect(screen.getByRole('heading', { name: 'SuggestedChange edited and accepted' })).toBeTruthy()
+    expect(screen.getByText('Owner SuggestedChange edit and acceptance')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Object type'), {
+      target: { value: 'suggested-change' },
+    })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: 'workbench.suggested-change.edited-accepted' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }))
+
+    expect(controller.setFilter).toHaveBeenCalledWith({
+      objectType: 'suggested-change',
+      action: 'workbench.suggested-change.edited-accepted',
     })
   })
 

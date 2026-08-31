@@ -252,6 +252,8 @@ describe('OwnerPage', () => {
     expect(screen.getByRole('heading', { name: '从知识工作模板创建项目' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Project Team' })).toBeTruthy()
     expect(screen.getByText('打开一个 Project 后，可在该项目的详情下管理成员与责任。')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Review Center' })).toBeTruthy()
+    expect(screen.getByText('请先打开一个 Project，再查看或创建项目建议。')).toBeTruthy()
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     expect(screen.getByText('审计链验证通过')).toBeTruthy()
     expect(screen.queryByText(recoveryCode)).toBeNull()
@@ -291,9 +293,11 @@ describe('OwnerPage', () => {
     const statusController = controller.getSnapshot().status
     const projectController = controller.getSnapshot().projects
     const projectTeamController = controller.getSnapshot().projectTeam
+    const reviewController = controller.getSnapshot().review
     const activityController = controller.getSnapshot().activity
     expect(screen.getByRole('heading', { name: '从知识工作模板创建项目' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Project Team' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Review Center' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     fireEvent.change(screen.getByRole('textbox', { name: '项目状态' }), {
       target: { value: '退出后必须清除的草稿' },
@@ -309,6 +313,7 @@ describe('OwnerPage', () => {
     expect(screen.queryByText('Host 保护的状态')).toBeNull()
     expect(screen.queryByRole('heading', { name: '从知识工作模板创建项目' })).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Project Team' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Review Center' })).toBeNull()
     expect(screen.queryByRole('heading', { name: '活动记录' })).toBeNull()
     expect(statusController?.getSnapshot()).toMatchObject({ snapshot: null, draft: '' })
     expect(activityController?.getSnapshot()).toMatchObject({
@@ -327,6 +332,13 @@ describe('OwnerPage', () => {
       team: null,
       memberDraft: { displayName: '' },
       memberDraftDirty: false,
+    })
+    expect(reviewController?.getSnapshot()).toMatchObject({
+      phase: 'idle',
+      selection: null,
+      review: null,
+      proposalDraftDirty: false,
+      decisionDrafts: {},
     })
   })
 })

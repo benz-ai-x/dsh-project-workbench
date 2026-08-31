@@ -7,21 +7,30 @@ import type {
   AddProjectMemberResult,
   CreateProjectRequest,
   CreateProjectResult,
+  DecideSuggestedChangeRequest,
+  DecideSuggestedChangeResult,
   OutcomeDraft,
   ProjectDetailProjection,
   ProjectMemberDraft,
   ProjectQuery,
+  ProjectResponsibilitySuggestedValue,
   ProjectStartFilter,
   ProjectStartProjection,
   ProjectTeamProjection,
   ProjectTeamQuery,
   ProjectTemplateSelection,
+  ProposeProjectResponsibilityChangeRequest,
+  ProposeProjectResponsibilityChangeResult,
+  ReviewCenterFilter,
+  ReviewCenterProjection,
   SetProjectMemberStatusRequest,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityRequest,
   SetProjectResponsibilityResult,
   SetStatusRequest,
   SetStatusResult,
+  SuggestedChangeEvidenceRef,
+  SuggestedChangeRiskLevel,
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
@@ -33,13 +42,18 @@ import {
   projectStartProjection,
   projectTeamCommandResult,
   projectTeamProjection,
+  reviewCenterProjection,
   statusResult,
   statusSnapshot,
+  suggestedChangeDecisionResult,
+  suggestedChangeProposalResult,
   type WorkbenchProjectMutation,
   type WorkbenchProjectMemberMutation,
   type WorkbenchProjectMemberStatusMutation,
   type WorkbenchProjectResponsibilityMutation,
   type WorkbenchRepository,
+  type WorkbenchSuggestedChangeDecisionMutation,
+  type WorkbenchSuggestedChangeProposalMutation,
 } from './repository.ts'
 import type { WorkbenchAuthorization } from './authorization.ts'
 
@@ -53,6 +67,8 @@ export interface WorkbenchIdGenerator {
   nextStatusId(): string
   nextProjectId(): string
   nextProjectMemberId(): string
+  nextSuggestedChangeId(): string
+  nextSuggestedChangeDecisionId(): string
   nextGoalId(): string
   nextOutcomeId(): string
   nextCommandId(): string
@@ -94,6 +110,8 @@ export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextStatusId: () => `status-${randomUUID()}`,
   nextProjectId: () => `project-${randomUUID()}`,
   nextProjectMemberId: () => `member-${randomUUID()}`,
+  nextSuggestedChangeId: () => `suggested-change-${randomUUID()}`,
+  nextSuggestedChangeDecisionId: () => `decision-${randomUUID()}`,
   nextGoalId: () => `goal-${randomUUID()}`,
   nextOutcomeId: () => `outcome-${randomUUID()}`,
   nextCommandId: () => `command-${randomUUID()}`,
@@ -555,6 +573,201 @@ export class WorkbenchScenario {
     })
   }
 
+  /** Read proposal context and one authorized, Host-filtered Review page. */
+  reviewCenter(
+    filter: ReviewCenterFilter,
+    signal: AbortSignal,
+  ): Promise<ReviewCenterProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('reviewCenter requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.review.read',
+        operationSignal,
+      )
+      const normalized = validateReviewCenterFilter(filter)
+      throwIfCancelled(operationSignal)
+      let projection: ReviewCenterProjection | null
+      try {
+        projection = await this.options.repository.readReviewCenter(Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          filter: normalized,
+        }), operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.review.read',
+        reviewCenterProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Propose one complete Project Responsibility candidate against an exact Team base. */
+  proposeProjectResponsibilityChange(
+    request: ProposeProjectResponsibilityChangeRequest,
+    signal: AbortSignal,
+  ): Promise<ProposeProjectResponsibilityChangeResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('proposeProjectResponsibilityChange requires an AbortSignal', {
+          field: 'signal',
+        })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.review.decide',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateProposeProjectResponsibilityChangeRequest(request)
+      const occurredAt = commandInstant(this.options.clock)
+      const mutation: WorkbenchSuggestedChangeProposalMutation = Object.freeze({
+        suggestedChangeId: generatedId(
+          this.options.ids.nextSuggestedChangeId(),
+          'SuggestedChange',
+        ),
+        projectId: normalized.projectId,
+        candidate: normalized.candidate,
+        evidenceRefs: normalized.evidenceRefs,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedRevision: null,
+        createdAt: occurredAt,
+        command: Object.freeze({
+          commandId: generatedId(this.options.ids.nextCommandId(), 'command'),
+          auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+          outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: 'owner-suggested-change-propose',
+          actor: Object.freeze({
+            kind: 'owner',
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      let result: ProposeProjectResponsibilityChangeResult
+      try {
+        result = await this.options.repository.commitSuggestedChangeProposal(
+          mutation,
+          operationSignal,
+        )
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return suggestedChangeProposalResult(result)
+    })
+  }
+
+  /** Apply one closed Owner disposition without allowing the Client to replace the target base. */
+  decideSuggestedChange(
+    request: DecideSuggestedChangeRequest,
+    signal: AbortSignal,
+  ): Promise<DecideSuggestedChangeResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('decideSuggestedChange requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.review.decide',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateDecideSuggestedChangeRequest(request)
+      if (normalized.mode === 'accept' || normalized.mode === 'edit-and-accept') {
+        const targetScope = await this.options.authorization.require(
+          'workbench.project.responsibility.write',
+          operationSignal,
+        )
+        if (targetScope.ownerId !== scope.ownerId
+          || targetScope.organizationId !== scope.organizationId
+          || targetScope.teamId !== scope.teamId) {
+          throw infrastructure('Workbench authorization returned inconsistent Review scopes')
+        }
+        throwIfCancelled(operationSignal)
+      }
+      const decidedAt = commandInstant(this.options.clock)
+      const command = Object.freeze({
+        commandId: generatedId(this.options.ids.nextCommandId(), 'command'),
+        auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+        outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+        actor: Object.freeze({
+          kind: 'owner' as const,
+          id: scope.ownerId,
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+        }),
+        occurredAt: decidedAt,
+      })
+      const decisionId = generatedId(
+        this.options.ids.nextSuggestedChangeDecisionId(),
+        'SuggestedChange decision',
+      )
+      const common = {
+        decisionId,
+        projectId: normalized.projectId,
+        suggestedChangeId: normalized.suggestedChangeId,
+        expectedSuggestedChangeRevision: normalized.expectedSuggestedChangeRevision,
+        feedback: normalized.feedback,
+        decidedAt,
+      } as const
+      const mutation: WorkbenchSuggestedChangeDecisionMutation = normalized.mode === 'accept'
+        ? Object.freeze({
+          ...common,
+          mode: 'accept',
+          acknowledgedRiskLevel: normalized.acknowledgedRiskLevel,
+          command: Object.freeze({ ...command, reason: 'owner-suggested-change-accept' }),
+        })
+        : normalized.mode === 'edit-and-accept'
+          ? Object.freeze({
+            ...common,
+            mode: 'edit-and-accept',
+            acknowledgedRiskLevel: normalized.acknowledgedRiskLevel,
+            candidate: normalized.candidate,
+            command: Object.freeze({ ...command, reason: 'owner-suggested-change-edit-accept' }),
+          })
+          : normalized.mode === 'reject'
+            ? Object.freeze({
+              ...common,
+              mode: 'reject',
+              command: Object.freeze({ ...command, reason: 'owner-suggested-change-reject' }),
+            })
+            : Object.freeze({
+              ...common,
+              mode: 'defer',
+              command: Object.freeze({ ...command, reason: 'owner-suggested-change-defer' }),
+            })
+      let result: DecideSuggestedChangeResult
+      try {
+        result = await this.options.repository.commitSuggestedChangeDecision(
+          mutation,
+          operationSignal,
+        )
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return suggestedChangeDecisionResult(result)
+    })
+  }
+
   /** Validate and execute the public compare-and-set command. */
   setStatus(request: SetStatusRequest, signal: AbortSignal): Promise<SetStatusResult> {
     return this.execute(async (lifetimeSignal) => {
@@ -715,6 +928,10 @@ const MAX_METRIC_UNIT_LENGTH = 64
 const MAX_PROJECT_MEMBER_DISPLAY_NAME_LENGTH = 200
 const MAX_EXTERNAL_CONTACT_VALUE_LENGTH = 320
 const MAX_PROJECT_CONTRIBUTORS = 20
+const DEFAULT_REVIEW_CENTER_LIMIT = 20
+const MAX_REVIEW_CENTER_LIMIT = 50
+const MAX_SUGGESTED_CHANGE_EVIDENCE_REFS = 20
+const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
 const TEXT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u
 
@@ -1107,6 +1324,234 @@ function validateSetProjectResponsibilityRequest(
   })
 }
 
+function validateReviewCenterFilter(value: ReviewCenterFilter): ReviewCenterFilter {
+  const record = exactRecord(value, 'reviewCenter filter', ['projectId'], [
+    'status',
+    'riskLevel',
+    'beforeSequence',
+    'limit',
+  ])
+  const status = record.status
+  if (status !== undefined
+    && status !== 'pending'
+    && status !== 'deferred'
+    && status !== 'stale'
+    && status !== 'accepted'
+    && status !== 'rejected') {
+    throw badRequest('status is not supported', { field: 'status' })
+  }
+  const riskLevel = record.riskLevel
+  if (riskLevel !== undefined && riskLevel !== 'low' && riskLevel !== 'high') {
+    throw badRequest('riskLevel must be low or high', { field: 'riskLevel' })
+  }
+  const beforeSequence = record.beforeSequence
+  if (beforeSequence !== undefined) positiveRevision(beforeSequence, 'beforeSequence')
+  const requestedLimit = record.limit
+  if (requestedLimit !== undefined
+    && (!Number.isSafeInteger(requestedLimit)
+      || (requestedLimit as number) < 1
+      || (requestedLimit as number) > MAX_REVIEW_CENTER_LIMIT)) {
+    throw badRequest(`limit must be an integer from 1 to ${MAX_REVIEW_CENTER_LIMIT}`, {
+      field: 'limit',
+    })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    ...(status === undefined ? {} : {
+      status: status as Exclude<ReviewCenterFilter['status'], undefined>,
+    }),
+    ...(riskLevel === undefined ? {} : {
+      riskLevel: riskLevel as Exclude<ReviewCenterFilter['riskLevel'], undefined>,
+    }),
+    ...(beforeSequence === undefined ? {} : { beforeSequence: beforeSequence as number }),
+    limit: requestedLimit === undefined ? DEFAULT_REVIEW_CENTER_LIMIT : requestedLimit as number,
+  })
+}
+
+function validateProposeProjectResponsibilityChangeRequest(
+  value: ProposeProjectResponsibilityChangeRequest,
+): ProposeProjectResponsibilityChangeRequest {
+  const record = exactRecord(value, 'proposeProjectResponsibilityChange request', [
+    'projectId',
+    'candidate',
+    'expectedTeamRevision',
+    'evidenceRefs',
+    'idempotencyKey',
+    'causationId',
+    'reason',
+  ])
+  if (!Array.isArray(record.evidenceRefs)
+    || record.evidenceRefs.length < 1
+    || record.evidenceRefs.length > MAX_SUGGESTED_CHANGE_EVIDENCE_REFS) {
+    throw badRequest(
+      `evidenceRefs must contain 1-${MAX_SUGGESTED_CHANGE_EVIDENCE_REFS} items`,
+      { field: 'evidenceRefs' },
+    )
+  }
+  const evidenceRefs = Object.freeze(
+    Array.from(record.evidenceRefs, validateEvidenceRef).sort((left, right) =>
+      left.auditEventId < right.auditEventId
+        ? -1
+        : left.auditEventId > right.auditEventId ? 1 : 0),
+  )
+  if (record.reason !== 'owner-suggested-change-propose') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    candidate: validateSuggestedResponsibilityValue(record.candidate, 'candidate'),
+    expectedTeamRevision: nonNegativeRevision(
+      record.expectedTeamRevision,
+      'expectedTeamRevision',
+    ),
+    evidenceRefs,
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-suggested-change-propose',
+  })
+}
+
+function validateDecideSuggestedChangeRequest(
+  value: DecideSuggestedChangeRequest,
+): DecideSuggestedChangeRequest {
+  const record = exactRecord(value, 'decideSuggestedChange request', [
+    'projectId',
+    'suggestedChangeId',
+    'expectedSuggestedChangeRevision',
+    'feedback',
+    'idempotencyKey',
+    'causationId',
+    'mode',
+    'reason',
+  ], ['acknowledgedRiskLevel', 'candidate'])
+  const common = Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    suggestedChangeId: safeId(record.suggestedChangeId, 'suggestedChangeId'),
+    expectedSuggestedChangeRevision: positiveRevision(
+      record.expectedSuggestedChangeRevision,
+      'expectedSuggestedChangeRevision',
+    ),
+    feedback: boundedText(
+      record.feedback,
+      'feedback',
+      MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH,
+    ),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+  })
+  if (record.mode === 'accept') {
+    assertDecisionReason(record.reason, 'owner-suggested-change-accept')
+    if (Object.hasOwn(record, 'candidate')) {
+      throw badRequest('accept must not carry an edited candidate', { field: 'candidate' })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'accept',
+      acknowledgedRiskLevel: validateRiskAcknowledgement(record.acknowledgedRiskLevel),
+      reason: 'owner-suggested-change-accept',
+    })
+  }
+  if (record.mode === 'edit-and-accept') {
+    assertDecisionReason(record.reason, 'owner-suggested-change-edit-accept')
+    if (!Object.hasOwn(record, 'candidate')) {
+      throw badRequest('edit-and-accept requires candidate', { field: 'candidate' })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'edit-and-accept',
+      acknowledgedRiskLevel: validateRiskAcknowledgement(record.acknowledgedRiskLevel),
+      candidate: validateSuggestedResponsibilityValue(record.candidate, 'candidate'),
+      reason: 'owner-suggested-change-edit-accept',
+    })
+  }
+  if (record.mode === 'reject' || record.mode === 'defer') {
+    if (Object.hasOwn(record, 'candidate')) {
+      throw badRequest(`${record.mode} must not carry candidate`, { field: 'candidate' })
+    }
+    if (Object.hasOwn(record, 'acknowledgedRiskLevel')) {
+      throw badRequest(`${record.mode} must not carry acknowledgedRiskLevel`, {
+        field: 'acknowledgedRiskLevel',
+      })
+    }
+    if (record.mode === 'reject') {
+      assertDecisionReason(record.reason, 'owner-suggested-change-reject')
+      return Object.freeze({
+        ...common,
+        mode: 'reject',
+        reason: 'owner-suggested-change-reject',
+      })
+    }
+    assertDecisionReason(record.reason, 'owner-suggested-change-defer')
+    return Object.freeze({
+      ...common,
+      mode: 'defer',
+      reason: 'owner-suggested-change-defer',
+    })
+  }
+  throw badRequest('mode is not supported', { field: 'mode' })
+}
+
+function validateSuggestedResponsibilityValue(
+  value: unknown,
+  field: string,
+): ProjectResponsibilitySuggestedValue {
+  const record = exactRecord(value, field, [
+    'accountableMemberId',
+    'contributorMemberIds',
+    'humanSponsorMemberId',
+  ])
+  if (!Array.isArray(record.contributorMemberIds)
+    || record.contributorMemberIds.length > MAX_PROJECT_CONTRIBUTORS) {
+    throw badRequest(`contributorMemberIds must contain 0-${MAX_PROJECT_CONTRIBUTORS} items`, {
+      field: `${field}.contributorMemberIds`,
+    })
+  }
+  const contributorMemberIds = Array.from(record.contributorMemberIds, (memberId, index) =>
+    safeId(memberId, `${field}.contributorMemberIds[${String(index)}]`))
+  if (new Set(contributorMemberIds).size !== contributorMemberIds.length) {
+    throw badRequest('contributorMemberIds must not contain duplicates', {
+      field: `${field}.contributorMemberIds`,
+    })
+  }
+  contributorMemberIds.sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+  const humanSponsorMemberId = record.humanSponsorMemberId
+  if (humanSponsorMemberId !== null) {
+    safeId(humanSponsorMemberId, `${field}.humanSponsorMemberId`)
+  }
+  return Object.freeze({
+    accountableMemberId: safeId(record.accountableMemberId, `${field}.accountableMemberId`),
+    contributorMemberIds: Object.freeze(contributorMemberIds),
+    humanSponsorMemberId: humanSponsorMemberId as string | null,
+  })
+}
+
+function validateEvidenceRef(value: unknown, index: number): SuggestedChangeEvidenceRef {
+  const field = `evidenceRefs[${String(index)}]`
+  const record = exactRecord(value, field, ['kind', 'auditEventId'])
+  if (record.kind !== 'workbench-audit-event') {
+    throw badRequest('evidence kind is not supported', { field: `${field}.kind` })
+  }
+  return Object.freeze({
+    kind: 'workbench-audit-event',
+    auditEventId: safeId(record.auditEventId, `${field}.auditEventId`),
+  })
+}
+
+function validateRiskAcknowledgement(value: unknown): SuggestedChangeRiskLevel {
+  if (value !== 'low' && value !== 'high') {
+    throw badRequest('acknowledgedRiskLevel must be low or high', {
+      field: 'acknowledgedRiskLevel',
+    })
+  }
+  return value
+}
+
+function assertDecisionReason(value: unknown, expected: DecideSuggestedChangeRequest['reason']): void {
+  if (value !== expected) {
+    throw badRequest('reason does not match the decision mode', { field: 'reason' })
+  }
+}
+
 function nonNegativeRevision(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw badRequest(`${field} must be a non-negative safe integer`, { field })
@@ -1221,7 +1666,8 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && objectType !== 'workbench-status'
     && objectType !== 'project'
     && objectType !== 'project-member'
-    && objectType !== 'project-responsibility') {
+    && objectType !== 'project-responsibility'
+    && objectType !== 'suggested-change') {
     throw badRequest('objectType is not supported', { field: 'objectType' })
   }
   const objectId: unknown = record.objectId
@@ -1235,7 +1681,12 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && action !== 'workbench.project.created'
     && action !== 'workbench.project-member.created'
     && action !== 'workbench.project-member.status-changed'
-    && action !== 'workbench.project.responsibility-assigned') {
+    && action !== 'workbench.project.responsibility-assigned'
+    && action !== 'workbench.suggested-change.proposed'
+    && action !== 'workbench.suggested-change.accepted'
+    && action !== 'workbench.suggested-change.edited-accepted'
+    && action !== 'workbench.suggested-change.rejected'
+    && action !== 'workbench.suggested-change.deferred') {
     throw badRequest('action is not supported', { field: 'action' })
   }
   const beforeSequence: unknown = record.beforeSequence

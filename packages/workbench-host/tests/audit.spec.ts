@@ -277,6 +277,88 @@ describe('audit hash envelope', () => {
       summary: { code: 'project-member-created', changedFields: ['displayName'] },
     })).toThrow(/correlated combination/u)
   })
+
+  it('admits only correlated, Project-scoped SuggestedChange vocabulary without review content', () => {
+    const cases = [
+      [
+        'workbench.suggested-change.proposed',
+        'owner-suggested-change-propose',
+        'workbench.suggested-change.propose',
+        'suggested-change-proposed',
+        ['proposal', 'risk', 'evidence'],
+      ],
+      [
+        'workbench.suggested-change.accepted',
+        'owner-suggested-change-accept',
+        'workbench.suggested-change.accept',
+        'suggested-change-accepted',
+        ['decision', 'target'],
+      ],
+      [
+        'workbench.suggested-change.edited-accepted',
+        'owner-suggested-change-edit-accept',
+        'workbench.suggested-change.edit-accept',
+        'suggested-change-edited-accepted',
+        ['decision', 'target'],
+      ],
+      [
+        'workbench.suggested-change.rejected',
+        'owner-suggested-change-reject',
+        'workbench.suggested-change.reject',
+        'suggested-change-rejected',
+        ['decision'],
+      ],
+      [
+        'workbench.suggested-change.deferred',
+        'owner-suggested-change-defer',
+        'workbench.suggested-change.defer',
+        'suggested-change-deferred',
+        ['decision'],
+      ],
+    ] as const
+
+    for (const [action, reason, commandType, summaryCode, changedFields] of cases) {
+      const input: AuditEventInput = {
+        ...eventInput(),
+        action,
+        scope: {
+          organizationId: 'organization-001',
+          teamId: 'team-001',
+          projectId: 'project-001',
+        },
+        reason: { code: reason },
+        object: { type: 'suggested-change', id: 'suggested-change-001', version: '2' },
+        command: { id: 'command-review-001', type: commandType },
+        summary: { code: summaryCode, changedFields },
+      }
+      const created = createAuditEvent(input)
+      expect(created).toMatchObject({ action, reason: { code: reason }, summary: { code: summaryCode } })
+      expect(created.canonicalEnvelope).not.toMatch(
+        /candidate|feedback|evidenceRef|member-private|private@example/u,
+      )
+    }
+
+    expect(() => createAuditEvent({
+      ...eventInput(),
+      action: 'workbench.suggested-change.accepted',
+      scope: {
+        organizationId: 'organization-001', teamId: 'team-001', projectId: 'project-001',
+      },
+      reason: { code: 'owner-suggested-change-accept' },
+      object: { type: 'suggested-change', id: 'suggested-change-001', version: '2' },
+      command: { id: 'command-review-001', type: 'workbench.suggested-change.reject' },
+      summary: { code: 'suggested-change-accepted', changedFields: ['decision', 'target'] },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...eventInput(),
+      action: 'workbench.suggested-change.rejected',
+      scope: { organizationId: 'organization-001', teamId: 'team-001', projectId: null },
+      reason: { code: 'owner-suggested-change-reject' },
+      object: { type: 'suggested-change', id: 'suggested-change-001', version: '2' },
+      command: { id: 'command-review-001', type: 'workbench.suggested-change.reject' },
+      summary: { code: 'suggested-change-rejected', changedFields: ['decision'] },
+    })).toThrow(/correlated combination/u)
+  })
 })
 
 describe('audit chain verification', () => {

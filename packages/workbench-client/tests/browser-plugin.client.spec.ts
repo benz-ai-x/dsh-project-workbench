@@ -12,6 +12,7 @@ import type {
   OwnerAuthResponse,
   ProjectDetailProjection,
   ProjectStartProjection,
+  ReviewCenterProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
@@ -124,6 +125,26 @@ function projectDetail(): ProjectDetailProjection {
   }
 }
 
+function emptyReviewCenter(projectId: string): ReviewCenterProjection {
+  return {
+    projectId,
+    proposalBuilder: {
+      projectId,
+      teamRevision: 0,
+      responsibilityRevision: null,
+      base: {
+        accountableMemberId: null,
+        contributorMemberIds: [],
+        humanSponsorMemberId: null,
+      },
+      memberOptions: [],
+      evidenceOptions: [],
+    },
+    items: [],
+    nextBeforeSequence: null,
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
@@ -189,6 +210,13 @@ async function bench(options: {
         members: [],
         responsibility: null,
       },
+    })
+  })
+  const reviewCenterGate = vi.fn((filter: { projectId: string }) => {
+    requestOrder.push('review')
+    return Promise.resolve({
+      ok: true as const,
+      value: emptyReviewCenter(filter.projectId),
     })
   })
   const authStateSource = options.authState ?? (() => Promise.resolve({
@@ -278,6 +306,15 @@ async function bench(options: {
       ok: true as const,
       value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
     })),
+    reviewCenter: reviewCenterGate,
+    proposeProjectResponsibilityChange: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
+    decideSuggestedChange: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -322,6 +359,7 @@ async function bench(options: {
     activityGate,
     projectStartGate,
     projectTeamGate,
+    reviewCenterGate,
     authStateGate,
     auth,
     disposeLayout,
@@ -424,19 +462,25 @@ describe('Project Workbench browser plugin lifecycle', () => {
     await b.fiber?.dispose()
   })
 
-  it('preserves a same-Project Team draft across reconnect and clears it on Fiber disposal', async () => {
+  it('preserves same-Project Team/Review drafts across reconnect and clears them on Fiber disposal', async () => {
     const b = await bench()
     const entry = b.ctx.slots.entries('conversation')[0]
     const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
     await vi.waitFor(() => { expect(controller.getSnapshot().phase).toBe('authenticated') })
     const projects = controller.getSnapshot().projects
     const projectTeam = controller.getSnapshot().projectTeam
+    const review = controller.getSnapshot().review
     expect(projects).not.toBeNull()
     expect(projectTeam).not.toBeNull()
+    expect(review).not.toBeNull()
 
     await projects?.openProject('project-1')
     await vi.waitFor(() => {
       expect(projectTeam?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+      })
+      expect(review?.getSnapshot()).toMatchObject({
         phase: 'ready',
         selection: { projectId: 'project-1', projectName: 'Evidence Project' },
       })
@@ -447,12 +491,22 @@ describe('Project Workbench browser plugin lifecycle', () => {
       memberDraft: { kind: 'agent', displayName: 'Reconnect-safe Agent' },
       memberDraftDirty: true,
     })
+    review?.setProposalAccountable('protected-member')
+    expect(review?.getSnapshot()).toMatchObject({
+      proposalDraft: { accountableMemberId: 'protected-member' },
+      proposalDraftDirty: true,
+    })
 
     b.disconnect()
     expect(projectTeam?.getSnapshot()).toMatchObject({
       phase: 'stale',
       memberDraft: { kind: 'agent', displayName: 'Reconnect-safe Agent' },
       memberDraftDirty: true,
+    })
+    expect(review?.getSnapshot()).toMatchObject({
+      phase: 'disconnected',
+      proposalDraft: { accountableMemberId: 'protected-member' },
+      proposalDraftDirty: true,
     })
     b.requestOrder.length = 0
     b.reconnect()
@@ -463,9 +517,15 @@ describe('Project Workbench browser plugin lifecycle', () => {
         memberDraft: { kind: 'agent', displayName: 'Reconnect-safe Agent' },
         memberDraftDirty: true,
       })
+      expect(review?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        proposalDraft: { accountableMemberId: 'protected-member' },
+        proposalDraftDirty: true,
+      })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'team', 'activity'])
+    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'team', 'review', 'activity'])
     expect(b.projectTeamGate).toHaveBeenCalledTimes(2)
+    expect(b.reviewCenterGate).toHaveBeenCalledTimes(2)
 
     await b.fiber?.dispose()
     expect(projectTeam?.getSnapshot()).toMatchObject({
@@ -474,6 +534,13 @@ describe('Project Workbench browser plugin lifecycle', () => {
       team: null,
       memberDraft: { kind: 'human', displayName: '' },
       memberDraftDirty: false,
+    })
+    expect(review?.getSnapshot()).toMatchObject({
+      phase: 'idle',
+      selection: null,
+      review: null,
+      proposalDraftDirty: false,
+      decisionDrafts: {},
     })
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
   })

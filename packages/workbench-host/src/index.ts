@@ -8,12 +8,18 @@ import type {
   AddProjectMemberResult,
   CreateProjectRequest,
   CreateProjectResult,
+  DecideSuggestedChangeRequest,
+  DecideSuggestedChangeResult,
   ProjectDetailProjection,
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
   ProjectTeamProjection,
   ProjectTeamQuery,
+  ProposeProjectResponsibilityChangeRequest,
+  ProposeProjectResponsibilityChangeResult,
+  ReviewCenterFilter,
+  ReviewCenterProjection,
   SetProjectMemberStatusRequest,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityRequest,
@@ -317,6 +323,33 @@ export class WorkbenchService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<SetProjectResponsibilityResult> {
     return this.scenario.setProjectResponsibility(request, signal)
+  }
+
+  /** Read one Project's proposal context and Host-filtered Review page. */
+  @Remote
+  reviewCenter(
+    filter: ReviewCenterFilter,
+    signal: AbortSignal,
+  ): Promise<ReviewCenterProjection | null> {
+    return this.scenario.reviewCenter(filter, signal)
+  }
+
+  /** Propose one complete Project Responsibility candidate against an exact Team base. */
+  @Remote
+  proposeProjectResponsibilityChange(
+    request: ProposeProjectResponsibilityChangeRequest,
+    signal: AbortSignal,
+  ): Promise<ProposeProjectResponsibilityChangeResult> {
+    return this.scenario.proposeProjectResponsibilityChange(request, signal)
+  }
+
+  /** Apply one closed Owner disposition to a SuggestedChange. */
+  @Remote
+  decideSuggestedChange(
+    request: DecideSuggestedChangeRequest,
+    signal: AbortSignal,
+  ): Promise<DecideSuggestedChangeResult> {
+    return this.scenario.decideSuggestedChange(request, signal)
   }
 }
 

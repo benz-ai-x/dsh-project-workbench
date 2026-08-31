@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T05 npm archives without touching publication.
+ * Create and inspect the real T06 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -90,6 +90,7 @@ const packageSpecs = [
       'lib/types/client/OwnerPage.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
       'lib/types/client/ProjectsPanel.d.ts',
+      'lib/types/client/ReviewCenterPanel.d.ts',
       'lib/types/client/WorkbenchStatusPage.d.ts',
       'lib/types/client/activity-controller.d.ts',
       'lib/types/client/auth-http.d.ts',
@@ -100,6 +101,7 @@ const packageSpecs = [
       'lib/types/client/owner-controller.d.ts',
       'lib/types/client/project-controller.d.ts',
       'lib/types/client/project-team-controller.d.ts',
+      'lib/types/client/review-controller.d.ts',
       'lib/types/client/style-lifecycle.d.ts',
       'lib/types/index.d.ts',
     ],
@@ -576,9 +578,9 @@ export default class PackedAuthFixture extends Service {
       && result?.createdProjectActivity?.integrity?.valid === true
       && result?.createdProjectActivity?.integrity?.eventCount === 2
       && result?.finalIntegrity?.valid === true
-      && result?.finalIntegrity?.eventCount === 8
+      && result?.finalIntegrity?.eventCount === 10
       && result?.finalIntegrity?.issue === null,
-    'clean consumer: Project audit and pending Outbox extend the verified ledger without business text',
+    'clean consumer: Project and Review audits extend the verified ledger without business text',
   )
   check(
     JSON.stringify(result?.restartActivity?.items)
@@ -593,8 +595,9 @@ export default class PackedAuthFixture extends Service {
         === result?.createdProjectActivity?.nextBeforeSequence
       && JSON.stringify(result?.restartProjectActivity?.integrity)
         === JSON.stringify(result?.finalIntegrity)
-      && result?.teamRoundTripVerified === true,
-    'clean consumer: installed Host recovers status, Project, Team, Activity, and integrity after restart',
+      && result?.teamRoundTripVerified === true
+      && result?.reviewRoundTripVerified === true,
+    'clean consumer: installed Host recovers status, Project, Team, Review, Activity, and integrity after restart',
   )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
@@ -657,6 +660,7 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 5)
 assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
 assert.ok(!('default' in hostContract))
 assert.equal(typeof client.apply, 'function')
@@ -666,9 +670,12 @@ const remoteMethods = [
   'addProjectMember',
   'auditIntegrity',
   'createProject',
+  'decideSuggestedChange',
   'project',
   'projectStart',
   'projectTeam',
+  'proposeProjectResponsibilityChange',
+  'reviewCenter',
   'setProjectMemberStatus',
   'setProjectResponsibility',
   'setStatus',
@@ -701,6 +708,8 @@ let createdProjectActivity
 let committedTeam
 let teamActivity
 let teamRoundTripVerified = false
+let acceptedReview
+let reviewRoundTripVerified = false
 let finalIntegrity
 let firstContext
 let firstService
@@ -1108,10 +1117,91 @@ try {
   ]) assert.equal(teamActivityJson.includes(privateValue), false)
   assert.equal(teamActivity.integrity.valid, true)
   assert.equal(teamActivity.integrity.eventCount, 8)
+
+  const reviewProposal = await firstAuth.run(() =>
+    firstService.proposeProjectResponsibilityChange({
+      projectId,
+      candidate: {
+        accountableMemberId: agentAdded.value.memberId,
+        contributorMemberIds: [],
+        humanSponsorMemberId: feishuAdded.value.memberId,
+      },
+      expectedTeamRevision: 6,
+      evidenceRefs: [{
+        kind: 'workbench-audit-event',
+        auditEventId: responsibilitySet.receipt.auditEventId,
+      }],
+      idempotencyKey: 'packed-review-proposal-idempotency-0001',
+      causationId: 'packed-review-proposal-causation-0001',
+      reason: 'owner-suggested-change-propose',
+    }, new AbortController().signal))
+  assert.equal(reviewProposal.ok, true)
+  assert.equal(reviewProposal.value.suggestedChangeRevision, 1)
+  assert.equal(reviewProposal.value.baseTargetVersion, 6)
+  assert.equal(reviewProposal.value.riskLevel, 'low')
+  const pendingReview = await firstAuth.run(() => firstService.reviewCenter({
+    projectId,
+    status: 'pending',
+    riskLevel: 'low',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(pendingReview.items.length, 1)
+  assert.equal(pendingReview.items[0].effectiveStatus, 'pending')
+  assert.deepEqual(pendingReview.items[0].proposedDiff.changedFields, ['contributors'])
+  assert.deepEqual(pendingReview.items[0].risk.proposedReasonCodes, ['contributors-only'])
+  assert.equal(pendingReview.items[0].evidence[0].auditEventId, responsibilitySet.receipt.auditEventId)
+
+  const reviewAcceptance = await firstAuth.run(() => firstService.decideSuggestedChange({
+    projectId,
+    suggestedChangeId: reviewProposal.value.suggestedChangeId,
+    expectedSuggestedChangeRevision: 1,
+    mode: 'accept',
+    acknowledgedRiskLevel: 'low',
+    feedback: 'Packed review confirms that the contributor assignment is complete.',
+    idempotencyKey: 'packed-review-decision-idempotency-0001',
+    causationId: 'packed-review-decision-causation-0001',
+    reason: 'owner-suggested-change-accept',
+  }, new AbortController().signal))
+  assert.equal(reviewAcceptance.ok, true)
+  assert.equal(reviewAcceptance.value.suggestedChangeRevision, 2)
+  assert.equal(reviewAcceptance.value.persistedState, 'accepted')
+  assert.equal(reviewAcceptance.value.appliedTeamRevision, 7)
+  assert.equal(reviewAcceptance.value.appliedResponsibilityRevision, 2)
+
+  committedTeam = await firstAuth.run(() => firstService.projectTeam(
+    { projectId },
+    new AbortController().signal,
+  ))
+  assert.equal(committedTeam.teamRevision, 7)
+  assert.equal(committedTeam.responsibility.revision, 2)
+  assert.deepEqual(committedTeam.responsibility.contributorMemberIds, [])
+  acceptedReview = await firstAuth.run(() => firstService.reviewCenter({
+    projectId,
+    status: 'accepted',
+    riskLevel: 'low',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(acceptedReview.items.length, 1)
+  assert.equal(acceptedReview.items[0].effectiveStatus, 'accepted')
+  assert.equal(acceptedReview.items[0].decisions[0].mode, 'accepted')
+  assert.equal(acceptedReview.items[0].decisions[0].appliedTeamRevision, 7)
+  const acceptedReviewActivity = await firstAuth.run(() => firstService.activity({
+    projectId,
+    action: 'workbench.suggested-change.accepted',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(acceptedReviewActivity.items.length, 1)
+  assert.equal(acceptedReviewActivity.items[0].eventId, reviewAcceptance.receipt.auditEventId)
+  const acceptedReviewActivityJson = JSON.stringify(acceptedReviewActivity)
+  assert.equal(acceptedReviewActivityJson.includes(
+    'Packed review confirms that the contributor assignment is complete.',
+  ), false)
+  assert.equal(acceptedReviewActivityJson.includes(responsibilitySet.receipt.auditEventId), false)
   finalIntegrity = await firstAuth.run(() => firstService.auditIntegrity(
     new AbortController().signal,
   ))
-  assert.deepEqual(finalIntegrity, teamActivity.integrity)
+  assert.deepEqual(finalIntegrity, acceptedReviewActivity.integrity)
+  assert.equal(finalIntegrity.eventCount, 10)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -1126,6 +1216,7 @@ let restartProjectStart
 let restartProject
 let restartProjectActivity
 let restartTeam
+let restartReview
 let secondContext
 let secondService
 try {
@@ -1172,6 +1263,14 @@ try {
   ))
   assert.deepEqual(restartTeam, committedTeam)
   teamRoundTripVerified = true
+  restartReview = await secondAuth.run(() => secondService.reviewCenter({
+    projectId: createdProject.project.projectId,
+    status: 'accepted',
+    riskLevel: 'low',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.deepEqual(restartReview, acceptedReview)
+  reviewRoundTripVerified = true
 } finally {
   await secondContext?.fiber.dispose()
 }
@@ -1201,6 +1300,8 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   createdProjectStart,
   createdProjectActivity,
   teamRoundTripVerified,
+  acceptedReview,
+  reviewRoundTripVerified,
   finalIntegrity,
   restartSnapshot,
   restartActivity,
@@ -1208,6 +1309,7 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   restartProjectStart,
   restartProject,
   restartProjectActivity,
+  restartReview,
   firstLifecycle: firstService.scenario.lifecycle,
   secondLifecycle: secondService.scenario.lifecycle,
   firstRepositoryClosed: firstService.scenario.options.repository.closed,

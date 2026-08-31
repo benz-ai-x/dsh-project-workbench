@@ -11,6 +11,7 @@ import { OwnerAuthHttpAdapter, type OwnerAuthHttp } from './auth-http.ts'
 import { type WorkbenchRemote } from './controller.ts'
 import type { WorkbenchProjectRemote } from './project-controller.ts'
 import type { WorkbenchProjectTeamRemote } from './project-team-controller.ts'
+import type { WorkbenchReviewRemote } from './review-controller.ts'
 import { OwnerController } from './owner-controller.ts'
 import { OwnerPage } from './OwnerPage.tsx'
 import { en, NS, zh, type WorkbenchKey } from './locales.ts'
@@ -37,6 +38,7 @@ export function registerWorkbenchUi(
   const workbench = ctx.get('remote.workbench') as WorkbenchRemote
     & WorkbenchProjectRemote
     & WorkbenchProjectTeamRemote
+    & WorkbenchReviewRemote
   const connection = ctx.get('connection') as ConnectionHandle
   const controller = new OwnerController(auth, workbench)
 

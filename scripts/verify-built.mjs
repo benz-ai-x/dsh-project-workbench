@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T05 actually loads.
+ * Verify the executable artifacts that T06 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -84,6 +84,7 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 5, `${packageName}: built SQLite authority exports Schema v5`)
   }
 
   const browserContract = await importArtifact(hostDir, './lib/client.js', `${packageName}: browser-safe contract`)
@@ -247,6 +248,9 @@ function verifyTypertFace(face, packageName, label) {
     'project',
     'projectStart',
     'projectTeam',
+    'proposeProjectResponsibilityChange',
+    'reviewCenter',
+    'decideSuggestedChange',
     'setProjectMemberStatus',
     'setProjectResponsibility',
     'setStatus',
@@ -254,7 +258,7 @@ function verifyTypertFace(face, packageName, label) {
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the eleven T05 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the fourteen T06 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -267,6 +271,13 @@ function verifyTypertFace(face, packageName, label) {
   const project = invocations.find(invocation => invocation?.method === 'project')
   const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
   const projectTeam = invocations.find(invocation => invocation?.method === 'projectTeam')
+  const proposeProjectResponsibilityChange = invocations.find(
+    invocation => invocation?.method === 'proposeProjectResponsibilityChange',
+  )
+  const reviewCenter = invocations.find(invocation => invocation?.method === 'reviewCenter')
+  const decideSuggestedChange = invocations.find(
+    invocation => invocation?.method === 'decideSuggestedChange',
+  )
   const setProjectMemberStatus = invocations.find(
     invocation => invocation?.method === 'setProjectMemberStatus',
   )
@@ -283,6 +294,9 @@ function verifyTypertFace(face, packageName, label) {
     project,
     projectStart,
     projectTeam,
+    proposeProjectResponsibilityChange,
+    reviewCenter,
+    decideSuggestedChange,
     setProjectMemberStatus,
     setProjectResponsibility,
     setStatus,
@@ -321,6 +335,33 @@ function verifyTypertFace(face, packageName, label) {
       'outboxId',
     ]),
     `${packageName}: ${label} command receipt contains command, audit, and Outbox identities`,
+  )
+  const activityFilter = activity?.parameters?.find(parameter => parameter?.name === 'filter')
+  check(
+    sameStrings(schemaObjectKeys(activityFilter?.codec?.schema), [
+      'action',
+      'beforeSequence',
+      'limit',
+      'objectId',
+      'objectType',
+      'projectId',
+    ]),
+    `${packageName}: ${label} Activity filter exposes only the stable query fields`,
+  )
+  check(
+    schemaAccepts(activityFilter?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      objectType: 'suggested-change',
+      action: 'workbench.suggested-change.edited-accepted',
+      limit: 5,
+    })
+      && schemaRejects(activityFilter?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        objectType: 'suggested-change',
+        action: 'workbench.suggested-change.unknown',
+        limit: 5,
+      }),
+    `${packageName}: ${label} Activity filter carries T06 SuggestedChange vocabulary and rejects unknown actions`,
   )
   const activityShape = unwrapSchema(activity?.result?.schema)?.def?.shape
   check(
@@ -729,6 +770,338 @@ function verifyTypertFace(face, packageName, label) {
     `${packageName}: ${label} responsibility carrier rejects caller committed revision`,
   )
 
+  const reviewFilter = reviewCenter?.parameters?.find(parameter => parameter?.name === 'filter')
+  const reviewFilterShape = unwrapSchema(reviewFilter?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(reviewFilter?.codec?.schema), [
+      'actor',
+      'beforeSequence',
+      'limit',
+      'organizationId',
+      'projectId',
+      'riskLevel',
+      'status',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(reviewFilterShape?.[key])),
+    `${packageName}: ${label} Review Center filter exposes five states, risk, paging, and no caller authority`,
+  )
+  check(
+    schemaAccepts(reviewFilter?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      status: 'stale',
+      riskLevel: 'high',
+      beforeSequence: 9,
+      limit: 5,
+    })
+      && schemaRejects(reviewFilter?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        status: 'pending',
+        actor: 'caller-forged-owner',
+      })
+      && schemaRejects(reviewFilter?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        status: 'disconnected',
+      }),
+    `${packageName}: ${label} Review Center carrier accepts stale and rejects authority or transport-state forgery`,
+  )
+  const reviewProjection = unionOptions(reviewCenter?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('proposalBuilder'))
+    ?? reviewCenter?.result?.schema
+  const reviewProjectionShape = unwrapSchema(reviewProjection)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(reviewProjection), [
+      'items',
+      'nextBeforeSequence',
+      'projectId',
+      'proposalBuilder',
+    ])
+      && sameStrings(schemaObjectKeys(reviewProjectionShape?.proposalBuilder), [
+        'base',
+        'evidenceOptions',
+        'memberOptions',
+        'projectId',
+        'responsibilityRevision',
+        'teamRevision',
+      ]),
+    `${packageName}: ${label} Review Center returns one-round-trip proposal context and a stable page`,
+  )
+  const reviewMemberOption = arrayElementSchema(
+    unwrapSchema(reviewProjectionShape?.proposalBuilder)?.def?.shape?.memberOptions,
+  )
+  check(
+    sameStrings(schemaObjectKeys(reviewMemberOption), [
+      'canBeHumanSponsor',
+      'displayName',
+      'kind',
+      'memberId',
+      'requiresHumanSponsor',
+      'status',
+    ]),
+    `${packageName}: ${label} proposal context distinguishes sponsor eligibility from sponsor requirement`,
+  )
+  const reviewItem = arrayElementSchema(reviewProjectionShape?.items)
+  const reviewItemShape = unwrapSchema(reviewItem)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(reviewItem), [
+      'allowedDecisions',
+      'createdAt',
+      'decisions',
+      'effectiveStatus',
+      'evidence',
+      'originCausationId',
+      'persistedState',
+      'projectId',
+      'proposedDiff',
+      'revision',
+      'risk',
+      'sequence',
+      'source',
+      'suggestedChangeId',
+      'target',
+      'updatedAt',
+    ]),
+    `${packageName}: ${label} Review card retains source, target, diff, evidence, risk, causation, state, and history`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(reviewItemShape?.target), [
+      'adapter',
+      'baseResponsibilityRevision',
+      'baseTeamRevision',
+      'currentResponsibilityRevision',
+      'currentTeamRevision',
+      'kind',
+      'projectId',
+      'representationSchemaVersion',
+    ])
+      && sameStrings(schemaObjectKeys(reviewItemShape?.proposedDiff), [
+        'after',
+        'before',
+        'changedFields',
+        'digest',
+        'kind',
+        'schemaVersion',
+      ])
+      && sameStrings(schemaObjectKeys(reviewItemShape?.risk), [
+        'batchPolicy',
+        'effectiveLevel',
+        'policyVersion',
+        'proposedLevel',
+        'proposedReasonCodes',
+      ]),
+    `${packageName}: ${label} Review card exposes immutable and current versions plus typed diff and Host risk`,
+  )
+  const reviewEvidence = arrayElementSchema(reviewItemShape?.evidence)
+  const reviewDecision = arrayElementSchema(reviewItemShape?.decisions)
+  check(
+    sameStrings(schemaObjectKeys(reviewEvidence), [
+      'action',
+      'auditEventId',
+      'kind',
+      'object',
+      'occurredAt',
+      'summaryCode',
+    ])
+      && sameStrings(schemaObjectKeys(reviewDecision), [
+        'actor',
+        'appliedDiff',
+        'appliedResponsibilityRevision',
+        'appliedRiskLevel',
+        'appliedRiskReasonCodes',
+        'appliedTeamRevision',
+        'causationId',
+        'decidedAt',
+        'decisionId',
+        'feedback',
+        'mode',
+        'receipt',
+        'suggestedChangeRevision',
+      ]),
+    `${packageName}: ${label} Review card carries immutable EvidenceRefs and append-only decision provenance`,
+  )
+
+  const proposalRequest = proposeProjectResponsibilityChange?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const proposalShape = unwrapSchema(proposalRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(proposalRequest?.codec?.schema), [
+      'actor',
+      'candidate',
+      'causationId',
+      'diff',
+      'digest',
+      'evidenceRefs',
+      'expectedTeamRevision',
+      'idempotencyKey',
+      'organizationId',
+      'projectId',
+      'reason',
+      'risk',
+      'source',
+      'suggestedChangeId',
+      'target',
+      'teamId',
+    ])
+      && ['actor', 'diff', 'digest', 'organizationId', 'risk', 'source',
+        'suggestedChangeId', 'target', 'teamId']
+        .every(key => isOptionalNever(proposalShape?.[key])),
+    `${packageName}: ${label} proposal accepts semantic intent while rejecting every Host-derived envelope field`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(proposalShape?.candidate), [
+      'accountableMemberId',
+      'contributorMemberIds',
+      'humanSponsorMemberId',
+    ])
+      && sameStrings(schemaObjectKeys(arrayElementSchema(proposalShape?.evidenceRefs)), [
+        'auditEventId',
+        'kind',
+      ]),
+    `${packageName}: ${label} proposal carries one complete responsibility candidate and typed audit evidence refs`,
+  )
+  const proposalBase = {
+    projectId: 'project-built-artifact',
+    candidate: {
+      accountableMemberId: 'member-built-agent',
+      contributorMemberIds: ['member-built-contributor'],
+      humanSponsorMemberId: 'member-built-sponsor',
+    },
+    expectedTeamRevision: 4,
+    evidenceRefs: [{ kind: 'workbench-audit-event', auditEventId: 'audit-built-evidence' }],
+    idempotencyKey: 'built-proposal-idempotency-0001',
+    causationId: 'built-proposal-causation-0001',
+    reason: 'owner-suggested-change-propose',
+  }
+  check(
+    schemaAccepts(proposalRequest?.codec?.schema, proposalBase)
+      && schemaRejects(proposalRequest?.codec?.schema, {
+        ...proposalBase,
+        risk: { proposedLevel: 'low' },
+      })
+      && schemaRejects(proposalRequest?.codec?.schema, {
+        ...proposalBase,
+        source: { kind: 'owner', actorId: 'caller-forged-owner' },
+      }),
+    `${packageName}: ${label} proposal carrier accepts typed intent and rejects forged risk or source`,
+  )
+  const proposalSuccess = unionOptions(proposeProjectResponsibilityChange?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('receipt'))
+  const proposalSuccessShape = unwrapSchema(proposalSuccess)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(proposalSuccess), ['ok', 'receipt', 'value'])
+      && sameStrings(schemaObjectKeys(proposalSuccessShape?.value), [
+        'baseTargetVersion',
+        'persistedState',
+        'riskLevel',
+        'suggestedChangeId',
+        'suggestedChangeRevision',
+        'targetAdapter',
+      ]),
+    `${packageName}: ${label} proposal success returns a PII-free Review acknowledgement and receipt`,
+  )
+
+  const decisionRequest = decideSuggestedChange?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const decisionOptions = unionOptions(decisionRequest?.codec?.schema)
+  check(
+    decisionOptions.length === 4
+      && decisionOptions.every(option => sameStrings(schemaObjectKeys(option), [
+        'acknowledgedRiskLevel',
+        'actor',
+        'candidate',
+        'causationId',
+        'diff',
+        'expectedSuggestedChangeRevision',
+        'expectedTargetVersion',
+        'feedback',
+        'idempotencyKey',
+        'mode',
+        'organizationId',
+        'projectId',
+        'reason',
+        'risk',
+        'source',
+        'suggestedChangeId',
+        'target',
+        'teamId',
+      ])),
+    `${packageName}: ${label} decision is a closed four-mode discriminated carrier`,
+  )
+  const decisionBase = {
+    projectId: 'project-built-artifact',
+    suggestedChangeId: 'suggested-change-built-artifact',
+    expectedSuggestedChangeRevision: 1,
+    feedback: 'Built artifact reviewer feedback',
+    idempotencyKey: 'built-decision-idempotency-0001',
+    causationId: 'built-decision-causation-0001',
+  }
+  check(
+    schemaAccepts(decisionRequest?.codec?.schema, {
+      ...decisionBase,
+      mode: 'accept',
+      acknowledgedRiskLevel: 'low',
+      reason: 'owner-suggested-change-accept',
+    })
+      && schemaAccepts(decisionRequest?.codec?.schema, {
+        ...decisionBase,
+        mode: 'edit-and-accept',
+        acknowledgedRiskLevel: 'high',
+        candidate: proposalBase.candidate,
+        reason: 'owner-suggested-change-edit-accept',
+      })
+      && schemaAccepts(decisionRequest?.codec?.schema, {
+        ...decisionBase,
+        mode: 'reject',
+        reason: 'owner-suggested-change-reject',
+      })
+      && schemaAccepts(decisionRequest?.codec?.schema, {
+        ...decisionBase,
+        mode: 'defer',
+        reason: 'owner-suggested-change-defer',
+      }),
+    `${packageName}: ${label} decision carrier accepts accept, edited accept, reject, and defer`,
+  )
+  check(
+    schemaRejects(decisionRequest?.codec?.schema, {
+      ...decisionBase,
+      mode: 'accept',
+      reason: 'owner-suggested-change-accept',
+    })
+      && schemaRejects(decisionRequest?.codec?.schema, {
+        ...decisionBase,
+        mode: 'reject',
+        acknowledgedRiskLevel: 'low',
+        reason: 'owner-suggested-change-reject',
+      })
+      && schemaRejects(decisionRequest?.codec?.schema, {
+        ...decisionBase,
+        mode: 'accept',
+        acknowledgedRiskLevel: 'low',
+        expectedTargetVersion: 4,
+        reason: 'owner-suggested-change-accept',
+      }),
+    `${packageName}: ${label} decision carrier requires risk acknowledgement only for acceptance and forbids target-version forgery`,
+  )
+  const decisionSuccess = unionOptions(decideSuggestedChange?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('receipt'))
+  const decisionSuccessShape = unwrapSchema(decisionSuccess)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(decisionSuccess), ['ok', 'receipt', 'value'])
+      && sameStrings(schemaObjectKeys(decisionSuccessShape?.value), [
+        'appliedResponsibilityRevision',
+        'appliedTeamRevision',
+        'decisionMode',
+        'persistedState',
+        'riskLevel',
+        'suggestedChangeId',
+        'suggestedChangeRevision',
+      ]),
+    `${packageName}: ${label} decision success returns Review and applied target versions with one receipt`,
+  )
+
   for (const [invocation, expectedValueKeys, commandLabel] of [
     [
       addProjectMember,
@@ -790,7 +1163,14 @@ function unwrapSchema(value) {
 }
 
 function schemaObjectKeys(value) {
-  const shape = unwrapSchema(value)?.def?.shape
+  const unwrapped = unwrapSchema(value)
+  if (unwrapped?.def?.type === 'intersection') {
+    return [...new Set([
+      ...schemaObjectKeys(unwrapped.def.left),
+      ...schemaObjectKeys(unwrapped.def.right),
+    ])].sort()
+  }
+  const shape = unwrapped?.def?.shape
   return shape !== null && typeof shape === 'object' && !Array.isArray(shape)
     ? Object.keys(shape).sort()
     : []

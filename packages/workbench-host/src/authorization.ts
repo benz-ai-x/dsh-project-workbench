@@ -15,6 +15,8 @@ export type WorkbenchAction =
   | 'workbench.project.member.create'
   | 'workbench.project.member.status.write'
   | 'workbench.project.responsibility.write'
+  | 'workbench.review.read'
+  | 'workbench.review.decide'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

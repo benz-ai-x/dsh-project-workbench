@@ -56,6 +56,11 @@ export interface AuditCommandReference {
     | 'workbench.project-member.add'
     | 'workbench.project-member.set-status'
     | 'workbench.project.set-responsibility'
+    | 'workbench.suggested-change.propose'
+    | 'workbench.suggested-change.accept'
+    | 'workbench.suggested-change.edit-accept'
+    | 'workbench.suggested-change.reject'
+    | 'workbench.suggested-change.defer'
 }
 
 export interface AuditCausationReference {
@@ -411,7 +416,12 @@ function normalizeReason(value: unknown): AuditReason {
     && record.code !== 'owner-project-create'
     && record.code !== 'owner-project-member-add'
     && record.code !== 'owner-project-member-status-change'
-    && record.code !== 'owner-project-responsibility-set') {
+    && record.code !== 'owner-project-responsibility-set'
+    && record.code !== 'owner-suggested-change-propose'
+    && record.code !== 'owner-suggested-change-accept'
+    && record.code !== 'owner-suggested-change-edit-accept'
+    && record.code !== 'owner-suggested-change-reject'
+    && record.code !== 'owner-suggested-change-defer') {
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -499,7 +509,12 @@ function auditAction(value: unknown): WorkbenchAuditAction {
     && value !== 'workbench.project.created'
     && value !== 'workbench.project-member.created'
     && value !== 'workbench.project-member.status-changed'
-    && value !== 'workbench.project.responsibility-assigned') {
+    && value !== 'workbench.project.responsibility-assigned'
+    && value !== 'workbench.suggested-change.proposed'
+    && value !== 'workbench.suggested-change.accepted'
+    && value !== 'workbench.suggested-change.edited-accepted'
+    && value !== 'workbench.suggested-change.rejected'
+    && value !== 'workbench.suggested-change.deferred') {
     throw new TypeError('Audit action is unsupported')
   }
   return value
@@ -509,7 +524,8 @@ function auditObjectType(value: unknown): WorkbenchAuditObjectType {
   if (value !== 'workbench-status'
     && value !== 'project'
     && value !== 'project-member'
-    && value !== 'project-responsibility') {
+    && value !== 'project-responsibility'
+    && value !== 'suggested-change') {
     throw new TypeError('Audit object type is unsupported')
   }
   return value
@@ -520,7 +536,12 @@ function auditCommandType(value: unknown): AuditCommandReference['type'] {
     && value !== 'workbench.project.create'
     && value !== 'workbench.project-member.add'
     && value !== 'workbench.project-member.set-status'
-    && value !== 'workbench.project.set-responsibility') {
+    && value !== 'workbench.project.set-responsibility'
+    && value !== 'workbench.suggested-change.propose'
+    && value !== 'workbench.suggested-change.accept'
+    && value !== 'workbench.suggested-change.edit-accept'
+    && value !== 'workbench.suggested-change.reject'
+    && value !== 'workbench.suggested-change.defer') {
     throw new TypeError('Audit command type is unsupported')
   }
   return value
@@ -531,7 +552,12 @@ function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
     && value !== 'project-created-from-template'
     && value !== 'project-member-created'
     && value !== 'project-member-status-changed'
-    && value !== 'project-responsibility-assigned') {
+    && value !== 'project-responsibility-assigned'
+    && value !== 'suggested-change-proposed'
+    && value !== 'suggested-change-accepted'
+    && value !== 'suggested-change-edited-accepted'
+    && value !== 'suggested-change-rejected'
+    && value !== 'suggested-change-deferred') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -592,6 +618,41 @@ function assertCorrelatedVocabulary(
             'teamRevision',
           ])
           && scope.projectId === object.id
+      case 'workbench.suggested-change.proposed':
+        return reason.code === 'owner-suggested-change-propose'
+          && object.type === 'suggested-change'
+          && command.type === 'workbench.suggested-change.propose'
+          && summary.code === 'suggested-change-proposed'
+          && exactChangedFields(summary, ['proposal', 'risk', 'evidence'])
+          && scope.projectId !== null
+      case 'workbench.suggested-change.accepted':
+        return reason.code === 'owner-suggested-change-accept'
+          && object.type === 'suggested-change'
+          && command.type === 'workbench.suggested-change.accept'
+          && summary.code === 'suggested-change-accepted'
+          && exactChangedFields(summary, ['decision', 'target'])
+          && scope.projectId !== null
+      case 'workbench.suggested-change.edited-accepted':
+        return reason.code === 'owner-suggested-change-edit-accept'
+          && object.type === 'suggested-change'
+          && command.type === 'workbench.suggested-change.edit-accept'
+          && summary.code === 'suggested-change-edited-accepted'
+          && exactChangedFields(summary, ['decision', 'target'])
+          && scope.projectId !== null
+      case 'workbench.suggested-change.rejected':
+        return reason.code === 'owner-suggested-change-reject'
+          && object.type === 'suggested-change'
+          && command.type === 'workbench.suggested-change.reject'
+          && summary.code === 'suggested-change-rejected'
+          && exactChangedFields(summary, ['decision'])
+          && scope.projectId !== null
+      case 'workbench.suggested-change.deferred':
+        return reason.code === 'owner-suggested-change-defer'
+          && object.type === 'suggested-change'
+          && command.type === 'workbench.suggested-change.defer'
+          && summary.code === 'suggested-change-deferred'
+          && exactChangedFields(summary, ['decision'])
+          && scope.projectId !== null
     }
   })()
   if (!correlated) {

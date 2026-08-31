@@ -5,9 +5,15 @@ import type {
   AddProjectMemberResult,
   CreateProjectRequest,
   CreateProjectResult,
+  DecideSuggestedChangeRequest,
+  DecideSuggestedChangeResult,
   ProjectDetailProjection,
   ProjectMemberProjection,
   ProjectResponsibilityProjection,
+  ProposeProjectResponsibilityChangeRequest,
+  ProposeProjectResponsibilityChangeResult,
+  ReviewCenterProjection,
+  SuggestedChangeProjection,
   ProjectStartProjection,
   ProjectTeamProjection,
   SetProjectMemberStatusRequest,
@@ -30,8 +36,11 @@ import type {
   WorkbenchProjectStartQuery,
   WorkbenchProjectTeamReadQuery,
   WorkbenchRepository,
+  WorkbenchReviewCenterQuery,
   WorkbenchStatusMutation,
   WorkbenchStatusSnapshot,
+  WorkbenchSuggestedChangeDecisionMutation,
+  WorkbenchSuggestedChangeProposalMutation,
 } from '../src/index.ts'
 
 const TEST_AUDIT_GENESIS = `sha256:${'0'.repeat(64)}`
@@ -41,7 +50,11 @@ import {
   KNOWLEDGE_WORK_TEMPLATE_PROJECTION_V1,
   WorkbenchScenario,
 } from '../src/index.ts'
-import { WorkbenchAuthorizationContext, type WorkbenchAuthorization } from '../src/authorization.ts'
+import {
+  WorkbenchAuthorizationContext,
+  type WorkbenchAction,
+  type WorkbenchAuthorization,
+} from '../src/authorization.ts'
 
 const authorization = Object.freeze({
   require: () => Promise.resolve(Object.freeze({
@@ -67,16 +80,24 @@ class MemoryRepository implements WorkbenchRepository {
   projectMemberWriteCalls = 0
   projectMemberStatusWriteCalls = 0
   projectResponsibilityWriteCalls = 0
+  reviewCenterReadCalls = 0
+  suggestedChangeProposalWriteCalls = 0
+  suggestedChangeDecisionWriteCalls = 0
   catalogRevision = 0
   readonly projects = new Map<string, ProjectDetailProjection>()
   readonly members = new Map<string, ProjectMemberProjection>()
   readonly responsibilities = new Map<string, ProjectResponsibilityProjection>()
   readonly teamRevisions = new Map<string, number>()
+  readonly suggestedChanges = new Map<string, SuggestedChangeProjection>()
+  suggestedChangeSequence = 0
   onSnapshot: ((signal: AbortSignal) => Promise<void>) | undefined
   onSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
   afterSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
   onCreateProject: ((signal: AbortSignal) => Promise<void>) | undefined
   afterCreateProject: ((signal: AbortSignal) => Promise<void>) | undefined
+  onReviewCenter: ((signal: AbortSignal) => Promise<void>) | undefined
+  onSuggestedChangeProposal: ((signal: AbortSignal) => Promise<void>) | undefined
+  onSuggestedChangeDecision: ((signal: AbortSignal) => Promise<void>) | undefined
 
   async open(): Promise<void> {
     this.openCalls += 1
@@ -533,6 +554,312 @@ class MemoryRepository implements WorkbenchRepository {
     }
   }
 
+  lastReviewCenterQuery: WorkbenchReviewCenterQuery | null = null
+
+  async readReviewCenter(
+    query: WorkbenchReviewCenterQuery,
+    signal: AbortSignal,
+  ): Promise<ReviewCenterProjection | null> {
+    this.reviewCenterReadCalls += 1
+    this.lastReviewCenterQuery = query
+    await this.onReviewCenter?.(signal)
+    if (!this.projects.has(query.filter.projectId)) return null
+    const projectId = query.filter.projectId
+    const teamRevision = this.teamRevisions.get(projectId) ?? 0
+    const currentResponsibility = this.responsibilities.get(projectId)
+    const limit = query.filter.limit ?? 20
+    const candidates = [...this.suggestedChanges.values()]
+      .filter(item => item.projectId === projectId)
+      .map(item => reviewCardAtTeamRevision(item, teamRevision, currentResponsibility?.revision ?? null))
+      .filter(item => query.filter.status === undefined
+        || item.effectiveStatus === query.filter.status)
+      .filter(item => query.filter.riskLevel === undefined
+        || item.risk.effectiveLevel === query.filter.riskLevel)
+      .filter(item => query.filter.beforeSequence === undefined
+        || item.sequence < query.filter.beforeSequence)
+      .sort((left, right) => right.sequence - left.sequence)
+    const items = candidates.slice(0, limit)
+    return {
+      projectId,
+      proposalBuilder: {
+        projectId,
+        teamRevision,
+        responsibilityRevision: currentResponsibility?.revision ?? null,
+        base: currentResponsibility === undefined
+          ? {
+            accountableMemberId: null,
+            contributorMemberIds: [],
+            humanSponsorMemberId: null,
+          }
+          : {
+            accountableMemberId: currentResponsibility.accountableMemberId,
+            contributorMemberIds: [...currentResponsibility.contributorMemberIds],
+            humanSponsorMemberId: currentResponsibility.humanSponsorMemberId,
+          },
+        memberOptions: [...this.members.values()]
+          .filter(member => member.projectId === projectId)
+          .sort((left, right) => left.memberId.localeCompare(right.memberId))
+          .map(member => ({
+            memberId: member.memberId,
+            displayName: member.displayName,
+            kind: member.kind,
+            status: member.status,
+            canBeHumanSponsor: member.kind === 'human',
+          })),
+        evidenceOptions: [reviewEvidence('audit-evidence-001', projectId)],
+      },
+      items,
+      nextBeforeSequence: candidates.length > items.length
+        ? items.at(-1)?.sequence ?? null
+        : null,
+    }
+  }
+
+  lastSuggestedChangeProposalMutation: WorkbenchSuggestedChangeProposalMutation | null = null
+
+  async commitSuggestedChangeProposal(
+    mutation: WorkbenchSuggestedChangeProposalMutation,
+    signal: AbortSignal,
+  ): Promise<ProposeProjectResponsibilityChangeResult> {
+    this.suggestedChangeProposalWriteCalls += 1
+    this.lastSuggestedChangeProposalMutation = mutation
+    await this.onSuggestedChangeProposal?.(signal)
+    if (!this.projects.has(mutation.projectId)) return projectNotFound(mutation.projectId)
+    const teamRevision = this.teamRevisions.get(mutation.projectId) ?? 0
+    if (teamRevision !== mutation.expectedTeamRevision) {
+      return teamConflict(mutation.expectedTeamRevision, teamRevision)
+    }
+    const evidenceIds = mutation.evidenceRefs.map(reference => reference.auditEventId)
+    if (new Set(evidenceIds).size !== evidenceIds.length) {
+      return {
+        ok: false,
+        error: {
+          code: 'evidence-invalid',
+          message: 'fixture duplicate evidence',
+          reason: 'duplicate',
+        },
+      }
+    }
+    const current = this.responsibilities.get(mutation.projectId)
+    const before = current === undefined
+      ? {
+        accountableMemberId: null,
+        contributorMemberIds: [] as string[],
+        humanSponsorMemberId: null,
+      }
+      : {
+        accountableMemberId: current.accountableMemberId,
+        contributorMemberIds: [...current.contributorMemberIds],
+        humanSponsorMemberId: current.humanSponsorMemberId,
+      }
+    const changedFields = responsibilityChangedFields(before, mutation.candidate)
+    if (changedFields.length === 0) {
+      return {
+        ok: false,
+        error: { code: 'no-op-suggested-change', message: 'fixture no-op' },
+      }
+    }
+    const risk = responsibilityRisk(before, mutation.candidate)
+    this.suggestedChangeSequence += 1
+    const item: SuggestedChangeProjection = {
+      suggestedChangeId: mutation.suggestedChangeId,
+      sequence: this.suggestedChangeSequence,
+      revision: 1,
+      projectId: mutation.projectId,
+      source: { kind: 'owner', actorId: mutation.command.actor.id },
+      target: {
+        kind: 'project-responsibility',
+        adapter: 'project-responsibility.replace',
+        representationSchemaVersion: 1,
+        projectId: mutation.projectId,
+        baseTeamRevision: teamRevision,
+        baseResponsibilityRevision: current?.revision ?? null,
+        currentTeamRevision: teamRevision,
+        currentResponsibilityRevision: current?.revision ?? null,
+      },
+      proposedDiff: {
+        kind: 'project-responsibility.diff',
+        schemaVersion: 1,
+        before,
+        after: { ...mutation.candidate, contributorMemberIds: [...mutation.candidate.contributorMemberIds] },
+        changedFields,
+        digest: `sha256:${'1'.repeat(64)}`,
+      },
+      evidence: mutation.evidenceRefs.map(reference =>
+        reviewEvidence(reference.auditEventId, mutation.projectId)),
+      risk: {
+        proposedLevel: risk.level,
+        effectiveLevel: risk.level,
+        proposedReasonCodes: risk.reasons,
+        policyVersion: 'project-responsibility-v1',
+        batchPolicy: risk.level === 'low'
+          ? {
+            policy: 'eligible-later',
+            homogeneityKey: 'project-responsibility.replace|low|project-responsibility-v1',
+          }
+          : { policy: 'forbidden', reason: 'high-risk' },
+      },
+      originCausationId: mutation.command.causationId,
+      persistedState: 'pending',
+      effectiveStatus: 'pending',
+      decisions: [],
+      allowedDecisions: ['accept', 'edit-and-accept', 'reject', 'defer'],
+      createdAt: mutation.createdAt,
+      updatedAt: mutation.createdAt,
+    }
+    this.suggestedChanges.set(item.suggestedChangeId, item)
+    return {
+      ok: true,
+      value: {
+        suggestedChangeId: item.suggestedChangeId,
+        suggestedChangeRevision: 1,
+        targetAdapter: 'project-responsibility.replace',
+        baseTargetVersion: teamRevision,
+        persistedState: 'pending',
+        riskLevel: risk.level,
+      },
+      receipt: receipt(mutation),
+    }
+  }
+
+  lastSuggestedChangeDecisionMutation: WorkbenchSuggestedChangeDecisionMutation | null = null
+
+  async commitSuggestedChangeDecision(
+    mutation: WorkbenchSuggestedChangeDecisionMutation,
+    signal: AbortSignal,
+  ): Promise<DecideSuggestedChangeResult> {
+    this.suggestedChangeDecisionWriteCalls += 1
+    this.lastSuggestedChangeDecisionMutation = mutation
+    await this.onSuggestedChangeDecision?.(signal)
+    if (!this.projects.has(mutation.projectId)) return projectNotFound(mutation.projectId)
+    const stored = this.suggestedChanges.get(mutation.suggestedChangeId)
+    if (stored === undefined || stored.projectId !== mutation.projectId) {
+      return {
+        ok: false,
+        error: {
+          code: 'suggested-change-not-found',
+          message: 'fixture SuggestedChange missing',
+          suggestedChangeId: mutation.suggestedChangeId,
+        },
+      }
+    }
+    if (stored.revision !== mutation.expectedSuggestedChangeRevision) {
+      return {
+        ok: false,
+        error: {
+          code: 'suggested-change-revision-conflict',
+          message: 'fixture SuggestedChange revision conflict',
+          expectedSuggestedChangeRevision: mutation.expectedSuggestedChangeRevision,
+          currentSuggestedChangeRevision: stored.revision,
+        },
+      }
+    }
+    const teamRevision = this.teamRevisions.get(mutation.projectId) ?? 0
+    const effective = reviewCardAtTeamRevision(
+      stored,
+      teamRevision,
+      this.responsibilities.get(mutation.projectId)?.revision ?? null,
+    )
+    if (effective.effectiveStatus === 'accepted' || effective.effectiveStatus === 'rejected') {
+      return {
+        ok: false,
+        error: {
+          code: 'suggested-change-state-conflict',
+          message: 'fixture terminal conflict',
+          status: effective.effectiveStatus,
+          attemptedMode: mutation.mode,
+        },
+      }
+    }
+    if (effective.effectiveStatus === 'stale' && mutation.mode !== 'reject') {
+      return {
+        ok: false,
+        error: {
+          code: 'suggested-change-stale',
+          message: 'fixture stale',
+          baseTeamRevision: stored.target.baseTeamRevision,
+          currentTeamRevision: teamRevision,
+        },
+      }
+    }
+    if ((mutation.mode === 'accept' || mutation.mode === 'edit-and-accept')
+      && mutation.acknowledgedRiskLevel !== stored.risk.effectiveLevel) {
+      return {
+        ok: false,
+        error: {
+          code: 'risk-acknowledgement-mismatch',
+          message: 'fixture risk mismatch',
+          requiredRiskLevel: stored.risk.effectiveLevel,
+        },
+      }
+    }
+    const persistedState = mutation.mode === 'reject'
+      ? 'rejected'
+      : mutation.mode === 'defer' ? 'deferred' : 'accepted'
+    const decisionMode = mutation.mode === 'edit-and-accept'
+      ? 'edited-accepted'
+      : mutation.mode === 'accept' ? 'accepted' : persistedState
+    const nextRevision = stored.revision + 1
+    let appliedTeamRevision: number | null = null
+    let appliedResponsibilityRevision: number | null = null
+    if (mutation.mode === 'accept' || mutation.mode === 'edit-and-accept') {
+      const candidate = mutation.mode === 'accept' ? stored.proposedDiff.after : mutation.candidate
+      const current = this.responsibilities.get(mutation.projectId)
+      appliedResponsibilityRevision = (current?.revision ?? 0) + 1
+      appliedTeamRevision = teamRevision + 1
+      this.responsibilities.set(mutation.projectId, {
+        projectId: mutation.projectId,
+        revision: appliedResponsibilityRevision,
+        accountableMemberId: candidate.accountableMemberId,
+        contributorMemberIds: [...candidate.contributorMemberIds],
+        humanSponsorMemberId: candidate.humanSponsorMemberId,
+        updatedAt: mutation.decidedAt,
+      })
+      this.teamRevisions.set(mutation.projectId, appliedTeamRevision)
+    }
+    const updated: SuggestedChangeProjection = {
+      ...stored,
+      revision: nextRevision,
+      persistedState,
+      effectiveStatus: persistedState,
+      decisions: [...stored.decisions, {
+        decisionId: mutation.decisionId,
+        suggestedChangeRevision: nextRevision,
+        mode: decisionMode,
+        actor: { kind: 'owner', id: mutation.command.actor.id },
+        feedback: mutation.feedback,
+        appliedDiff: null,
+        appliedRiskLevel: mutation.mode === 'accept' || mutation.mode === 'edit-and-accept'
+          ? stored.risk.effectiveLevel
+          : null,
+        appliedRiskReasonCodes: [],
+        appliedTeamRevision,
+        appliedResponsibilityRevision,
+        causationId: mutation.command.causationId,
+        receipt: receipt(mutation),
+        decidedAt: mutation.decidedAt,
+      }],
+      allowedDecisions: persistedState === 'deferred'
+        ? ['accept', 'edit-and-accept', 'reject', 'defer']
+        : [],
+      updatedAt: mutation.decidedAt,
+    }
+    this.suggestedChanges.set(updated.suggestedChangeId, updated)
+    return {
+      ok: true,
+      value: {
+        suggestedChangeId: updated.suggestedChangeId,
+        suggestedChangeRevision: nextRevision,
+        persistedState,
+        decisionMode,
+        riskLevel: stored.risk.effectiveLevel,
+        appliedTeamRevision,
+        appliedResponsibilityRevision,
+      },
+      receipt: receipt(mutation),
+    }
+  }
+
   lastActivityQuery: WorkbenchActivityQuery | null = null
 
   async readActivity(query: WorkbenchActivityQuery): Promise<WorkbenchActivityProjection> {
@@ -621,6 +948,84 @@ function receipt(mutation: {
   }
 }
 
+function reviewEvidence(auditEventId: string, projectId: string) {
+  return {
+    kind: 'workbench-audit-event' as const,
+    auditEventId,
+    occurredAt: '2026-08-30T00:00:00.000Z',
+    action: 'workbench.project.created' as const,
+    summaryCode: 'project-created-from-template' as const,
+    object: { type: 'project' as const, id: projectId, version: 1 },
+  }
+}
+
+function responsibilityChangedFields(
+  before: SuggestedChangeProjection['proposedDiff']['before'],
+  after: SuggestedChangeProjection['proposedDiff']['after'],
+): SuggestedChangeProjection['proposedDiff']['changedFields'] {
+  const fields: Array<SuggestedChangeProjection['proposedDiff']['changedFields'][number]> = []
+  if (before.accountableMemberId !== after.accountableMemberId) fields.push('accountable')
+  if (before.humanSponsorMemberId !== after.humanSponsorMemberId) fields.push('human-sponsor')
+  if (before.contributorMemberIds.length !== after.contributorMemberIds.length
+    || before.contributorMemberIds.some((memberId, index) =>
+      memberId !== after.contributorMemberIds[index])) {
+    fields.push('contributors')
+  }
+  return fields
+}
+
+function responsibilityRisk(
+  before: SuggestedChangeProjection['proposedDiff']['before'],
+  after: SuggestedChangeProjection['proposedDiff']['after'],
+): {
+  readonly level: SuggestedChangeProjection['risk']['proposedLevel']
+  readonly reasons: SuggestedChangeProjection['risk']['proposedReasonCodes']
+} {
+  if (before.accountableMemberId === null) {
+    return { level: 'high', reasons: ['initial-responsibility'] }
+  }
+  const reasons: Array<SuggestedChangeProjection['risk']['proposedReasonCodes'][number]> = []
+  if (before.accountableMemberId !== after.accountableMemberId) reasons.push('accountable-changed')
+  if (before.humanSponsorMemberId !== after.humanSponsorMemberId) reasons.push('human-sponsor-changed')
+  if (reasons.length > 0) return { level: 'high', reasons }
+  return { level: 'low', reasons: ['contributors-only'] }
+}
+
+function reviewCardAtTeamRevision(
+  value: SuggestedChangeProjection,
+  currentTeamRevision: number,
+  currentResponsibilityRevision: number | null,
+): SuggestedChangeProjection {
+  const unresolved = value.persistedState === 'pending' || value.persistedState === 'deferred'
+  const stale = unresolved && value.target.baseTeamRevision !== currentTeamRevision
+  const effectiveStatus = stale ? 'stale' : value.persistedState
+  const actionable = effectiveStatus === 'pending' || effectiveStatus === 'deferred'
+  return {
+    ...value,
+    target: {
+      ...value.target,
+      currentTeamRevision,
+      currentResponsibilityRevision,
+    },
+    effectiveStatus,
+    allowedDecisions: effectiveStatus === 'stale'
+      ? ['reject']
+      : actionable ? ['accept', 'edit-and-accept', 'reject', 'defer'] : [],
+    risk: {
+      ...value.risk,
+      batchPolicy: actionable && value.risk.effectiveLevel === 'low'
+        ? {
+          policy: 'eligible-later',
+          homogeneityKey: 'project-responsibility.replace|low|project-responsibility-v1',
+        }
+        : {
+          policy: 'forbidden',
+          reason: value.risk.effectiveLevel === 'high' ? 'high-risk' : 'not-actionable',
+        },
+    },
+  }
+}
+
 function createScenario(
   repository = new MemoryRepository(),
   access: WorkbenchAuthorization = authorization,
@@ -635,6 +1040,12 @@ function createScenario(
   const statusIds = ['status-001', 'status-002']
   const projectIds = ['project-001', 'project-002']
   const projectMemberIds = ['member-001', 'member-002', 'member-003', 'member-004']
+  const suggestedChangeIds = [
+    'suggested-change-001',
+    'suggested-change-002',
+    'suggested-change-003',
+  ]
+  const suggestedChangeDecisionIds = ['decision-001', 'decision-002', 'decision-003']
   const goalIds = ['goal-001', 'goal-002']
   const outcomeIds = ['outcome-001', 'outcome-002', 'outcome-003']
   const commandIds = Array.from({ length: 12 }, (_, index) => `command-${String(index + 1).padStart(3, '0')}`)
@@ -650,6 +1061,10 @@ function createScenario(
         nextStatusId: () => statusIds.shift() ?? 'status-fallback',
         nextProjectId: () => projectIds.shift() ?? 'project-fallback',
         nextProjectMemberId: () => projectMemberIds.shift() ?? 'member-fallback',
+        nextSuggestedChangeId: () =>
+          suggestedChangeIds.shift() ?? 'suggested-change-fallback',
+        nextSuggestedChangeDecisionId: () =>
+          suggestedChangeDecisionIds.shift() ?? 'decision-fallback',
         nextGoalId: () => goalIds.shift() ?? 'goal-fallback',
         nextOutcomeId: () => outcomeIds.shift() ?? 'outcome-fallback',
         nextCommandId: () => commandIds.shift() ?? 'command-fallback',
@@ -760,6 +1175,106 @@ function responsibilityRequest(
     reason: 'owner-project-responsibility-set',
     ...overrides,
   }
+}
+
+function proposalRequest(
+  overrides: Partial<ProposeProjectResponsibilityChangeRequest> = {},
+): ProposeProjectResponsibilityChangeRequest {
+  return {
+    projectId: 'project-001',
+    candidate: {
+      accountableMemberId: 'member-003',
+      contributorMemberIds: ['member-002', 'member-001'],
+      humanSponsorMemberId: 'member-001',
+    },
+    expectedTeamRevision: 3,
+    evidenceRefs: [{ kind: 'workbench-audit-event', auditEventId: 'audit-evidence-001' }],
+    idempotencyKey: 'suggestion-idempotency-0001',
+    causationId: 'suggestion-causation-0001',
+    reason: 'owner-suggested-change-propose',
+    ...overrides,
+  }
+}
+
+function decisionRequest(
+  mode: 'accept' | 'reject' | 'defer' = 'accept',
+  overrides: Partial<DecideSuggestedChangeRequest> = {},
+): DecideSuggestedChangeRequest {
+  const common = {
+    projectId: 'project-001',
+    suggestedChangeId: 'suggested-change-001',
+    expectedSuggestedChangeRevision: 1,
+    feedback: 'Reviewed against the cited evidence.',
+    idempotencyKey: `decision-idempotency-${mode}-0001`,
+    causationId: `decision-causation-${mode}-0001`,
+  }
+  if (mode === 'accept') return {
+    ...common,
+    mode,
+    acknowledgedRiskLevel: 'high',
+    reason: 'owner-suggested-change-accept',
+    ...overrides,
+  } as DecideSuggestedChangeRequest
+  if (mode === 'reject') return {
+    ...common,
+    mode,
+    reason: 'owner-suggested-change-reject',
+    ...overrides,
+  } as DecideSuggestedChangeRequest
+  return {
+    ...common,
+    mode,
+    reason: 'owner-suggested-change-defer',
+    ...overrides,
+  } as DecideSuggestedChangeRequest
+}
+
+function editAndAcceptRequest(
+  overrides: Partial<DecideSuggestedChangeRequest> = {},
+): DecideSuggestedChangeRequest {
+  return {
+    projectId: 'project-001',
+    suggestedChangeId: 'suggested-change-001',
+    expectedSuggestedChangeRevision: 1,
+    feedback: 'Edited and reviewed against the cited evidence.',
+    mode: 'edit-and-accept',
+    acknowledgedRiskLevel: 'high',
+    candidate: {
+      accountableMemberId: 'member-003',
+      contributorMemberIds: ['member-001'],
+      humanSponsorMemberId: 'member-001',
+    },
+    idempotencyKey: 'decision-idempotency-edit-accept-0001',
+    causationId: 'decision-causation-edit-accept-0001',
+    reason: 'owner-suggested-change-edit-accept',
+    ...overrides,
+  } as DecideSuggestedChangeRequest
+}
+
+async function seedReviewProject(scenario: WorkbenchScenario): Promise<void> {
+  const signal = new AbortController().signal
+  const project = await scenario.createProject(projectRequest(), signal)
+  if (!project.ok) throw new Error('fixture Review Project creation unexpectedly failed')
+  await scenario.addProjectMember(addMemberRequest({
+    kind: 'human',
+    displayName: 'Owner Sponsor',
+    identity: { type: 'feishu', appId: 'cli_review', openId: 'ou_review_owner' },
+  }, 0), signal)
+  await scenario.addProjectMember(addMemberRequest({
+    kind: 'human',
+    displayName: 'Reviewer',
+    identity: { type: 'external', method: 'email', value: 'reviewer@example.test' },
+  }, 1, {
+    idempotencyKey: 'review-member-idempotency-0002',
+    causationId: 'review-member-causation-0002',
+  }), signal)
+  await scenario.addProjectMember(addMemberRequest({
+    kind: 'agent',
+    displayName: 'Review Agent',
+  }, 2, {
+    idempotencyKey: 'review-member-idempotency-0003',
+    causationId: 'review-member-causation-0003',
+  }), signal)
 }
 
 describe('WorkbenchScenario', () => {
@@ -1136,6 +1651,389 @@ describe('WorkbenchScenario', () => {
     await scenario.close()
   })
 
+  it('drives all five Review statuses through Host-scoped proposal and decision commands', async () => {
+    const { scenario, repository } = createScenario()
+    await scenario.open()
+    await seedReviewProject(scenario)
+    const signal = new AbortController().signal
+
+    const empty = await scenario.reviewCenter({ projectId: 'project-001' }, signal)
+    expect(empty).toMatchObject({
+      projectId: 'project-001',
+      proposalBuilder: { teamRevision: 3, responsibilityRevision: null },
+      items: [],
+    })
+    expect(repository.lastReviewCenterQuery).toEqual({
+      organizationId: 'organization-test',
+      teamId: 'team-test',
+      filter: { projectId: 'project-001', limit: 20 },
+    })
+
+    const proposed = await scenario.proposeProjectResponsibilityChange(
+      proposalRequest({
+        evidenceRefs: [
+          { kind: 'workbench-audit-event', auditEventId: 'audit-evidence-002' },
+          { kind: 'workbench-audit-event', auditEventId: 'audit-evidence-001' },
+        ],
+      }),
+      signal,
+    )
+    expect(proposed).toEqual({
+      ok: true,
+      value: {
+        suggestedChangeId: 'suggested-change-001',
+        suggestedChangeRevision: 1,
+        targetAdapter: 'project-responsibility.replace',
+        baseTargetVersion: 3,
+        persistedState: 'pending',
+        riskLevel: 'high',
+      },
+      receipt: {
+        commandId: 'command-005',
+        auditEventId: 'audit-005',
+        outboxId: 'outbox-005',
+      },
+    })
+    expect(Object.isFrozen(proposed)).toBe(true)
+    expect(Object.isFrozen(proposed.ok && proposed.value)).toBe(true)
+    expect(repository.lastSuggestedChangeProposalMutation).toMatchObject({
+      suggestedChangeId: 'suggested-change-001',
+      projectId: 'project-001',
+      candidate: { contributorMemberIds: ['member-001', 'member-002'] },
+      evidenceRefs: [
+        { kind: 'workbench-audit-event', auditEventId: 'audit-evidence-001' },
+        { kind: 'workbench-audit-event', auditEventId: 'audit-evidence-002' },
+      ],
+      expectedRevision: null,
+      command: {
+        actor: {
+          kind: 'owner',
+          id: 'owner-test',
+          organizationId: 'organization-test',
+          teamId: 'team-test',
+        },
+        reason: 'owner-suggested-change-propose',
+      },
+    })
+
+    const pending = await scenario.reviewCenter({
+      projectId: 'project-001',
+      status: 'pending',
+      riskLevel: 'high',
+      limit: 10,
+    }, signal)
+    expect(pending?.items.map(item => item.effectiveStatus)).toEqual(['pending'])
+    expect(Object.isFrozen(pending)).toBe(true)
+    expect(Object.isFrozen(pending?.items)).toBe(true)
+    expect(Object.isFrozen(pending?.items[0]?.proposedDiff.after.contributorMemberIds)).toBe(true)
+
+    await expect(scenario.decideSuggestedChange(
+      decisionRequest('defer'),
+      signal,
+    )).resolves.toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeId: 'suggested-change-001',
+        suggestedChangeRevision: 2,
+        persistedState: 'deferred',
+        decisionMode: 'deferred',
+      },
+    })
+    const deferred = await scenario.reviewCenter({
+      projectId: 'project-001',
+      status: 'deferred',
+    }, signal)
+    expect(deferred?.items).toMatchObject([{
+      effectiveStatus: 'deferred',
+      decisions: [{ decisionId: 'decision-001', feedback: 'Reviewed against the cited evidence.' }],
+    }])
+
+    repository.teamRevisions.set('project-001', 4)
+    const stale = await scenario.reviewCenter({
+      projectId: 'project-001',
+      status: 'stale',
+    }, signal)
+    expect(stale?.items).toMatchObject([{
+      persistedState: 'deferred',
+      effectiveStatus: 'stale',
+      allowedDecisions: ['reject'],
+    }])
+    await expect(scenario.decideSuggestedChange(decisionRequest('accept', {
+      expectedSuggestedChangeRevision: 2,
+      idempotencyKey: 'decision-idempotency-stale-0002',
+      causationId: 'decision-causation-stale-0002',
+    }), signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'suggested-change-stale', baseTeamRevision: 3, currentTeamRevision: 4 },
+    })
+    await expect(scenario.decideSuggestedChange(decisionRequest('reject', {
+      expectedSuggestedChangeRevision: 2,
+      idempotencyKey: 'decision-idempotency-reject-0002',
+      causationId: 'decision-causation-reject-0002',
+    }), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { persistedState: 'rejected', decisionMode: 'rejected' },
+    })
+    const rejected = await scenario.reviewCenter({
+      projectId: 'project-001',
+      status: 'rejected',
+    }, signal)
+    expect(rejected?.items.map(item => item.effectiveStatus)).toEqual(['rejected'])
+
+    const second = await scenario.proposeProjectResponsibilityChange(proposalRequest({
+      expectedTeamRevision: 4,
+      idempotencyKey: 'suggestion-idempotency-0002',
+      causationId: 'suggestion-causation-0002',
+    }), signal)
+    expect(second).toMatchObject({
+      ok: true,
+      value: { suggestedChangeId: 'suggested-change-002', persistedState: 'pending' },
+    })
+    await expect(scenario.decideSuggestedChange(decisionRequest('accept', {
+      suggestedChangeId: 'suggested-change-002',
+      idempotencyKey: 'decision-idempotency-accept-0003',
+      causationId: 'decision-causation-accept-0003',
+    }), signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeId: 'suggested-change-002',
+        persistedState: 'accepted',
+        decisionMode: 'accepted',
+        appliedTeamRevision: 5,
+        appliedResponsibilityRevision: 1,
+      },
+    })
+    const accepted = await scenario.reviewCenter({
+      projectId: 'project-001',
+      status: 'accepted',
+    }, signal)
+    expect(accepted?.items.map(item => item.effectiveStatus)).toEqual(['accepted'])
+    const highRiskPage = await scenario.reviewCenter({
+      projectId: 'project-001',
+      riskLevel: 'high',
+      limit: 1,
+    }, signal)
+    expect(highRiskPage?.items).toHaveLength(1)
+    expect(highRiskPage?.nextBeforeSequence).toBe(2)
+    await scenario.close()
+  })
+
+  it('uses stable Review capabilities in exact order before the single receipt-first repository path', async () => {
+    const repository = new MemoryRepository()
+    const events: string[] = []
+    const access: WorkbenchAuthorization = {
+      require: action => {
+        events.push(`require:${action}`)
+        return Promise.resolve({
+          ownerId: 'owner-authoritative',
+          organizationId: 'organization-authoritative',
+          teamId: 'team-authoritative',
+        })
+      },
+      filterProjection: (action, projection) => {
+        events.push(`filter:${action}`)
+        return Promise.resolve(projection)
+      },
+    }
+    repository.onReviewCenter = async () => { events.push('repository:review') }
+    repository.onSuggestedChangeProposal = async () => { events.push('repository:proposal') }
+    repository.onSuggestedChangeDecision = async () => { events.push('repository:decision') }
+    const { scenario } = createScenario(repository, access)
+    await scenario.open()
+    await seedReviewProject(scenario)
+    events.length = 0
+    const signal = new AbortController().signal
+
+    await scenario.reviewCenter({ projectId: 'project-001' }, signal)
+    expect(events.splice(0)).toEqual([
+      'require:workbench.review.read',
+      'repository:review',
+      'filter:workbench.review.read',
+    ])
+
+    await scenario.proposeProjectResponsibilityChange(proposalRequest(), signal)
+    expect(events.splice(0)).toEqual([
+      'require:workbench.review.decide',
+      'repository:proposal',
+    ])
+
+    await scenario.decideSuggestedChange(decisionRequest('defer'), signal)
+    expect(events.splice(0)).toEqual([
+      'require:workbench.review.decide',
+      'repository:decision',
+    ])
+    await scenario.decideSuggestedChange(decisionRequest('reject', {
+      suggestedChangeId: 'suggested-change-missing-reject',
+    }), signal)
+    expect(events.splice(0)).toEqual([
+      'require:workbench.review.decide',
+      'repository:decision',
+    ])
+
+    await scenario.decideSuggestedChange(decisionRequest('accept', {
+      expectedSuggestedChangeRevision: 2,
+      idempotencyKey: 'decision-idempotency-accept-order',
+      causationId: 'decision-causation-accept-order',
+    }), signal)
+    expect(events.splice(0)).toEqual([
+      'require:workbench.review.decide',
+      'require:workbench.project.responsibility.write',
+      'repository:decision',
+    ])
+    await scenario.decideSuggestedChange(editAndAcceptRequest({
+      suggestedChangeId: 'suggested-change-missing-edit',
+    }), signal)
+    expect(events.splice(0)).toEqual([
+      'require:workbench.review.decide',
+      'require:workbench.project.responsibility.write',
+      'repository:decision',
+    ])
+    await scenario.close()
+  })
+
+  it('fails closed at Review and target-write authorization boundaries without excess checks', async () => {
+    const repository = new MemoryRepository()
+    const required: WorkbenchAction[] = []
+    let deniedAction: WorkbenchAction | null = null
+    let mismatchedAction: WorkbenchAction | null = null
+    const access: WorkbenchAuthorization = {
+      require: action => {
+        required.push(action)
+        if (action === deniedAction) {
+          return Promise.reject(new TypertRemoteFailure({
+            code: 'forbidden',
+            message: 'fixture capability denied',
+            details: { action },
+          }))
+        }
+        if (action === mismatchedAction) {
+          return Promise.resolve({
+            ownerId: 'owner-other',
+            organizationId: 'organization-other',
+            teamId: 'team-other',
+          })
+        }
+        return Promise.resolve({
+          ownerId: 'owner-authoritative',
+          organizationId: 'organization-authoritative',
+          teamId: 'team-authoritative',
+        })
+      },
+      filterProjection: (_action, projection) => Promise.resolve(projection),
+    }
+    const { scenario } = createScenario(repository, access)
+    await scenario.open()
+    const signal = new AbortController().signal
+
+    deniedAction = 'workbench.review.read'
+    await expect(scenario.reviewCenter({ projectId: 'project-001' }, signal))
+      .rejects.toMatchObject({ failure: { code: 'forbidden' } })
+    expect(required.splice(0)).toEqual(['workbench.review.read'])
+    expect(repository.reviewCenterReadCalls).toBe(0)
+
+    deniedAction = 'workbench.review.decide'
+    await expect(scenario.proposeProjectResponsibilityChange(proposalRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'forbidden' } })
+    expect(required.splice(0)).toEqual(['workbench.review.decide'])
+    expect(repository.suggestedChangeProposalWriteCalls).toBe(0)
+    await expect(scenario.decideSuggestedChange(decisionRequest('accept'), signal))
+      .rejects.toMatchObject({ failure: { code: 'forbidden' } })
+    expect(required.splice(0)).toEqual(['workbench.review.decide'])
+    expect(repository.suggestedChangeDecisionWriteCalls).toBe(0)
+
+    deniedAction = 'workbench.project.responsibility.write'
+    for (const request of [decisionRequest('accept'), editAndAcceptRequest()]) {
+      await expect(scenario.decideSuggestedChange(request, signal))
+        .rejects.toMatchObject({ failure: { code: 'forbidden' } })
+      expect(required.splice(0)).toEqual([
+        'workbench.review.decide',
+        'workbench.project.responsibility.write',
+      ])
+    }
+    expect(repository.suggestedChangeDecisionWriteCalls).toBe(0)
+
+    deniedAction = null
+    mismatchedAction = 'workbench.project.responsibility.write'
+    await expect(scenario.decideSuggestedChange(decisionRequest('accept'), signal))
+      .rejects.toMatchObject({ failure: { code: 'internal' } })
+    expect(required.splice(0)).toEqual([
+      'workbench.review.decide',
+      'workbench.project.responsibility.write',
+    ])
+    expect(repository.suggestedChangeDecisionWriteCalls).toBe(0)
+
+    mismatchedAction = null
+    deniedAction = 'workbench.project.responsibility.write'
+    await expect(scenario.proposeProjectResponsibilityChange(proposalRequest(), signal))
+      .resolves.toMatchObject({ ok: false, error: { code: 'project-not-found' } })
+    expect(required.splice(0)).toEqual(['workbench.review.decide'])
+    for (const mode of ['reject', 'defer'] as const) {
+      await expect(scenario.decideSuggestedChange(decisionRequest(mode), signal))
+        .resolves.toMatchObject({ ok: false, error: { code: 'project-not-found' } })
+      expect(required.splice(0)).toEqual(['workbench.review.decide'])
+    }
+    expect(repository.suggestedChangeProposalWriteCalls).toBe(1)
+    expect(repository.suggestedChangeDecisionWriteCalls).toBe(2)
+    await scenario.close()
+  })
+
+  it('rejects inexact Review authority fields and closed-union violations before storage', async () => {
+    const { scenario, repository } = createScenario()
+    await scenario.open()
+    const signal = new AbortController().signal
+
+    for (const filter of [
+      { projectId: 'project-001', status: 'unknown' },
+      { projectId: 'project-001', riskLevel: 'critical' },
+      { projectId: 'project-001', limit: 51 },
+      { projectId: 'project-001', actor: 'forged-owner' },
+    ]) {
+      const error = await scenario.reviewCenter(filter as never, signal)
+        .catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.reviewCenterReadCalls).toBe(0)
+
+    const invalidProposals: unknown[] = [
+      { ...proposalRequest(), source: { kind: 'owner', actorId: 'forged' } },
+      { ...proposalRequest(), risk: 'low' },
+      { ...proposalRequest(), suggestedChangeId: 'forged-id' },
+      { ...proposalRequest(), evidenceRefs: [] },
+      { ...proposalRequest(), expectedTeamRevision: -1 },
+      {
+        ...proposalRequest(),
+        candidate: { ...proposalRequest().candidate, contributorMemberIds: ['member-001', 'member-001'] },
+      },
+    ]
+    for (const request of invalidProposals) {
+      const error = await scenario.proposeProjectResponsibilityChange(
+        request as ProposeProjectResponsibilityChangeRequest,
+        signal,
+      ).catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.suggestedChangeProposalWriteCalls).toBe(0)
+
+    const invalidDecisions: unknown[] = [
+      { ...decisionRequest(), target: { baseVersion: 3 } },
+      { ...decisionRequest(), expectedTargetVersion: 3 },
+      { ...decisionRequest(), feedback: '   ' },
+      { ...decisionRequest(), expectedSuggestedChangeRevision: 0 },
+      { ...decisionRequest('reject'), acknowledgedRiskLevel: 'low' },
+      { ...decisionRequest(), candidate: proposalRequest().candidate },
+      { ...decisionRequest(), reason: 'owner-suggested-change-reject' },
+    ]
+    for (const request of invalidDecisions) {
+      const error = await scenario.decideSuggestedChange(
+        request as DecideSuggestedChangeRequest,
+        signal,
+      ).catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.suggestedChangeDecisionWriteCalls).toBe(0)
+    await scenario.close()
+  })
+
   it('rejects inexact Project Team identity, revision, and responsibility input before storage', async () => {
     const { scenario, repository } = createScenario()
     await scenario.open()
@@ -1438,6 +2336,21 @@ describe('WorkbenchScenario', () => {
       new AbortController().signal,
     ).catch((reason: unknown) => reason)
     expect(failureCode(responsibilityError)).toBe('unauthorized')
+    const reviewError = await scenario.reviewCenter(
+      { projectId: 'unsafe project' },
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
+    expect(failureCode(reviewError)).toBe('unauthorized')
+    const proposalError = await scenario.proposeProjectResponsibilityChange(
+      { ...proposalRequest(), actor: 'forged-owner' } as never,
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
+    expect(failureCode(proposalError)).toBe('unauthorized')
+    const decisionError = await scenario.decideSuggestedChange(
+      { ...decisionRequest(), mode: 'force-accept' } as never,
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
+    expect(failureCode(decisionError)).toBe('unauthorized')
     expect(repository.readCalls).toBe(0)
     expect(repository.writeCalls).toBe(0)
     expect(repository.activityCalls).toBe(0)
@@ -1449,6 +2362,9 @@ describe('WorkbenchScenario', () => {
     expect(repository.projectMemberWriteCalls).toBe(0)
     expect(repository.projectMemberStatusWriteCalls).toBe(0)
     expect(repository.projectResponsibilityWriteCalls).toBe(0)
+    expect(repository.reviewCenterReadCalls).toBe(0)
+    expect(repository.suggestedChangeProposalWriteCalls).toBe(0)
+    expect(repository.suggestedChangeDecisionWriteCalls).toBe(0)
 
     await scenario.close()
   })
@@ -1516,13 +2432,29 @@ describe('WorkbenchScenario', () => {
       action: 'workbench.project-member.status-changed',
       limit: 5,
     })
+    await scenario.activity({
+      projectId: 'project-safe',
+      objectType: 'suggested-change',
+      objectId: 'suggested-change-safe',
+      action: 'workbench.suggested-change.edited-accepted',
+      limit: 5,
+    })
+    expect(repository.lastActivityQuery?.filter).toEqual({
+      projectId: 'project-safe',
+      objectType: 'suggested-change',
+      objectId: 'suggested-change-safe',
+      action: 'workbench.suggested-change.edited-accepted',
+      limit: 5,
+    })
     await expect(scenario.auditIntegrity()).resolves.toMatchObject({ valid: true, eventCount: 0 })
     expect(required).toEqual([
+      'workbench.activity.read',
       'workbench.activity.read',
       'workbench.activity.read',
       'workbench.audit.verify',
     ])
     expect(filtered).toEqual([
+      'workbench.activity.read',
       'workbench.activity.read',
       'workbench.activity.read',
       'workbench.audit.verify',
@@ -1532,7 +2464,7 @@ describe('WorkbenchScenario', () => {
       const error = await scenario.activity(filter as never).catch((reason: unknown) => reason)
       expect(failureCode(error)).toBe('bad-request')
     }
-    expect(repository.activityCalls).toBe(2)
+    expect(repository.activityCalls).toBe(3)
     await scenario.close()
   })
 
@@ -1578,6 +2510,28 @@ describe('WorkbenchScenario', () => {
 
     const error = await pending.catch((reason: unknown) => reason)
     expect(failureCode(error)).toBe('cancelled')
+    expect(scenario.lifecycle).toBe('running')
+    await scenario.close()
+  })
+
+  it('propagates caller cancellation through an admitted Review Center read', async () => {
+    const repository = new MemoryRepository()
+    const started = Promise.withResolvers<void>()
+    repository.onReviewCenter = signal => new Promise<void>((_resolve, reject) => {
+      started.resolve()
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+    const { scenario } = createScenario(repository)
+    await scenario.open()
+    const caller = new AbortController()
+
+    const pending = scenario.reviewCenter({ projectId: 'project-001' }, caller.signal)
+    await started.promise
+    caller.abort(new Error('caller left Review Center'))
+
+    const error = await pending.catch((reason: unknown) => reason)
+    expect(failureCode(error)).toBe('cancelled')
+    expect(repository.reviewCenterReadCalls).toBe(1)
     expect(scenario.lifecycle).toBe('running')
     await scenario.close()
   })

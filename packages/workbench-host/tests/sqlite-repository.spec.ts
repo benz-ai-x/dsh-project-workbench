@@ -13,6 +13,8 @@ import type {
   WorkbenchProjectMemberStatusMutation,
   WorkbenchProjectResponsibilityMutation,
   WorkbenchStatusMutation,
+  WorkbenchSuggestedChangeDecisionMutation,
+  WorkbenchSuggestedChangeProposalMutation,
 } from '../src/index.ts'
 import {
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
@@ -291,6 +293,113 @@ function responsibilityCommand(
   }
 }
 
+function suggestedChangeProposalCommand(
+  suffix: string,
+  expectedTeamRevision: number,
+  candidate: WorkbenchSuggestedChangeProposalMutation['candidate'],
+  evidenceAuditIds: readonly string[] = ['audit-project-team'],
+): WorkbenchSuggestedChangeProposalMutation {
+  const instant = `2026-08-31T13:${String(Math.min(expectedTeamRevision + 1, 59)).padStart(2, '0')}:00.000Z`
+  return {
+    suggestedChangeId: `suggested-change-${suffix}`,
+    projectId: 'project-team',
+    candidate,
+    evidenceRefs: evidenceAuditIds.map(auditEventId => ({
+      kind: 'workbench-audit-event' as const,
+      auditEventId,
+    })),
+    expectedTeamRevision,
+    expectedRevision: null,
+    createdAt: instant,
+    command: {
+      commandId: `command-suggested-${suffix}`,
+      auditEventId: `audit-suggested-${suffix}`,
+      outboxId: `outbox-suggested-${suffix}`,
+      idempotencyKey: `suggested-key-${suffix.padStart(8, '0')}`,
+      causationId: `suggested-cause-${suffix.padStart(8, '0')}`,
+      reason: 'owner-suggested-change-propose',
+      actor: {
+        kind: 'owner', id: 'owner-test',
+        organizationId: 'organization-test', teamId: 'team-test',
+      },
+      occurredAt: instant,
+    },
+  }
+}
+
+function suggestedChangeDecisionCommand(
+  suffix: string,
+  suggestedChangeId: string,
+  expectedSuggestedChangeRevision: number,
+  mode: 'accept' | 'edit-and-accept' | 'reject' | 'defer',
+  options: {
+    readonly acknowledgedRiskLevel?: 'low' | 'high'
+    readonly candidate?: WorkbenchSuggestedChangeProposalMutation['candidate']
+    readonly feedback?: string
+  } = {},
+): WorkbenchSuggestedChangeDecisionMutation {
+  const instant = `2026-08-31T14:${String(Math.min(expectedSuggestedChangeRevision, 59)).padStart(2, '0')}:00.000Z`
+  const common = {
+    decisionId: `decision-${suffix}`,
+    projectId: 'project-team',
+    suggestedChangeId,
+    expectedSuggestedChangeRevision,
+    feedback: options.feedback ?? `Reviewed ${suffix}`,
+    decidedAt: instant,
+  }
+  const command = {
+    commandId: `command-decision-${suffix}`,
+    auditEventId: `audit-decision-${suffix}`,
+    outboxId: `outbox-decision-${suffix}`,
+    idempotencyKey: `decision-key-${suffix.padStart(8, '0')}`,
+    causationId: `decision-cause-${suffix.padStart(8, '0')}`,
+    actor: {
+      kind: 'owner' as const, id: 'owner-test',
+      organizationId: 'organization-test', teamId: 'team-test',
+    },
+    occurredAt: instant,
+  }
+  if (mode === 'accept') return {
+    ...common,
+    mode,
+    acknowledgedRiskLevel: options.acknowledgedRiskLevel ?? 'high',
+    command: { ...command, reason: 'owner-suggested-change-accept' },
+  }
+  if (mode === 'edit-and-accept') return {
+    ...common,
+    mode,
+    acknowledgedRiskLevel: options.acknowledgedRiskLevel ?? 'high',
+    candidate: options.candidate ?? {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+    },
+    command: { ...command, reason: 'owner-suggested-change-edit-accept' },
+  }
+  if (mode === 'reject') return {
+    ...common,
+    mode,
+    command: { ...command, reason: 'owner-suggested-change-reject' },
+  }
+  return {
+    ...common,
+    mode,
+    command: { ...command, reason: 'owner-suggested-change-defer' },
+  }
+}
+
+async function createReviewFixture(workbench: SqliteWorkbenchRepository): Promise<void> {
+  await createTeamProject(workbench)
+  await workbench.commitProjectMember(memberCommand('review-owner', 0, {
+    kind: 'human', displayName: 'Review Owner',
+    identity: { type: 'feishu', appId: 'app', openId: 'ou_review_owner' },
+  }), signal)
+  await workbench.commitProjectMember(memberCommand('review-contributor', 1, {
+    kind: 'human', displayName: 'Review Contributor',
+    identity: { type: 'feishu', appId: 'app', openId: 'ou_review_contributor' },
+  }), signal)
+}
+
 async function createTeamProject(workbench: SqliteWorkbenchRepository): Promise<void> {
   const result = await workbench.commitProject(projectCommand('team', 0), signal)
   if (!result.ok) throw new Error('expected Team fixture Project')
@@ -313,6 +422,34 @@ function teamArtifactCounts(database: DatabaseSync) {
     outbox: database.prepare('SELECT COUNT(*) AS count FROM workbench_outbox').get(),
     audit: database.prepare('SELECT COUNT(*) AS count FROM workbench_audit_event').get(),
     receipts: database.prepare('SELECT COUNT(*) AS count FROM workbench_command_receipt').get(),
+  }
+}
+
+function suggestedChangeArtifactCounts(database: DatabaseSync) {
+  return {
+    suggestions: database.prepare('SELECT COUNT(*) AS count FROM workbench_suggested_change').get(),
+    evidence: database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_suggested_change_evidence
+    `).get(),
+    decisions: database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_suggested_change_decision
+    `).get(),
+    responsibilityVersions: database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_project_responsibility_version
+    `).get(),
+    contributors: database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_project_responsibility_contributor
+    `).get(),
+    team: database.prepare(`
+      SELECT team_revision, current_responsibility_revision
+      FROM workbench_project_team_head WHERE project_id = 'project-team'
+    `).get(),
+    outbox: database.prepare('SELECT COUNT(*) AS count FROM workbench_outbox').get(),
+    audit: database.prepare('SELECT COUNT(*) AS count FROM workbench_audit_event').get(),
+    receipts: database.prepare('SELECT COUNT(*) AS count FROM workbench_command_receipt').get(),
+    auditHead: database.prepare(`
+      SELECT sequence, head_hash FROM workbench_audit_head WHERE singleton = 1
+    `).get(),
   }
 }
 
@@ -1049,7 +1186,7 @@ describe('SqliteWorkbenchRepository', () => {
     await expect(workbench.open()).rejects.toThrow(/closed/u)
   })
 
-  it('migrates v2 through v4, seeds the exact template, and preserves the T03 ledger', async () => {
+  it('migrates v2 through v5, seeds the exact template, and preserves the T03 ledger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1058,6 +1195,16 @@ describe('SqliteWorkbenchRepository', () => {
 
     const legacy = new DatabaseSync(path)
     legacy.exec(`
+      DROP TRIGGER workbench_suggested_change_decision_no_delete;
+      DROP TRIGGER workbench_suggested_change_decision_no_update;
+      DROP TRIGGER workbench_suggested_change_evidence_no_delete;
+      DROP TRIGGER workbench_suggested_change_evidence_no_update;
+      DROP TRIGGER workbench_suggested_change_no_delete;
+      DROP TRIGGER workbench_suggested_change_head_transition;
+      DROP TRIGGER workbench_suggested_change_envelope_no_update;
+      DROP TABLE workbench_suggested_change_decision;
+      DROP TABLE workbench_suggested_change_evidence;
+      DROP TABLE workbench_suggested_change;
       DROP TRIGGER workbench_project_responsibility_contributor_no_delete;
       DROP TRIGGER workbench_project_responsibility_contributor_no_update;
       DROP TRIGGER workbench_project_responsibility_no_delete;
@@ -1089,7 +1236,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({
-      user_version: 4,
+      user_version: 5,
     })
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({
       id: 'status-legacy-v2',
@@ -1712,7 +1859,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates v3 to v4, backfills one empty Team per Project, and creates heads for new Projects', async () => {
+  it('migrates v3 through v5, backfills one empty Team per Project, and creates heads for new Projects', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1721,6 +1868,16 @@ describe('SqliteWorkbenchRepository', () => {
 
     const legacy = new DatabaseSync(path)
     legacy.exec(`
+      DROP TRIGGER workbench_suggested_change_decision_no_delete;
+      DROP TRIGGER workbench_suggested_change_decision_no_update;
+      DROP TRIGGER workbench_suggested_change_evidence_no_delete;
+      DROP TRIGGER workbench_suggested_change_evidence_no_update;
+      DROP TRIGGER workbench_suggested_change_no_delete;
+      DROP TRIGGER workbench_suggested_change_head_transition;
+      DROP TRIGGER workbench_suggested_change_envelope_no_update;
+      DROP TABLE workbench_suggested_change_decision;
+      DROP TABLE workbench_suggested_change_evidence;
+      DROP TABLE workbench_suggested_change;
       DROP TRIGGER workbench_project_responsibility_contributor_no_delete;
       DROP TRIGGER workbench_project_responsibility_contributor_no_update;
       DROP TRIGGER workbench_project_responsibility_no_delete;
@@ -1739,7 +1896,7 @@ describe('SqliteWorkbenchRepository', () => {
 
     const upgraded = repository(path)
     await upgraded.open()
-    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
+    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
     await expect(upgraded.readProjectTeam({
       organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
     }, signal)).resolves.toEqual({
@@ -1770,6 +1927,65 @@ describe('SqliteWorkbenchRepository', () => {
       members: [{ memberId: 'member-migrated', kind: 'agent', status: 'active' }],
     })
     await restarted.close()
+  })
+
+  it('migrates an exact v4 database to v5 and validates every SuggestedChange trigger', async () => {
+    const path = await databasePath()
+    const seeded = repository(path)
+    await seeded.open()
+    await createTeamProject(seeded)
+    await seeded.close()
+
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      DROP TRIGGER workbench_suggested_change_decision_no_delete;
+      DROP TRIGGER workbench_suggested_change_decision_no_update;
+      DROP TRIGGER workbench_suggested_change_evidence_no_delete;
+      DROP TRIGGER workbench_suggested_change_evidence_no_update;
+      DROP TRIGGER workbench_suggested_change_no_delete;
+      DROP TRIGGER workbench_suggested_change_head_transition;
+      DROP TRIGGER workbench_suggested_change_envelope_no_update;
+      DROP TABLE workbench_suggested_change_decision;
+      DROP TABLE workbench_suggested_change_evidence;
+      DROP TABLE workbench_suggested_change;
+      PRAGMA user_version = 4;
+    `)
+    legacy.close()
+
+    const upgraded = repository(path)
+    await upgraded.open()
+    const database = connection(upgraded)
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+    expect(database.prepare(`
+      SELECT name FROM sqlite_schema
+      WHERE type = 'table' AND name LIKE 'workbench_suggested_change%'
+      ORDER BY name
+    `).all()).toEqual([
+      { name: 'workbench_suggested_change' },
+      { name: 'workbench_suggested_change_decision' },
+      { name: 'workbench_suggested_change_evidence' },
+    ])
+    expect(database.prepare(`
+      SELECT name FROM sqlite_schema
+      WHERE type = 'trigger' AND name LIKE 'workbench_suggested_change%'
+      ORDER BY name
+    `).all()).toEqual([
+      { name: 'workbench_suggested_change_decision_no_delete' },
+      { name: 'workbench_suggested_change_decision_no_update' },
+      { name: 'workbench_suggested_change_envelope_no_update' },
+      { name: 'workbench_suggested_change_evidence_no_delete' },
+      { name: 'workbench_suggested_change_evidence_no_update' },
+      { name: 'workbench_suggested_change_head_transition' },
+      { name: 'workbench_suggested_change_no_delete' },
+    ])
+    await upgraded.close()
+
+    const missingTrigger = new DatabaseSync(path)
+    missingTrigger.exec('DROP TRIGGER workbench_suggested_change_head_transition')
+    missingTrigger.close()
+    await expect(repository(path).open()).rejects.toThrow(
+      /missing trigger workbench_suggested_change_head_transition/u,
+    )
   })
 
   it('persists closed Feishu, external-human, and Agent identities with derived eligibility', async () => {
@@ -3101,5 +3317,972 @@ describe('SqliteWorkbenchRepository', () => {
     }, signal)).rejects.toThrow(/not open/u)
     await expect(workbench.commitProject(projectCommand('after-close', 1), signal))
       .rejects.toThrow(/not open/u)
+  })
+
+  it('persists, accepts, replays, and restarts one typed SuggestedChange before a direct Team command', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('accept-flow', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    }, ['audit-member-review-owner', 'audit-project-team'])
+    const proposed = await workbench.commitSuggestedChangeProposal(proposal, signal)
+    expect(proposed).toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeId: 'suggested-change-accept-flow',
+        suggestedChangeRevision: 1,
+        baseTargetVersion: 2,
+        persistedState: 'pending',
+        riskLevel: 'high',
+      },
+    })
+    await expect(workbench.commitSuggestedChangeProposal({
+      ...proposal,
+      command: {
+        ...proposal.command,
+        commandId: 'command-suggested-regenerated',
+        auditEventId: 'audit-suggested-regenerated',
+        outboxId: 'outbox-suggested-regenerated',
+      },
+    }, signal)).resolves.toEqual(proposed)
+
+    const center = await workbench.readReviewCenter({
+      organizationId: 'organization-test',
+      teamId: 'team-test',
+      filter: { projectId: 'project-team', limit: 20 },
+    }, signal)
+    expect(center).toMatchObject({
+      projectId: 'project-team',
+      proposalBuilder: {
+        teamRevision: 2,
+        responsibilityRevision: null,
+        base: {
+          accountableMemberId: null,
+          contributorMemberIds: [],
+          humanSponsorMemberId: null,
+        },
+        memberOptions: [
+          { memberId: 'member-review-owner', requiresHumanSponsor: false, canBeHumanSponsor: true },
+          { memberId: 'member-review-contributor', requiresHumanSponsor: false, canBeHumanSponsor: true },
+        ],
+      },
+      items: [{
+        suggestedChangeId: 'suggested-change-accept-flow',
+        revision: 1,
+        persistedState: 'pending',
+        effectiveStatus: 'pending',
+        proposedDiff: {
+          kind: 'project-responsibility.diff',
+          schemaVersion: 1,
+          changedFields: ['accountable', 'contributors'],
+        },
+        risk: {
+          proposedLevel: 'high',
+          effectiveLevel: 'high',
+          proposedReasonCodes: ['initial-responsibility'],
+          batchPolicy: { policy: 'forbidden', reason: 'high-risk' },
+        },
+        allowedDecisions: ['accept', 'edit-and-accept', 'reject', 'defer'],
+      }],
+    })
+
+    const privateFailure = await workbench.commitSuggestedChangeDecision(
+      suggestedChangeDecisionCommand(
+        'accept-flow-risk-mismatch',
+        'suggested-change-accept-flow',
+        1,
+        'accept',
+        { acknowledgedRiskLevel: 'low', feedback: 'PRIVATE-FAILED-REVIEW-CANARY' },
+      ),
+      signal,
+    )
+    expect(privateFailure).toMatchObject({
+      ok: false,
+      error: { code: 'risk-acknowledgement-mismatch', requiredRiskLevel: 'high' },
+    })
+
+    const decision = suggestedChangeDecisionCommand(
+      'accept-flow',
+      'suggested-change-accept-flow',
+      1,
+      'accept',
+      { acknowledgedRiskLevel: 'high', feedback: 'Approve private review feedback' },
+    )
+    const accepted = await workbench.commitSuggestedChangeDecision(decision, signal)
+    expect(accepted).toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeRevision: 2,
+        persistedState: 'accepted',
+        decisionMode: 'accepted',
+        riskLevel: 'high',
+        appliedTeamRevision: 3,
+        appliedResponsibilityRevision: 1,
+      },
+    })
+    await expect(workbench.commitProjectMember(memberCommand('after-review-accept', 3, {
+      kind: 'agent', displayName: 'After Review Agent',
+    }), signal)).resolves.toMatchObject({ ok: true, value: { teamRevision: 4 } })
+    await expect(workbench.commitSuggestedChangeDecision(decision, signal)).resolves.toEqual(accepted)
+    await expect(workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toMatchObject({
+      teamRevision: 4,
+      responsibility: {
+        revision: 1,
+        accountableMemberId: 'member-review-owner',
+        contributorMemberIds: ['member-review-contributor'],
+      },
+    })
+    const permanent = connection(workbench).prepare(`
+      SELECT audit.canonical_envelope, audit.summary_fields_json,
+        outbox.payload_json, receipt.result_json, receipt.request_hash
+      FROM workbench_audit_event AS audit
+      INNER JOIN workbench_outbox AS outbox ON outbox.id = audit.outbox_id
+      INNER JOIN workbench_command_receipt AS receipt ON receipt.audit_event_id = audit.id
+      WHERE audit.command_type LIKE 'workbench.suggested-change.%'
+      ORDER BY audit.sequence
+    `).all()
+    const activity = await workbench.readActivity({
+      organizationId: 'organization-test',
+      filter: { projectId: 'project-team', limit: 20 },
+    }, signal)
+    const redacted = JSON.stringify({
+      permanent,
+      reviewActivity: activity.items.filter(item => item.object.type === 'suggested-change'),
+      privateFailure,
+    })
+    for (const privateValue of [
+      'member-review-owner',
+      'member-review-contributor',
+      'audit-project-team',
+      'Approve private review feedback',
+      'PRIVATE-FAILED-REVIEW-CANARY',
+    ]) expect(redacted).not.toContain(privateValue)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', status: 'accepted', limit: 20 },
+    }, signal)).resolves.toMatchObject({
+      items: [{
+        persistedState: 'accepted',
+        effectiveStatus: 'accepted',
+        decisions: [{
+          mode: 'accepted',
+          feedback: 'Approve private review feedback',
+          appliedTeamRevision: 3,
+          appliedResponsibilityRevision: 1,
+        }],
+      }],
+    })
+    await restarted.close()
+  })
+
+  it('marks Agent and external-human proposal candidates as requiring a human sponsor', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createTeamProject(workbench)
+    await workbench.commitProjectMember(memberCommand('builder-internal', 0, {
+      kind: 'human', displayName: 'Internal Human',
+      identity: { type: 'feishu', appId: 'app', openId: 'ou_builder_internal' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('builder-external', 1, {
+      kind: 'human', displayName: 'External Human',
+      identity: { type: 'external', method: 'email', value: 'builder-private@example.test' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('builder-agent', 2, {
+      kind: 'agent', displayName: 'Builder Agent',
+    }), signal)
+
+    await expect(workbench.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', limit: 20 },
+    }, signal)).resolves.toMatchObject({
+      proposalBuilder: {
+        memberOptions: [
+          { memberId: 'member-builder-internal', requiresHumanSponsor: false, canBeHumanSponsor: true },
+          { memberId: 'member-builder-external', requiresHumanSponsor: true, canBeHumanSponsor: true },
+          { memberId: 'member-builder-agent', requiresHumanSponsor: true, canBeHumanSponsor: false },
+        ],
+      },
+    })
+    await workbench.close()
+  })
+
+  it('admits only 1–20 distinct, available EvidenceRefs from the authorized Project', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const candidate = {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    }
+    await expect(workbench.commitSuggestedChangeProposal(suggestedChangeProposalCommand(
+      'evidence-order', 2, candidate, ['audit-project-team', 'audit-member-review-owner'],
+    ), signal)).rejects.toThrow(/canonical audit id order/u)
+    await expect(workbench.commitSuggestedChangeProposal(suggestedChangeProposalCommand(
+      'evidence-duplicate', 2, candidate, ['audit-project-team', 'audit-project-team'],
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'evidence-invalid', reason: 'duplicate' },
+    })
+    await expect(workbench.commitSuggestedChangeProposal(suggestedChangeProposalCommand(
+      'evidence-missing', 2, candidate, ['audit-does-not-exist'],
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'evidence-invalid', reason: 'unavailable' },
+    })
+    await workbench.commitProject(projectCommand('evidence-scope-other', 1), signal)
+    await expect(workbench.commitSuggestedChangeProposal(suggestedChangeProposalCommand(
+      'evidence-scope', 2, candidate, ['audit-project-evidence-scope-other'],
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'evidence-invalid', reason: 'wrong-project' },
+    })
+    await expect(workbench.commitSuggestedChangeProposal({
+      ...suggestedChangeProposalCommand('evidence-overflow', 2, candidate),
+      evidenceRefs: Array.from({ length: 21 }, (_, index) => ({
+        kind: 'workbench-audit-event' as const,
+        auditEventId: `audit-overflow-${String(index)}`,
+      })),
+    }, signal)).rejects.toThrow(/requires 1 to 20 EvidenceRefs/u)
+    expect(connection(workbench).prepare(`
+      SELECT COUNT(*) AS count FROM workbench_suggested_change
+    `).get()).toEqual({ count: 0 })
+    await workbench.close()
+  })
+
+  it('retains proposed and edited diffs while preventing edited acceptance from downgrading risk', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createReviewFixture(workbench)
+    await workbench.commitProjectResponsibility(responsibilityCommand(
+      'edit-risk-base', 2, null,
+      'member-review-owner', ['member-review-contributor'],
+    ), signal)
+    const proposal = suggestedChangeProposalCommand('edit-risk', 3, {
+      accountableMemberId: 'member-review-contributor',
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    const edit = suggestedChangeDecisionCommand(
+      'edit-risk', proposal.suggestedChangeId, 1, 'edit-and-accept', {
+        acknowledgedRiskLevel: 'low',
+        candidate: {
+          accountableMemberId: 'member-review-owner',
+          contributorMemberIds: [],
+          humanSponsorMemberId: null,
+        },
+      },
+    )
+    await expect(workbench.commitSuggestedChangeDecision(edit, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'risk-acknowledgement-mismatch', requiredRiskLevel: 'high' },
+    })
+    const acceptedEdit = {
+      ...edit,
+      acknowledgedRiskLevel: 'high' as const,
+      command: {
+        ...edit.command,
+        commandId: 'command-decision-edit-risk-high',
+        auditEventId: 'audit-decision-edit-risk-high',
+        outboxId: 'outbox-decision-edit-risk-high',
+      },
+    }
+    const accepted = await workbench.commitSuggestedChangeDecision(acceptedEdit, signal)
+    expect(accepted).toMatchObject({
+      ok: true,
+      value: {
+        persistedState: 'accepted', decisionMode: 'edited-accepted', riskLevel: 'high',
+        appliedTeamRevision: 4, appliedResponsibilityRevision: 2,
+      },
+    })
+    await expect(workbench.commitSuggestedChangeDecision({
+      ...acceptedEdit,
+      command: {
+        ...acceptedEdit.command,
+        commandId: 'command-decision-edit-risk-replay',
+        auditEventId: 'audit-decision-edit-risk-replay',
+        outboxId: 'outbox-decision-edit-risk-replay',
+      },
+    }, signal)).resolves.toEqual(accepted)
+
+    await expect(workbench.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', status: 'accepted', limit: 20 },
+    }, signal)).resolves.toMatchObject({
+      items: [{
+        proposedDiff: { changedFields: ['accountable', 'contributors'] },
+        risk: { proposedLevel: 'high', effectiveLevel: 'high' },
+        decisions: [{
+          mode: 'edited-accepted',
+          appliedDiff: { changedFields: ['contributors'] },
+          appliedRiskLevel: 'low',
+        }],
+      }],
+    })
+    await workbench.close()
+  })
+
+  it('converges concurrent acceptance retries on one receipt and one double-CAS target mutation', async () => {
+    const path = await databasePath()
+    const first = repository(path)
+    const second = repository(path)
+    await first.open()
+    await createReviewFixture(first)
+    const proposal = suggestedChangeProposalCommand('concurrent-accept', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await first.commitSuggestedChangeProposal(proposal, signal)
+    await second.open()
+    const original = suggestedChangeDecisionCommand(
+      'concurrent-accept', proposal.suggestedChangeId, 1, 'accept',
+      { acknowledgedRiskLevel: 'high', feedback: 'One stable private intent' },
+    )
+    const retry: WorkbenchSuggestedChangeDecisionMutation = {
+      ...original,
+      decisionId: 'decision-concurrent-accept-regenerated',
+      command: {
+        ...original.command,
+        commandId: 'command-concurrent-accept-regenerated',
+        auditEventId: 'audit-concurrent-accept-regenerated',
+        outboxId: 'outbox-concurrent-accept-regenerated',
+      },
+    }
+    const results = await Promise.all([
+      first.commitSuggestedChangeDecision(original, signal),
+      second.commitSuggestedChangeDecision(retry, signal),
+    ])
+    expect(results[0]).toEqual(results[1])
+    expect(results[0]).toMatchObject({
+      ok: true,
+      value: {
+        suggestedChangeRevision: 2, persistedState: 'accepted',
+        appliedTeamRevision: 3, appliedResponsibilityRevision: 1,
+      },
+      receipt: { commandId: original.command.commandId },
+    })
+    expect(connection(first).prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM workbench_suggested_change_decision) AS decisions,
+        (SELECT COUNT(*) FROM workbench_project_responsibility_version) AS responsibilities,
+        (SELECT team_revision FROM workbench_project_team_head
+          WHERE project_id = 'project-team') AS team_revision
+    `).get()).toEqual({ decisions: 1, responsibilities: 1, team_revision: 3 })
+    await first.close()
+    await second.close()
+  })
+
+  it('allows only one distinct same-revision decision to win the SuggestedChange CAS', async () => {
+    const path = await databasePath()
+    const first = repository(path)
+    const second = repository(path)
+    await first.open()
+    await createReviewFixture(first)
+    const proposal = suggestedChangeProposalCommand('concurrent-distinct', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await first.commitSuggestedChangeProposal(proposal, signal)
+    await second.open()
+    const accept = suggestedChangeDecisionCommand(
+      'concurrent-distinct-accept', proposal.suggestedChangeId, 1, 'accept',
+      { acknowledgedRiskLevel: 'high' },
+    )
+    const reject = suggestedChangeDecisionCommand(
+      'concurrent-distinct-reject', proposal.suggestedChangeId, 1, 'reject',
+    )
+
+    const [winner, loser] = await Promise.all([
+      first.commitSuggestedChangeDecision(accept, signal),
+      second.commitSuggestedChangeDecision(reject, signal),
+    ])
+    expect(winner).toMatchObject({
+      ok: true,
+      value: { persistedState: 'accepted', suggestedChangeRevision: 2 },
+    })
+    expect(loser).toMatchObject({
+      ok: false,
+      error: {
+        code: 'suggested-change-revision-conflict',
+        expectedSuggestedChangeRevision: 1,
+        currentSuggestedChangeRevision: 2,
+      },
+    })
+    expect(connection(first).prepare(`
+      SELECT COUNT(*) AS count FROM workbench_suggested_change_decision
+      WHERE suggested_change_id = ?
+    `).get(proposal.suggestedChangeId)).toEqual({ count: 1 })
+    await first.close()
+    await second.close()
+  })
+
+  it('accepts a current-base deferred proposal with two append-only decisions', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('defer-then-accept', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    await expect(workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'defer-then-accept-defer', proposal.suggestedChangeId, 1, 'defer',
+    ), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { persistedState: 'deferred', suggestedChangeRevision: 2 },
+    })
+    await expect(workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'defer-then-accept-accept', proposal.suggestedChangeId, 2, 'accept',
+      { acknowledgedRiskLevel: 'high' },
+    ), signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        persistedState: 'accepted', suggestedChangeRevision: 3,
+        appliedTeamRevision: 3, appliedResponsibilityRevision: 1,
+      },
+    })
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', status: 'accepted', limit: 20 },
+    }, signal)).resolves.toMatchObject({
+      items: [{
+        suggestedChangeId: proposal.suggestedChangeId,
+        revision: 3,
+        decisions: [{ mode: 'deferred' }, { mode: 'accepted' }],
+      }],
+    })
+    await restarted.close()
+  })
+
+  it('derives all five Review statuses, risk filters, and stale-only rejection without overwrite', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createReviewFixture(workbench)
+    await workbench.commitProjectResponsibility(responsibilityCommand(
+      'review-base',
+      2,
+      null,
+      'member-review-owner',
+      ['member-review-contributor'],
+    ), signal)
+
+    const acceptedProposal = suggestedChangeProposalCommand('status-accepted', 3, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(acceptedProposal, signal)
+    await workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'status-accepted', acceptedProposal.suggestedChangeId, 1, 'accept',
+      { acknowledgedRiskLevel: 'low' },
+    ), signal)
+
+    const rejectedProposal = suggestedChangeProposalCommand('status-rejected', 4, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(rejectedProposal, signal)
+    await workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'status-rejected', rejectedProposal.suggestedChangeId, 1, 'reject',
+    ), signal)
+
+    const staleProposal = suggestedChangeProposalCommand('status-stale', 4, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(staleProposal, signal)
+    await workbench.commitProjectMember(memberCommand('stale-advance', 4, {
+      kind: 'agent', displayName: 'Stale Advance Agent',
+    }), signal)
+    await expect(workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'stale-accept-denied', staleProposal.suggestedChangeId, 1, 'accept',
+      { acknowledgedRiskLevel: 'low' },
+    ), signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'suggested-change-stale', baseTeamRevision: 4, currentTeamRevision: 5 },
+    })
+
+    const pendingProposal = suggestedChangeProposalCommand('status-pending', 5, {
+      accountableMemberId: 'member-review-contributor',
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(pendingProposal, signal)
+    const deferredProposal = suggestedChangeProposalCommand('status-deferred', 5, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(deferredProposal, signal)
+    await workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'status-deferred', deferredProposal.suggestedChangeId, 1, 'defer',
+    ), signal)
+    await expect(workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'status-deferred-twice', deferredProposal.suggestedChangeId, 2, 'defer',
+    ), signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'suggested-change-state-conflict', status: 'deferred' },
+    })
+
+    for (const [status, expectedId] of [
+      ['accepted', acceptedProposal.suggestedChangeId],
+      ['rejected', rejectedProposal.suggestedChangeId],
+      ['stale', staleProposal.suggestedChangeId],
+      ['pending', pendingProposal.suggestedChangeId],
+      ['deferred', deferredProposal.suggestedChangeId],
+    ] as const) {
+      const center = await workbench.readReviewCenter({
+        organizationId: 'organization-test', teamId: 'team-test',
+        filter: { projectId: 'project-team', status, limit: 20 },
+      }, signal)
+      expect(center?.items.map(item => item.suggestedChangeId)).toEqual([expectedId])
+    }
+    const low = await workbench.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', riskLevel: 'low', limit: 20 },
+    }, signal)
+    expect(low?.items.map(item => item.suggestedChangeId).sort()).toEqual([
+      acceptedProposal.suggestedChangeId,
+      deferredProposal.suggestedChangeId,
+      rejectedProposal.suggestedChangeId,
+      staleProposal.suggestedChangeId,
+    ].sort())
+    const high = await workbench.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', riskLevel: 'high', limit: 20 },
+    }, signal)
+    expect(high?.items.map(item => item.suggestedChangeId)).toEqual([
+      pendingProposal.suggestedChangeId,
+    ])
+    const firstPage = await workbench.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', limit: 2 },
+    }, signal)
+    expect(firstPage?.items).toHaveLength(2)
+    expect(firstPage?.nextBeforeSequence).not.toBeNull()
+    const nextBeforeSequence = firstPage?.nextBeforeSequence
+    if (nextBeforeSequence === null || nextBeforeSequence === undefined) {
+      throw new Error('expected a stable Review Center cursor')
+    }
+    const secondPage = await workbench.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: {
+        projectId: 'project-team', limit: 2, beforeSequence: nextBeforeSequence,
+      },
+    }, signal)
+    expect(secondPage?.items).toHaveLength(2)
+    expect(new Set([
+      ...(firstPage?.items.map(item => item.suggestedChangeId) ?? []),
+      ...(secondPage?.items.map(item => item.suggestedChangeId) ?? []),
+    ]).size).toBe(4)
+
+    await expect(workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'stale-rejected', staleProposal.suggestedChangeId, 1, 'reject',
+      { feedback: 'Reject stale intent without target mutation' },
+    ), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { persistedState: 'rejected', appliedTeamRevision: null },
+    })
+    await expect(workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toMatchObject({
+      teamRevision: 5,
+      responsibility: { revision: 2, contributorMemberIds: [] },
+    })
+    await workbench.close()
+  })
+
+  it.each([
+    ['proposal', 'BEFORE INSERT ON workbench_suggested_change'],
+    ['evidence', 'BEFORE INSERT ON workbench_suggested_change_evidence'],
+    ['Outbox', 'BEFORE INSERT ON workbench_outbox'],
+    ['audit event', 'BEFORE INSERT ON workbench_audit_event'],
+    ['audit head', 'BEFORE UPDATE ON workbench_audit_head'],
+    ['receipt', 'BEFORE INSERT ON workbench_command_receipt'],
+  ] as const)('rolls back a SuggestedChange proposal when the %s stage fails', async (label, point) => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const database = connection(workbench)
+    const baseline = suggestedChangeArtifactCounts(database)
+    database.exec(`
+      CREATE TRIGGER injected_t06_proposal_failure ${point}
+      BEGIN SELECT RAISE(ABORT, 'injected T06 proposal ${label} failure'); END
+    `)
+    await expect(workbench.commitSuggestedChangeProposal(suggestedChangeProposalCommand(
+      `fault-proposal-${label.replaceAll(' ', '-')}`,
+      2,
+      {
+        accountableMemberId: 'member-review-owner',
+        contributorMemberIds: ['member-review-contributor'],
+        humanSponsorMemberId: null,
+      },
+    ), signal)).rejects.toThrow(/injected T06 proposal/u)
+    expect(suggestedChangeArtifactCounts(database)).toEqual(baseline)
+    database.exec('DROP TRIGGER injected_t06_proposal_failure')
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    expect(suggestedChangeArtifactCounts(connection(restarted))).toEqual(baseline)
+    await restarted.close()
+  })
+
+  it.each([
+    ['Responsibility version', 'BEFORE INSERT ON workbench_project_responsibility_version'],
+    ['Contributor', 'BEFORE INSERT ON workbench_project_responsibility_contributor'],
+    ['Team head', 'BEFORE UPDATE ON workbench_project_team_head'],
+    ['SuggestedChange head', 'BEFORE UPDATE ON workbench_suggested_change'],
+    ['Outbox', 'BEFORE INSERT ON workbench_outbox'],
+    ['audit event', 'BEFORE INSERT ON workbench_audit_event'],
+    ['audit head', 'BEFORE UPDATE ON workbench_audit_head'],
+    ['receipt', 'BEFORE INSERT ON workbench_command_receipt'],
+    ['decision', 'BEFORE INSERT ON workbench_suggested_change_decision'],
+  ] as const)('rolls back acceptance when the %s stage fails', async (label, point) => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand(`fault-decision-${label.replaceAll(' ', '-')}`, 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    const database = connection(workbench)
+    const baseline = suggestedChangeArtifactCounts(database)
+    database.exec(`
+      CREATE TRIGGER injected_t06_decision_failure ${point}
+      BEGIN SELECT RAISE(ABORT, 'injected T06 decision ${label} failure'); END
+    `)
+    await expect(workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      `fault-decision-${label.replaceAll(' ', '-')}`,
+      proposal.suggestedChangeId,
+      1,
+      'accept',
+      { acknowledgedRiskLevel: 'high' },
+    ), signal)).rejects.toThrow(/injected T06 decision/u)
+    expect(suggestedChangeArtifactCounts(database)).toEqual(baseline)
+    database.exec('DROP TRIGGER injected_t06_decision_failure')
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    expect(suggestedChangeArtifactCounts(connection(restarted))).toEqual(baseline)
+    await expect(restarted.readReviewCenter({
+      organizationId: 'organization-test', teamId: 'team-test',
+      filter: { projectId: 'project-team', status: 'pending', limit: 20 },
+    }, signal)).resolves.toMatchObject({
+      proposalBuilder: { teamRevision: 2, responsibilityRevision: null },
+      items: [{ suggestedChangeId: proposal.suggestedChangeId, revision: 1 }],
+    })
+    await restarted.close()
+  })
+
+  it('rejects a coherently rewritten diff, digest, and risk that is no longer bound to history', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('correlated-tamper', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    const before = {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: [] as string[],
+      humanSponsorMemberId: null,
+    }
+    const after = proposal.candidate
+    const digestMaterial = {
+      kind: 'project-responsibility.diff',
+      schemaVersion: 1,
+      before,
+      after,
+      changedFields: ['contributors'],
+    }
+    const digest = `sha256:${createHash('sha256')
+      .update(canonicalizeJson(digestMaterial), 'utf8').digest('hex')}`
+    const forgedDiff = canonicalizeJson({ ...digestMaterial, digest })
+    const database = connection(workbench)
+    database.exec('DROP TRIGGER workbench_suggested_change_envelope_no_update')
+    database.prepare(`
+      UPDATE workbench_suggested_change
+      SET proposed_diff_json = ?, proposed_diff_digest = ?,
+        proposed_risk_level = 'low', proposed_risk_reasons_json = '["contributors-only"]'
+      WHERE id = ?
+    `).run(forgedDiff, digest, proposal.suggestedChangeId)
+    database.exec(`
+      CREATE TRIGGER workbench_suggested_change_envelope_no_update BEFORE UPDATE OF
+        sequence, id, organization_id, team_id, project_id, source_actor_id,
+        target_adapter, representation_schema_version, base_team_revision,
+        base_responsibility_revision, candidate_json, proposed_diff_json,
+        proposed_diff_digest, proposed_risk_level, proposed_risk_reasons_json,
+        policy_version, origin_causation_id, proposal_command_id, created_at
+        ON workbench_suggested_change
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange envelopes are immutable'); END
+    `)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await expect(restarted.open()).rejects.toThrow(/review material is not bound to target history/u)
+    await restarted.close()
+  })
+
+  it('rejects an accepted decision coherently rewritten away from its immutable proposal', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('accepted-candidate-tamper', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    await workbench.commitSuggestedChangeDecision(suggestedChangeDecisionCommand(
+      'accepted-candidate-tamper', proposal.suggestedChangeId, 1, 'accept',
+      { acknowledgedRiskLevel: 'high' },
+    ), signal)
+
+    const before = {
+      accountableMemberId: null,
+      contributorMemberIds: [] as string[],
+      humanSponsorMemberId: null,
+    }
+    const forgedCandidate = {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: [] as string[],
+      humanSponsorMemberId: null,
+    }
+    const digestMaterial = {
+      kind: 'project-responsibility.diff',
+      schemaVersion: 1,
+      before,
+      after: forgedCandidate,
+      changedFields: ['accountable'],
+    }
+    const digest = `sha256:${createHash('sha256')
+      .update(canonicalizeJson(digestMaterial), 'utf8').digest('hex')}`
+    const forgedDiff = canonicalizeJson({ ...digestMaterial, digest })
+    const database = connection(workbench)
+    database.exec(`
+      DROP TRIGGER workbench_suggested_change_decision_no_update;
+      DROP TRIGGER workbench_project_responsibility_no_update;
+      DROP TRIGGER workbench_project_responsibility_contributor_no_delete;
+    `)
+    database.prepare(`
+      UPDATE workbench_suggested_change_decision
+      SET applied_candidate_json = ?, applied_diff_json = ?
+      WHERE suggested_change_id = ? AND mode = 'accepted'
+    `).run(canonicalizeJson(forgedCandidate), forgedDiff, proposal.suggestedChangeId)
+    database.prepare(`
+      UPDATE workbench_project_responsibility_version
+      SET contributor_count = 0
+      WHERE project_id = 'project-team' AND revision = 1
+    `).run()
+    database.prepare(`
+      DELETE FROM workbench_project_responsibility_contributor
+      WHERE project_id = 'project-team' AND responsibility_revision = 1
+    `).run()
+    database.exec(`
+      CREATE TRIGGER workbench_suggested_change_decision_no_update
+        BEFORE UPDATE ON workbench_suggested_change_decision
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange decisions are append-only'); END;
+      CREATE TRIGGER workbench_project_responsibility_no_update
+        BEFORE UPDATE ON workbench_project_responsibility_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Responsibility versions are append-only'); END;
+      CREATE TRIGGER workbench_project_responsibility_contributor_no_delete
+        BEFORE DELETE ON workbench_project_responsibility_contributor
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Responsibility contributors cannot be deleted'); END;
+    `)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await expect(restarted.open()).rejects.toThrow(/immutable proposal candidate/u)
+    await restarted.close()
+  })
+
+  it.each(['rejected', 'deferred'] as const)(
+    'rejects a forged %s decision that reuses the proposal ledger artifacts',
+    async persistedState => {
+      const path = await databasePath()
+      const workbench = repository(path)
+      await workbench.open()
+      await createReviewFixture(workbench)
+      const suffix = `forged-ledger-${persistedState}`
+      const proposal = suggestedChangeProposalCommand(suffix, 2, {
+        accountableMemberId: 'member-review-owner',
+        contributorMemberIds: ['member-review-contributor'],
+        humanSponsorMemberId: null,
+      })
+      await workbench.commitSuggestedChangeProposal(proposal, signal)
+      const database = connection(workbench)
+      database.prepare(`
+        INSERT INTO workbench_suggested_change_decision (
+          id, suggested_change_id, suggested_change_revision, mode, actor_id,
+          feedback, applied_candidate_json, applied_diff_json, applied_risk_level,
+          applied_risk_reasons_json, applied_team_revision,
+          applied_responsibility_revision, causation_id, command_id,
+          audit_event_id, outbox_id, decided_at
+        ) VALUES (?, ?, 2, ?, 'owner-test', ?, NULL, NULL, NULL, '[]', NULL, NULL,
+          ?, ?, ?, ?, ?)
+      `).run(
+        `decision-${suffix}`,
+        proposal.suggestedChangeId,
+        persistedState,
+        `Forged ${persistedState} decision`,
+        proposal.command.causationId,
+        proposal.command.commandId,
+        proposal.command.auditEventId,
+        proposal.command.outboxId,
+        proposal.createdAt,
+      )
+      database.prepare(`
+        UPDATE workbench_suggested_change
+        SET revision = 2, persisted_state = ?, updated_at = ?
+        WHERE id = ?
+      `).run(persistedState, proposal.createdAt, proposal.suggestedChangeId)
+      await workbench.close()
+
+      const restarted = repository(path)
+      await expect(restarted.open()).rejects.toThrow(/formal command ledger/u)
+      await restarted.close()
+    },
+  )
+
+  it('rejects a forged mutable head even when the transition trigger is restored', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('head-tamper', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    const database = connection(workbench)
+    database.exec(`
+      DROP TRIGGER workbench_suggested_change_head_transition;
+      UPDATE workbench_suggested_change
+      SET revision = 2, persisted_state = 'accepted', updated_at = '2026-08-31T15:00:00.000Z'
+      WHERE id = 'suggested-change-head-tamper';
+      CREATE TRIGGER workbench_suggested_change_head_transition BEFORE UPDATE OF
+        revision, persisted_state, updated_at ON workbench_suggested_change
+      WHEN NOT (
+        NEW.revision = OLD.revision + 1
+        AND NEW.updated_at >= OLD.updated_at
+        AND (
+          (OLD.persisted_state = 'pending'
+            AND NEW.persisted_state IN ('deferred', 'accepted', 'rejected'))
+          OR (OLD.persisted_state = 'deferred'
+            AND NEW.persisted_state IN ('accepted', 'rejected'))
+        )
+      )
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange head transition is invalid'); END;
+    `)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await expect(restarted.open()).rejects.toThrow(/revision does not match decision history/u)
+    await restarted.close()
+  })
+
+  it.each([
+    ['another Project', 'audit-project-evidence-other'],
+    ['an event after the proposal', 'audit-member-evidence-later'],
+  ] as const)('rejects stored EvidenceRefs redirected to %s', async (_label, forgedAuditId) => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('evidence-tamper', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    })
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    if (forgedAuditId === 'audit-project-evidence-other') {
+      await workbench.commitProject(projectCommand('evidence-other', 1), signal)
+    } else {
+      await workbench.commitProjectMember(memberCommand('evidence-later', 2, {
+        kind: 'agent', displayName: 'Later Evidence Agent',
+      }), signal)
+    }
+    const database = connection(workbench)
+    database.exec('DROP TRIGGER workbench_suggested_change_evidence_no_update')
+    database.prepare(`
+      UPDATE workbench_suggested_change_evidence SET audit_event_id = ?
+      WHERE suggested_change_id = ? AND ordinal = 1
+    `).run(forgedAuditId, proposal.suggestedChangeId)
+    database.exec(`
+      CREATE TRIGGER workbench_suggested_change_evidence_no_update
+        BEFORE UPDATE ON workbench_suggested_change_evidence
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange evidence is immutable'); END
+    `)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await expect(restarted.open()).rejects.toThrow(/evidence escaped its Project/u)
+    await restarted.close()
+  })
+
+  it('rejects stored EvidenceRef ordinals rewritten out of canonical audit id order', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createReviewFixture(workbench)
+    const proposal = suggestedChangeProposalCommand('evidence-order-tamper', 2, {
+      accountableMemberId: 'member-review-owner',
+      contributorMemberIds: ['member-review-contributor'],
+      humanSponsorMemberId: null,
+    }, ['audit-member-review-owner', 'audit-project-team'])
+    await workbench.commitSuggestedChangeProposal(proposal, signal)
+    const database = connection(workbench)
+    database.exec('DROP TRIGGER workbench_suggested_change_evidence_no_update')
+    database.prepare(`
+      UPDATE workbench_suggested_change_evidence SET ordinal = 20
+      WHERE suggested_change_id = ? AND ordinal = 1
+    `).run(proposal.suggestedChangeId)
+    database.prepare(`
+      UPDATE workbench_suggested_change_evidence SET ordinal = 1
+      WHERE suggested_change_id = ? AND ordinal = 2
+    `).run(proposal.suggestedChangeId)
+    database.prepare(`
+      UPDATE workbench_suggested_change_evidence SET ordinal = 2
+      WHERE suggested_change_id = ? AND ordinal = 20
+    `).run(proposal.suggestedChangeId)
+    database.exec(`
+      CREATE TRIGGER workbench_suggested_change_evidence_no_update
+        BEFORE UPDATE ON workbench_suggested_change_evidence
+      BEGIN SELECT RAISE(ABORT, 'workbench SuggestedChange evidence is immutable'); END
+    `)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await expect(restarted.open()).rejects.toThrow(/canonical order/u)
+    await restarted.close()
   })
 })

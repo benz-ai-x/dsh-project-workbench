@@ -30,6 +30,7 @@ export interface ActivityPanelCopy {
   readonly objectProject: string
   readonly objectProjectMember: string
   readonly objectProjectResponsibility: string
+  readonly objectSuggestedChange: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -38,6 +39,11 @@ export interface ActivityPanelCopy {
   readonly actionProjectMemberCreated: string
   readonly actionProjectMemberStatusChanged: string
   readonly actionProjectResponsibilityAssigned: string
+  readonly actionSuggestedChangeProposed: string
+  readonly actionSuggestedChangeAccepted: string
+  readonly actionSuggestedChangeEditedAccepted: string
+  readonly actionSuggestedChangeRejected: string
+  readonly actionSuggestedChangeDeferred: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -62,6 +68,11 @@ export interface ActivityPanelCopy {
   readonly summaryProjectMemberCreated: string
   readonly summaryProjectMemberStatusChanged: string
   readonly summaryProjectResponsibilityAssigned: string
+  readonly summarySuggestedChangeProposed: string
+  readonly summarySuggestedChangeAccepted: string
+  readonly summarySuggestedChangeEditedAccepted: string
+  readonly summarySuggestedChangeRejected: string
+  readonly summarySuggestedChangeDeferred: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -73,6 +84,11 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerProjectMemberAdd: string
   readonly reasonOwnerProjectMemberStatusChange: string
   readonly reasonOwnerProjectResponsibilitySet: string
+  readonly reasonOwnerSuggestedChangePropose: string
+  readonly reasonOwnerSuggestedChangeAccept: string
+  readonly reasonOwnerSuggestedChangeEditAccept: string
+  readonly reasonOwnerSuggestedChangeReject: string
+  readonly reasonOwnerSuggestedChangeDefer: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -98,6 +114,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectProject: 'Project',
   objectProjectMember: 'ProjectMember',
   objectProjectResponsibility: 'Project Responsibility',
+  objectSuggestedChange: 'SuggestedChange',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -106,6 +123,11 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionProjectMemberCreated: 'ProjectMember created',
   actionProjectMemberStatusChanged: 'Member status changed',
   actionProjectResponsibilityAssigned: 'Project Responsibility assigned',
+  actionSuggestedChangeProposed: 'SuggestedChange proposed',
+  actionSuggestedChangeAccepted: 'SuggestedChange accepted',
+  actionSuggestedChangeEditedAccepted: 'SuggestedChange edited and accepted',
+  actionSuggestedChangeRejected: 'SuggestedChange rejected',
+  actionSuggestedChangeDeferred: 'SuggestedChange deferred',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -130,6 +152,11 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summaryProjectMemberCreated: 'ProjectMember added',
   summaryProjectMemberStatusChanged: 'ProjectMember status changed',
   summaryProjectResponsibilityAssigned: 'Project Responsibility replaced',
+  summarySuggestedChangeProposed: 'SuggestedChange proposed',
+  summarySuggestedChangeAccepted: 'SuggestedChange accepted',
+  summarySuggestedChangeEditedAccepted: 'SuggestedChange edited and accepted',
+  summarySuggestedChangeRejected: 'SuggestedChange rejected',
+  summarySuggestedChangeDeferred: 'SuggestedChange deferred',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -141,6 +168,11 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerProjectMemberAdd: 'Owner ProjectMember addition',
   reasonOwnerProjectMemberStatusChange: 'Owner ProjectMember status change',
   reasonOwnerProjectResponsibilitySet: 'Owner Project Responsibility assignment',
+  reasonOwnerSuggestedChangePropose: 'Owner SuggestedChange proposal',
+  reasonOwnerSuggestedChangeAccept: 'Owner SuggestedChange acceptance',
+  reasonOwnerSuggestedChangeEditAccept: 'Owner SuggestedChange edit and acceptance',
+  reasonOwnerSuggestedChangeReject: 'Owner SuggestedChange rejection',
+  reasonOwnerSuggestedChangeDefer: 'Owner SuggestedChange deferral',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -156,6 +188,31 @@ export interface ActivityPanelProps {
 }
 
 type ProjectScope = 'all' | 'workspace' | 'project'
+
+function isActivityObjectType(
+  value: string,
+): value is NonNullable<WorkbenchActivityFilter['objectType']> {
+  return value === 'workbench-status'
+    || value === 'project'
+    || value === 'project-member'
+    || value === 'project-responsibility'
+    || value === 'suggested-change'
+}
+
+function isActivityAction(
+  value: string,
+): value is NonNullable<WorkbenchActivityFilter['action']> {
+  return value === 'workbench.status.updated'
+    || value === 'workbench.project.created'
+    || value === 'workbench.project-member.created'
+    || value === 'workbench.project-member.status-changed'
+    || value === 'workbench.project.responsibility-assigned'
+    || value === 'workbench.suggested-change.proposed'
+    || value === 'workbench.suggested-change.accepted'
+    || value === 'workbench.suggested-change.edited-accepted'
+    || value === 'workbench.suggested-change.rejected'
+    || value === 'workbench.suggested-change.deferred'
+}
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
 export function ActivityPanel({
@@ -204,17 +261,9 @@ export function ActivityPanel({
         : projectScope === 'project'
           ? { projectId: projectId.trim() }
           : {}),
-      ...(objectType === 'workbench-status' || objectType === 'project'
-        || objectType === 'project-member' || objectType === 'project-responsibility'
-        ? { objectType }
-        : {}),
+      ...(isActivityObjectType(objectType) ? { objectType } : {}),
       ...(objectId.trim() === '' ? {} : { objectId: objectId.trim() }),
-      ...(action === 'workbench.status.updated' || action === 'workbench.project.created'
-        || action === 'workbench.project-member.created'
-        || action === 'workbench.project-member.status-changed'
-        || action === 'workbench.project.responsibility-assigned'
-        ? { action }
-        : {}),
+      ...(isActivityAction(action) ? { action } : {}),
     }
     void controller.setFilter(Object.freeze(next))
   }
@@ -303,6 +352,7 @@ export function ActivityPanel({
                 <option value="project">{copy.objectProject}</option>
                 <option value="project-member">{copy.objectProjectMember}</option>
                 <option value="project-responsibility">{copy.objectProjectResponsibility}</option>
+                <option value="suggested-change">{copy.objectSuggestedChange}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -333,6 +383,21 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.project.responsibility-assigned">
                   {copy.actionProjectResponsibilityAssigned}
+                </option>
+                <option value="workbench.suggested-change.proposed">
+                  {copy.actionSuggestedChangeProposed}
+                </option>
+                <option value="workbench.suggested-change.accepted">
+                  {copy.actionSuggestedChangeAccepted}
+                </option>
+                <option value="workbench.suggested-change.edited-accepted">
+                  {copy.actionSuggestedChangeEditedAccepted}
+                </option>
+                <option value="workbench.suggested-change.rejected">
+                  {copy.actionSuggestedChangeRejected}
+                </option>
+                <option value="workbench.suggested-change.deferred">
+                  {copy.actionSuggestedChangeDeferred}
                 </option>
               </select>
             </label>
@@ -504,6 +569,11 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'project-member-created': return copy.summaryProjectMemberCreated
     case 'project-member-status-changed': return copy.summaryProjectMemberStatusChanged
     case 'project-responsibility-assigned': return copy.summaryProjectResponsibilityAssigned
+    case 'suggested-change-proposed': return copy.summarySuggestedChangeProposed
+    case 'suggested-change-accepted': return copy.summarySuggestedChangeAccepted
+    case 'suggested-change-edited-accepted': return copy.summarySuggestedChangeEditedAccepted
+    case 'suggested-change-rejected': return copy.summarySuggestedChangeRejected
+    case 'suggested-change-deferred': return copy.summarySuggestedChangeDeferred
   }
 }
 
@@ -514,6 +584,11 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-project-member-add': return copy.reasonOwnerProjectMemberAdd
     case 'owner-project-member-status-change': return copy.reasonOwnerProjectMemberStatusChange
     case 'owner-project-responsibility-set': return copy.reasonOwnerProjectResponsibilitySet
+    case 'owner-suggested-change-propose': return copy.reasonOwnerSuggestedChangePropose
+    case 'owner-suggested-change-accept': return copy.reasonOwnerSuggestedChangeAccept
+    case 'owner-suggested-change-edit-accept': return copy.reasonOwnerSuggestedChangeEditAccept
+    case 'owner-suggested-change-reject': return copy.reasonOwnerSuggestedChangeReject
+    case 'owner-suggested-change-defer': return copy.reasonOwnerSuggestedChangeDefer
   }
 }
 

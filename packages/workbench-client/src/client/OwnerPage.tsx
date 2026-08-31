@@ -13,6 +13,7 @@ import { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 import { ActivityPanel, type ActivityPanelCopy } from './ActivityPanel.tsx'
 import { ProjectsPanel } from './ProjectsPanel.tsx'
 import { ProjectTeamPanel } from './ProjectTeamPanel.tsx'
+import { ReviewCenterPanel } from './ReviewCenterPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -224,6 +225,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.status !== null
     && state.projects !== null
     && state.projectTeam !== null
+    && state.review !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -260,6 +262,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
         <WorkbenchStatusPage controller={state.status} t={t}>
           <ProjectsPanel controller={state.projects} t={t} />
           <ProjectTeamPanel controller={state.projectTeam} t={t} />
+          <ReviewCenterPanel controller={state.review} t={t} />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
       </div>
@@ -362,6 +365,7 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectProject: t('activity.object.project'),
     objectProjectMember: t('activity.object.projectMember'),
     objectProjectResponsibility: t('activity.object.projectResponsibility'),
+    objectSuggestedChange: t('activity.object.suggestedChange'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
@@ -370,6 +374,11 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     actionProjectMemberCreated: t('activity.action.projectMemberCreated'),
     actionProjectMemberStatusChanged: t('activity.action.projectMemberStatusChanged'),
     actionProjectResponsibilityAssigned: t('activity.action.projectResponsibilityAssigned'),
+    actionSuggestedChangeProposed: t('activity.action.suggestedChangeProposed'),
+    actionSuggestedChangeAccepted: t('activity.action.suggestedChangeAccepted'),
+    actionSuggestedChangeEditedAccepted: t('activity.action.suggestedChangeEditedAccepted'),
+    actionSuggestedChangeRejected: t('activity.action.suggestedChangeRejected'),
+    actionSuggestedChangeDeferred: t('activity.action.suggestedChangeDeferred'),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -394,6 +403,11 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     summaryProjectMemberCreated: t('activity.summary.projectMemberCreated'),
     summaryProjectMemberStatusChanged: t('activity.summary.projectMemberStatusChanged'),
     summaryProjectResponsibilityAssigned: t('activity.summary.projectResponsibilityAssigned'),
+    summarySuggestedChangeProposed: t('activity.summary.suggestedChangeProposed'),
+    summarySuggestedChangeAccepted: t('activity.summary.suggestedChangeAccepted'),
+    summarySuggestedChangeEditedAccepted: t('activity.summary.suggestedChangeEditedAccepted'),
+    summarySuggestedChangeRejected: t('activity.summary.suggestedChangeRejected'),
+    summarySuggestedChangeDeferred: t('activity.summary.suggestedChangeDeferred'),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -405,6 +419,11 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonOwnerProjectMemberAdd: t('activity.reason.ownerProjectMemberAdd'),
     reasonOwnerProjectMemberStatusChange: t('activity.reason.ownerProjectMemberStatusChange'),
     reasonOwnerProjectResponsibilitySet: t('activity.reason.ownerProjectResponsibilitySet'),
+    reasonOwnerSuggestedChangePropose: t('activity.reason.ownerSuggestedChangePropose'),
+    reasonOwnerSuggestedChangeAccept: t('activity.reason.ownerSuggestedChangeAccept'),
+    reasonOwnerSuggestedChangeEditAccept: t('activity.reason.ownerSuggestedChangeEditAccept'),
+    reasonOwnerSuggestedChangeReject: t('activity.reason.ownerSuggestedChangeReject'),
+    reasonOwnerSuggestedChangeDefer: t('activity.reason.ownerSuggestedChangeDefer'),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),

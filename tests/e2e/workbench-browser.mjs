@@ -48,6 +48,9 @@ const WORKBENCH_PROJECT_TEAM_PATH = '/api/workbench/projectTeam'
 const WORKBENCH_ADD_PROJECT_MEMBER_PATH = '/api/workbench/addProjectMember'
 const WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH = '/api/workbench/setProjectMemberStatus'
 const WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH = '/api/workbench/setProjectResponsibility'
+const WORKBENCH_REVIEW_CENTER_PATH = '/api/workbench/reviewCenter'
+const WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH = '/api/workbench/proposeProjectResponsibilityChange'
+const WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH = '/api/workbench/decideSuggestedChange'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -580,7 +583,27 @@ async function assertActivityProjection(page, eventCount, ...protectedBusinessTe
         .waitFor({ state: 'visible' })
     }
     if (eventCount >= 8) {
-      await panel.getByRole('heading', { name: '已替换 Project Responsibility' })
+      await panel.getByRole('heading', { name: '已替换 Project Responsibility' }).first()
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 9) {
+      await panel.getByRole('heading', { name: '已创建 SuggestedChange' }).first()
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 10) {
+      await panel.getByRole('heading', { name: '已延期 SuggestedChange' }).first()
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 12) {
+      await panel.getByRole('heading', { name: '已接受 SuggestedChange' }).first()
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 15) {
+      await panel.getByRole('heading', { name: '已拒绝 SuggestedChange' }).first()
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 17) {
+      await panel.getByRole('heading', { name: '已编辑并接受 SuggestedChange' }).first()
         .waitFor({ state: 'visible' })
     }
     const pendingOutbox = panel.getByText('待投递', { exact: true })
@@ -653,6 +676,338 @@ function projectTeamPanel(page) {
   return page.locator('section[aria-labelledby="workbench-project-team-title"]')
 }
 
+function reviewCenterPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-review-center-title"]')
+}
+
+function reviewCardHeadings(panel) {
+  return panel.getByRole('heading', { name: /^建议 #\d+$/u })
+}
+
+function reviewCard(panel, heading) {
+  return panel.locator('article').filter({ hasText: heading }).first()
+}
+
+function reviewFilterSelect(panel, index) {
+  return panel.getByRole('group', { name: '筛选 Review 建议', exact: true })
+    .getByRole('combobox').nth(index)
+}
+
+async function selectOptionContaining(select, text) {
+  const value = await select.locator('option').evaluateAll((options, expected) => {
+    const match = options.find(option => option.textContent?.trim().includes(expected) === true)
+    return match?.value
+  }, text)
+  assert.notEqual(value, undefined, `select did not contain an option matching ${JSON.stringify(text)}`)
+  await select.selectOption(value)
+}
+
+async function setNamedCheckbox(group, name, checked) {
+  const checkbox = group.getByRole('checkbox', { name })
+  await checkbox.waitFor({ state: 'visible' })
+  if (await checkbox.isDisabled()) {
+    assert.equal(await checkbox.isChecked(), checked, `${name}: disabled checkbox has the wrong state`)
+    return
+  }
+  if (checked) await checkbox.check()
+  else await checkbox.uncheck()
+}
+
+async function applyReviewFilters(panel, status, risk, expectedHeadings) {
+  await reviewFilterSelect(panel, 0).selectOption({ label: status })
+  await reviewFilterSelect(panel, 1).selectOption({ label: risk })
+  await panel.getByRole('button', { name: '应用筛选', exact: true }).click()
+  const expected = [...expectedHeadings].sort()
+  await waitForCondition(
+    async () => {
+      const actual = [...await reviewCardHeadings(panel).allTextContents()].sort()
+      return await panel.getAttribute('aria-busy') === 'false'
+        && actual.length === expected.length
+        && actual.every((heading, index) => heading === expected[index])
+    },
+    PAGE_TIMEOUT_MS,
+    `Review filter ${status}/${risk}`,
+  )
+  const actual = await reviewCardHeadings(panel).allTextContents()
+  assert.deepEqual(
+    [...actual].sort(),
+    expected,
+    `Review filter ${status}/${risk} returned the wrong cards`,
+  )
+}
+
+async function assertNoBatchAccept(panel) {
+  assert.equal(
+    await panel.getByRole('button', { name: /(?:批量|批次).*(?:接受|通过)/u }).count(),
+    0,
+    'T06 unexpectedly exposed a batch-accept action',
+  )
+}
+
+async function configureProposal(panel, activeMemberNames, candidate) {
+  await selectOptionContaining(
+    panel.getByRole('combobox', { name: '提案 Accountable', exact: true }),
+    candidate.accountable,
+  )
+  const contributors = panel.getByRole('group', { name: '提案 Contributors', exact: true })
+  for (const name of activeMemberNames) {
+    await setNamedCheckbox(contributors, name, candidate.contributors.includes(name))
+  }
+  const sponsor = panel.getByRole('combobox', { name: '提案 Human Sponsor', exact: true })
+  if (candidate.sponsor === null) {
+    if (await sponsor.isDisabled()) assert.equal(await sponsor.inputValue(), '')
+    else await sponsor.selectOption('')
+  } else {
+    await selectOptionContaining(sponsor, candidate.sponsor)
+  }
+}
+
+async function createProposalViaUi(panel, activeMemberNames, candidate) {
+  await configureProposal(panel, activeMemberNames, candidate)
+  const evidence = panel.getByRole('group', { name: '提案 Evidence', exact: true })
+    .getByRole('checkbox').first()
+  await evidence.waitFor({ state: 'visible' })
+  await evidence.check()
+  const before = new Set(await reviewCardHeadings(panel).allTextContents())
+  const create = panel.getByRole('button', { name: '创建建议', exact: true })
+  assert.equal(await create.isEnabled(), true, 'valid Review proposal stayed disabled')
+  await create.click()
+  await waitForCondition(
+    async () => (await reviewCardHeadings(panel).allTextContents())
+      .some(heading => !before.has(heading)),
+    PAGE_TIMEOUT_MS,
+    'new SuggestedChange card',
+  )
+  const headings = await reviewCardHeadings(panel).allTextContents()
+  const heading = headings.find(value => !before.has(value))
+  assert.notEqual(heading, undefined, 'proposal did not add one identifiable Review card')
+  const card = reviewCard(panel, heading)
+  await card.getByRole('heading', { name: heading, exact: true }).waitFor({ state: 'visible' })
+  const evidenceSection = card.getByRole('heading', { name: '证据', exact: true }).locator('..')
+  const evidenceAuditEventId = (await evidenceSection.locator('code').first().textContent())?.trim()
+  assert.ok(
+    evidenceAuditEventId !== undefined && evidenceAuditEventId.length > 0,
+    'Review card did not retain its inspectable evidence reference',
+  )
+  return { evidenceAuditEventId, heading }
+}
+
+const reviewDiffFieldLabels = Object.freeze({
+  accountable: 'Accountable',
+  contributors: 'Contributors',
+  'human-sponsor': 'Human Sponsor',
+})
+
+function reviewSequenceFromHeading(heading) {
+  const match = /^建议 #(\d+)$/u.exec(heading)
+  assert.notEqual(match, null, `invalid Review card heading ${JSON.stringify(heading)}`)
+  return Number(match[1])
+}
+
+async function readReviewItemViaCarrier(page, projectId, heading) {
+  const review = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_REVIEW_CENTER_PATH,
+    { filter: { projectId, limit: 20 } },
+  )
+  assert.notEqual(review, null, 'authenticated Review read lost the selected Project')
+  const sequence = reviewSequenceFromHeading(heading)
+  const item = review.items.find(candidate => candidate.sequence === sequence)
+  assert.notEqual(item, undefined, `authenticated Review read lost ${heading}`)
+  return { item, memberOptions: review.proposalBuilder.memberOptions }
+}
+
+function reviewDiffValue(field, value, memberOptions) {
+  const memberNames = new Map(memberOptions.map(member => {
+    const parts = [
+      member.displayName,
+      member.kind === 'human' ? '人类' : 'Agent',
+      member.memberId,
+    ]
+    if (member.kind === 'human' && member.requiresHumanSponsor) parts.push('外部联系人')
+    if (member.status !== 'active') parts.push('已停用')
+    return [member.memberId, parts.join(' · ')]
+  }))
+  const memberName = memberId => {
+    if (memberId === null) return '未设置'
+    return memberNames.get(memberId) ?? memberId
+  }
+  if (field === 'accountable') return memberName(value.accountableMemberId)
+  if (field === 'human-sponsor') return memberName(value.humanSponsorMemberId)
+  if (value.contributorMemberIds.length === 0) return '未设置'
+  return value.contributorMemberIds.map(memberName).join('、')
+}
+
+async function assertReviewDiffTable(table, diff, memberOptions, digestLabel) {
+  await table.waitFor({ state: 'visible' })
+  for (const header of ['字段', '变更前', '变更后']) {
+    await table.getByRole('columnheader', { name: header, exact: true })
+      .waitFor({ state: 'visible' })
+  }
+  assert.equal(
+    await table.locator('tbody').getByRole('row').count(),
+    diff.changedFields.length,
+    'SuggestedChange diff did not match its typed changedFields row count',
+  )
+  for (const field of diff.changedFields) {
+    const fieldLabel = reviewDiffFieldLabels[field]
+    assert.notEqual(fieldLabel, undefined, `unsupported Review diff field ${String(field)}`)
+    const rowHeader = table.getByRole('rowheader', { name: fieldLabel, exact: true })
+    await rowHeader.waitFor({ state: 'visible' })
+    const actualCells = (await rowHeader.locator('..').getByRole('cell').allTextContents())
+      .map(value => value.trim())
+    assert.deepEqual(actualCells, [
+      reviewDiffValue(field, diff.before, memberOptions),
+      reviewDiffValue(field, diff.after, memberOptions),
+    ], `${fieldLabel} before/after cells diverged from the authenticated carrier`)
+  }
+  const digest = table.locator('xpath=../..').locator('p')
+    .filter({ hasText: digestLabel }).locator('code')
+  assert.equal((await digest.textContent())?.trim(), diff.digest)
+  return diff.digest
+}
+
+async function assertSuggestedDiff(page, projectId, card, heading) {
+  const { item, memberOptions } = await readReviewItemViaCarrier(page, projectId, heading)
+  const table = card.getByRole('table', { name: '建议差异', exact: true })
+  return await assertReviewDiffTable(table, item.proposedDiff, memberOptions, '差异摘要')
+}
+
+async function assertAppliedDiff(page, projectId, card, heading) {
+  const { item, memberOptions } = await readReviewItemViaCarrier(page, projectId, heading)
+  const decision = [...item.decisions].reverse().find(candidate => candidate.appliedDiff !== null)
+  assert.notEqual(decision, undefined, `${heading} lost its applied decision material`)
+  const table = card.getByRole('table', { name: '实际应用差异', exact: true })
+  return await assertReviewDiffTable(
+    table,
+    decision.appliedDiff,
+    memberOptions,
+    '实际应用差异摘要：',
+  )
+}
+
+async function chooseDecision(card, mode, feedback, acknowledgeHighRisk = false) {
+  await card.getByRole('button', { name: mode, exact: true }).click()
+  const submit = card.getByRole('button', { name: '提交决定', exact: true })
+  assert.equal(await submit.isDisabled(), true, `${mode}: empty mandatory feedback enabled submit`)
+  await card.getByLabel('反馈原因', { exact: true }).fill(feedback)
+  if (acknowledgeHighRisk) {
+    assert.equal(await submit.isDisabled(), true, `${mode}: high-risk submit skipped confirmation`)
+    await card.getByLabel('我已核对高风险差异与证据', { exact: true }).check()
+  }
+  assert.equal(await submit.isEnabled(), true, `${mode}: valid decision stayed disabled`)
+  await submit.click()
+  await card.getByRole('heading', { name: '审核历史', exact: true }).waitFor({ state: 'visible' })
+  await card.getByText(feedback, { exact: true }).waitFor({ state: 'visible' })
+}
+
+async function configureEditedDecision(card, activeMemberNames, candidate) {
+  await selectOptionContaining(
+    card.getByRole('combobox', { name: '编辑后的 Accountable', exact: true }),
+    candidate.accountable,
+  )
+  const contributors = card.getByRole('group', {
+    name: '编辑后的 Contributors',
+    exact: true,
+  })
+  for (const name of activeMemberNames) {
+    await setNamedCheckbox(contributors, name, candidate.contributors.includes(name))
+  }
+  const sponsor = card.getByRole('combobox', {
+    name: '编辑后的 Human Sponsor',
+    exact: true,
+  })
+  if (candidate.sponsor === null) {
+    if (await sponsor.isDisabled()) assert.equal(await sponsor.inputValue(), '')
+    else await sponsor.selectOption('')
+  } else {
+    await selectOptionContaining(sponsor, candidate.sponsor)
+  }
+}
+
+async function callAuthenticatedWorkbench(page, path, args) {
+  const outcome = await page.evaluate(async ({ path, args }) => {
+    const method = path.slice('/api/'.length)
+    const rpcId = crypto.randomUUID()
+    const response = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId,
+        method,
+        payload: { args },
+      }),
+    })
+    return {
+      body: await response.json(),
+      ok: response.ok,
+      rpcId,
+      status: response.status,
+    }
+  }, { path, args })
+  assert.equal(outcome.status, 200, `${path}: authenticated carrier returned HTTP ${String(outcome.status)}`)
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.body?.type, 'server-response')
+  assert.equal(outcome.body?.rpcId, outcome.rpcId)
+  assert.equal(outcome.body?.result?.ok, true, `${path}: authenticated carrier failed`)
+  return outcome.body.result.value
+}
+
+async function findProjectIdViaCarrier(page, projectName) {
+  const start = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_START_PATH,
+    { filter: { limit: 20 } },
+  )
+  const project = start.projects.find(candidate => candidate.name === projectName)
+  assert.notEqual(project, undefined, 'authenticated Project catalog did not contain the UI-created Project')
+  return project.projectId
+}
+
+async function readTeamViaCarrier(page, projectId) {
+  const team = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_TEAM_PATH,
+    { query: { projectId } },
+  )
+  assert.notEqual(team, null, 'authenticated Team read lost the selected Project')
+  return team
+}
+
+async function advanceResponsibilityViaCarrier(page, projectId, candidate) {
+  const team = await readTeamViaCarrier(page, projectId)
+  assert.notEqual(team.responsibility, null, 'normal Responsibility write requires an existing tuple')
+  const members = new Map(team.members.map(member => [member.displayName, member.memberId]))
+  const memberId = name => {
+    const value = members.get(name)
+    assert.notEqual(value, undefined, `normal Responsibility write could not resolve ${name}`)
+    return value
+  }
+  const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  const result = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH,
+    {
+      request: {
+        projectId,
+        accountableMemberId: memberId(candidate.accountable),
+        contributorMemberIds: candidate.contributors.map(memberId).sort(),
+        humanSponsorMemberId: candidate.sponsor === null ? null : memberId(candidate.sponsor),
+        expectedTeamRevision: team.teamRevision,
+        expectedResponsibilityRevision: team.responsibility.revision,
+        idempotencyKey: `browser-stale-idem-${nonce}`,
+        causationId: `browser-stale-cause-${nonce}`,
+        reason: 'owner-project-responsibility-set',
+      },
+    },
+  )
+  assert.equal(result.ok, true, `normal Responsibility write failed: ${result.error?.code ?? 'unknown'}`)
+  return result
+}
+
 async function assertProjectTeam(page, expected) {
   const panel = projectTeamPanel(page)
   await panel.getByRole('heading', { name: 'Project Team', exact: true })
@@ -682,11 +1037,21 @@ async function assertProjectTeam(page, expected) {
   } else {
     const current = panel.locator('section[aria-label="当前 Host 责任"]')
     await current.waitFor({ state: 'visible' })
-    for (const name of [
+    const valueFor = label => current.getByText(label, { exact: true })
+      .first().locator('..').locator('dd')
+    assert.equal(
+      (await valueFor('Accountable').textContent())?.trim(),
       expected.responsibility.accountable,
-      ...expected.responsibility.contributors,
-      expected.responsibility.sponsor,
-    ]) await current.getByText(name, { exact: true }).waitFor({ state: 'visible' })
+    )
+    const contributors = (await valueFor('Contributors').textContent())?.trim().split(', ')
+    assert.deepEqual(
+      [...contributors ?? []].sort(),
+      [...expected.responsibility.contributors].sort(),
+    )
+    assert.equal(
+      (await valueFor('Human Sponsor').textContent())?.trim(),
+      expected.responsibility.sponsor ?? '无 Human Sponsor',
+    )
   }
   return panel
 }
@@ -784,7 +1149,7 @@ async function assertVisibleKeyboardFocus(locator, label) {
     document.body.removeAttribute('tabindex')
   })
   let reached = false
-  for (let attempt = 0; attempt < 64; attempt += 1) {
+  for (let attempt = 0; attempt < 128; attempt += 1) {
     await page.keyboard.press('Tab')
     reached = await locator.evaluate(element => document.activeElement === element)
     if (reached) break
@@ -905,7 +1270,7 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const initialStyleCount = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).count()
-  assert.equal(initialStyleCount, 5, 'Workbench Client did not own exactly five CSS Module resources')
+  assert.equal(initialStyleCount, 6, 'Workbench Client did not own exactly six CSS Module resources')
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -1037,12 +1402,12 @@ async function main() {
     ],
   })
 
-  const initialPassword = `T05 Owner initial ${new Date().toISOString()}!`
-  const wrongPassword = 'T05 deliberately wrong password!'
-  const firstRecoveredPassword = `T05 Owner recovered once ${new Date().toISOString()}!`
-  const finalRecoveredPassword = `T05 Owner recovered twice ${new Date().toISOString()}!`
-  const message = `T05 audited browser restart proof ${new Date().toISOString()}`
-  const projectName = `T05 browser Project ${new Date().toISOString()}`
+  const initialPassword = `T06 Owner initial ${new Date().toISOString()}!`
+  const wrongPassword = 'T06 deliberately wrong password!'
+  const firstRecoveredPassword = `T06 Owner recovered once ${new Date().toISOString()}!`
+  const finalRecoveredPassword = `T06 Owner recovered twice ${new Date().toISOString()}!`
+  const message = `T06 audited browser restart proof ${new Date().toISOString()}`
+  const projectName = `T06 browser Project ${new Date().toISOString()}`
   const primaryGoalName = '缩短 Workbench 浏览器反馈周期'
   const outcomeName = '将浏览器验证反馈周期降至三天'
   const metricName = '浏览器验证反馈周期'
@@ -1054,6 +1419,12 @@ async function main() {
   const agentAccountableName = '浏览器研究 Agent'
   const inactiveHistorianName = '浏览器历史成员'
   const inactiveHistorianContact = 'browser-historian-reference'
+  const lowDeferredFeedback = 'T06 low proposal deferred for focused browser review'
+  const highAcceptedFeedback = 'T06 high-risk ownership transfer explicitly confirmed'
+  const staleRejectedFeedback = 'T06 stale proposal rejected without overwriting Team truth'
+  const editedAcceptedFeedback = 'T06 edited candidate accepted with original high risk retained'
+  const elevatedEditedAcceptedFeedback = 'T06 low proposal edited into high risk and explicitly confirmed'
+  const finalDeferredFeedback = 'T06 final low proposal deferred after all target writes'
   const expectedHttpError = /(?:401|Unauthorized)/u
 
   // Fresh browser: setup is visible, but the protected projection is neither
@@ -1076,6 +1447,9 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
@@ -1204,6 +1578,9 @@ async function main() {
     '打开一个 Project 后，可在该项目的详情下管理成员与责任。',
     { exact: true },
   ).waitFor({ state: 'visible' })
+  const unselectedReview = reviewCenterPanel(firstJourney.page)
+  await unselectedReview.getByRole('heading', { name: 'Review Center', exact: true })
+    .waitFor({ state: 'visible' })
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
@@ -1213,6 +1590,9 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
     0,
@@ -1378,7 +1758,7 @@ async function main() {
   assert.equal(await saveResponsibility.isEnabled(), true)
   await saveResponsibility.click()
 
-  const expectedTeam = {
+  let expectedTeam = {
     members: [
       {
         name: feishuSponsorName,
@@ -1448,10 +1828,470 @@ async function main() {
     metricName,
     ...teamPrivateValues,
   )
+
+  const activeReviewMembers = [
+    feishuSponsorName,
+    externalContributorName,
+    agentAccountableName,
+  ]
+  const reviewPanel = reviewCenterPanel(firstJourney.page)
+  await reviewPanel.getByRole('heading', { name: 'Review Center', exact: true })
+    .waitFor({ state: 'visible' })
+  await reviewPanel.getByRole('combobox', { name: '提案 Accountable', exact: true })
+    .waitFor({ state: 'visible' })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH) > 0)
+  const projectId = await findProjectIdViaCarrier(firstJourney.page, projectName)
+  await applyReviewFilters(reviewPanel, '全部状态', '全部风险', [])
+  await assertNoBatchAccept(reviewPanel)
+
+  // A contributors-only proposal remains low risk and carries inspectable
+  // evidence. T06 advertises only a future batch-policy seam: this card still
+  // requires an individual decision with mandatory feedback.
+  const lowDeferred = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: agentAccountableName,
+    contributors: [externalContributorName, feishuSponsorName],
+    sponsor: feishuSponsorName,
+  })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH) > 0)
+  let lowDeferredCard = reviewCard(reviewPanel, lowDeferred.heading)
+  await assertSuggestedDiff(
+    firstJourney.page,
+    projectId,
+    lowDeferredCard,
+    lowDeferred.heading,
+  )
+  await lowDeferredCard.getByText(/Host 标记的 changed fields：.*Contributors/u)
+    .waitFor({ state: 'visible' })
+  await lowDeferredCard.getByText('低风险', { exact: true }).first().waitFor({ state: 'visible' })
+  await lowDeferredCard.getByText('低风险同类批量 seam（尚未启用）', { exact: true })
+    .waitFor({ state: 'visible' })
+  await lowDeferredCard.getByRole('heading', { name: '证据', exact: true })
+    .waitFor({ state: 'visible' })
+  await lowDeferredCard.getByRole('button', { name: '接受', exact: true })
+    .waitFor({ state: 'visible' })
+  await assertNoBatchAccept(reviewPanel)
+  await applyReviewFilters(reviewPanel, '待处理', '全部风险', [lowDeferred.heading])
+  await applyReviewFilters(reviewPanel, '全部状态', '全部风险', [lowDeferred.heading])
+  lowDeferredCard = reviewCard(reviewPanel, lowDeferred.heading)
+  await chooseDecision(lowDeferredCard, '延期', lowDeferredFeedback)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH) > 0)
+  await applyReviewFilters(reviewPanel, '已延期', '全部风险', [lowDeferred.heading])
+  await reviewCard(reviewPanel, lowDeferred.heading)
+    .getByText('已延期', { exact: true }).first().waitFor({ state: 'visible' })
+
+  // Accountable and Sponsor are high-risk ownership fields. Submission is
+  // impossible until the card-local high-risk confirmation is explicitly set.
+  await applyReviewFilters(reviewPanel, '全部状态', '全部风险', [lowDeferred.heading])
+  const highAccepted = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: feishuSponsorName,
+    contributors: [externalContributorName],
+    sponsor: null,
+  })
+  let highAcceptedCard = reviewCard(reviewPanel, highAccepted.heading)
+  await assertSuggestedDiff(
+    firstJourney.page,
+    projectId,
+    highAcceptedCard,
+    highAccepted.heading,
+  )
+  await highAcceptedCard.getByText('高风险', { exact: true }).first().waitFor({ state: 'visible' })
+  await highAcceptedCard.getByText(/(?:禁止|不可|不允许).*批量/u).waitFor({ state: 'visible' })
+  await chooseDecision(highAcceptedCard, '接受', highAcceptedFeedback, true)
+  expectedTeam = {
+    ...expectedTeam,
+    responsibility: {
+      accountable: feishuSponsorName,
+      contributors: [externalContributorName],
+      sponsor: null,
+    },
+  }
+  await assertProjectTeam(firstJourney.page, expectedTeam)
+  await assertActivityProjection(
+    firstJourney.page,
+    12,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+    ...teamPrivateValues,
+    lowDeferredFeedback,
+    highAcceptedFeedback,
+    lowDeferred.evidenceAuditEventId,
+    highAccepted.evidenceAuditEventId,
+  )
+
+  // A fresh low proposal is made stale by a normal authenticated Responsibility
+  // carrier write. Review is then refreshed through its ordinary status filter;
+  // the stale card exposes reject only and cannot overwrite the newer Team.
+  await applyReviewFilters(
+    reviewPanel,
+    '全部状态',
+    '全部风险',
+    [lowDeferred.heading, highAccepted.heading],
+  )
+  const staleRejected = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: feishuSponsorName,
+    contributors: [externalContributorName, agentAccountableName],
+    sponsor: null,
+  })
+  await advanceResponsibilityViaCarrier(firstJourney.page, projectId, {
+    accountable: agentAccountableName,
+    contributors: [externalContributorName],
+    sponsor: feishuSponsorName,
+  })
+  expectedTeam = {
+    ...expectedTeam,
+    responsibility: {
+      accountable: agentAccountableName,
+      contributors: [externalContributorName],
+      sponsor: feishuSponsorName,
+    },
+  }
+  await applyReviewFilters(
+    reviewPanel,
+    '已过期',
+    '全部风险',
+    [lowDeferred.heading, staleRejected.heading],
+  )
+  let staleRejectedCard = reviewCard(reviewPanel, staleRejected.heading)
+  await staleRejectedCard.getByText('已过期', { exact: true }).first()
+    .waitFor({ state: 'visible' })
+  assert.equal(
+    await staleRejectedCard.getByRole('button', { name: '接受', exact: true }).isDisabled(),
+    true,
+  )
+  assert.equal(
+    await staleRejectedCard.getByRole('button', { name: '编辑后接受', exact: true }).isDisabled(),
+    true,
+  )
+  assert.equal(
+    await staleRejectedCard.getByRole('button', { name: '延期', exact: true }).isDisabled(),
+    true,
+  )
+  assert.equal(
+    await staleRejectedCard.getByRole('button', { name: '拒绝', exact: true }).isEnabled(),
+    true,
+  )
+  const teamBeforeStaleReject = await readTeamViaCarrier(firstJourney.page, projectId)
+  await applyReviewFilters(
+    reviewPanel,
+    '全部状态',
+    '全部风险',
+    [lowDeferred.heading, highAccepted.heading, staleRejected.heading],
+  )
+  staleRejectedCard = reviewCard(reviewPanel, staleRejected.heading)
+  await chooseDecision(staleRejectedCard, '拒绝', staleRejectedFeedback)
+  const teamAfterStaleReject = await readTeamViaCarrier(firstJourney.page, projectId)
+  assert.deepEqual(
+    {
+      responsibility: teamAfterStaleReject.responsibility,
+      teamRevision: teamAfterStaleReject.teamRevision,
+    },
+    {
+      responsibility: teamBeforeStaleReject.responsibility,
+      teamRevision: teamBeforeStaleReject.teamRevision,
+    },
+    'rejecting a stale proposal changed Project Team truth',
+  )
+
+  // Edit-and-accept preserves the original high-risk diff. The applied edit is
+  // contributors-only, yet the effective risk cannot be downgraded below the
+  // original high classification.
+  const editedAccepted = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: feishuSponsorName,
+    contributors: [externalContributorName],
+    sponsor: null,
+  })
+  let editedAcceptedCard = reviewCard(reviewPanel, editedAccepted.heading)
+  await assertSuggestedDiff(
+    firstJourney.page,
+    projectId,
+    editedAcceptedCard,
+    editedAccepted.heading,
+  )
+  await editedAcceptedCard.getByRole('button', { name: '编辑后接受', exact: true }).click()
+  await configureEditedDecision(editedAcceptedCard, activeReviewMembers, {
+    accountable: agentAccountableName,
+    contributors: [externalContributorName, feishuSponsorName],
+    sponsor: feishuSponsorName,
+  })
+  await editedAcceptedCard.getByText('高风险', { exact: true }).first()
+    .waitFor({ state: 'visible' })
+  await editedAcceptedCard.getByLabel('我已核对高风险差异与证据', { exact: true })
+    .waitFor({ state: 'visible' })
+  await chooseDecision(editedAcceptedCard, '编辑后接受', editedAcceptedFeedback, true)
+  expectedTeam = {
+    ...expectedTeam,
+    responsibility: {
+      accountable: agentAccountableName,
+      contributors: [externalContributorName, feishuSponsorName],
+      sponsor: feishuSponsorName,
+    },
+  }
+  await assertProjectTeam(firstJourney.page, expectedTeam)
+  editedAcceptedCard = reviewCard(reviewPanel, editedAccepted.heading)
+  await assertSuggestedDiff(
+    firstJourney.page,
+    projectId,
+    editedAcceptedCard,
+    editedAccepted.heading,
+  )
+  await editedAcceptedCard.getByText(/实际应用的 changed fields：.*Contributors/u)
+    .waitFor({ state: 'visible' })
+  const editedAppliedDigest = await assertAppliedDiff(
+    firstJourney.page,
+    projectId,
+    editedAcceptedCard,
+    editedAccepted.heading,
+  )
+  await editedAcceptedCard.getByText('高风险', { exact: true }).first()
+    .waitFor({ state: 'visible' })
+
+  // The inverse edit is equally explicit: a low Contributor-only proposal is
+  // promoted to high risk when the draft changes Accountable and Sponsor. The
+  // form must expose the draft-aware effective risk before confirmation, and
+  // history must preserve the exact applied values and digest after commit.
+  const elevatedEditedAccepted = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: agentAccountableName,
+    contributors: [externalContributorName],
+    sponsor: feishuSponsorName,
+  })
+  let elevatedEditedAcceptedCard = reviewCard(reviewPanel, elevatedEditedAccepted.heading)
+  await assertSuggestedDiff(
+    firstJourney.page,
+    projectId,
+    elevatedEditedAcceptedCard,
+    elevatedEditedAccepted.heading,
+  )
+  await elevatedEditedAcceptedCard.getByRole('heading', {
+    name: '原建议风险依据',
+    exact: true,
+  }).waitFor({ state: 'visible' })
+  await elevatedEditedAcceptedCard.getByRole('button', {
+    name: '编辑后接受',
+    exact: true,
+  }).click()
+  await configureEditedDecision(elevatedEditedAcceptedCard, activeReviewMembers, {
+    accountable: feishuSponsorName,
+    contributors: [externalContributorName, agentAccountableName],
+    sponsor: null,
+  })
+  const effectiveRiskPreview = elevatedEditedAcceptedCard
+    .getByText('本次决定有效风险：', { exact: true }).locator('..')
+  const appliedRiskPreview = elevatedEditedAcceptedCard
+    .getByText('编辑后候选风险：', { exact: true }).locator('..')
+  assert.ok((await effectiveRiskPreview.textContent())?.includes('高风险') === true)
+  assert.ok((await appliedRiskPreview.textContent())?.includes('高风险') === true)
+  await elevatedEditedAcceptedCard.getByText('Accountable 将发生变化。', { exact: true })
+    .waitFor({ state: 'visible' })
+  await elevatedEditedAcceptedCard.getByText('Human Sponsor 将发生变化。', { exact: true })
+    .waitFor({ state: 'visible' })
+  await chooseDecision(
+    elevatedEditedAcceptedCard,
+    '编辑后接受',
+    elevatedEditedAcceptedFeedback,
+    true,
+  )
+  expectedTeam = {
+    ...expectedTeam,
+    responsibility: {
+      accountable: feishuSponsorName,
+      contributors: [externalContributorName, agentAccountableName],
+      sponsor: null,
+    },
+  }
+  await assertProjectTeam(firstJourney.page, expectedTeam)
+  elevatedEditedAcceptedCard = reviewCard(reviewPanel, elevatedEditedAccepted.heading)
+  await assertSuggestedDiff(
+    firstJourney.page,
+    projectId,
+    elevatedEditedAcceptedCard,
+    elevatedEditedAccepted.heading,
+  )
+  const elevatedAppliedDigest = await assertAppliedDiff(
+    firstJourney.page,
+    projectId,
+    elevatedEditedAcceptedCard,
+    elevatedEditedAccepted.heading,
+  )
+  const elevatedClassification = elevatedEditedAcceptedCard
+    .getByLabel('建议状态与风险', { exact: true })
+  await elevatedClassification.getByText('高风险', { exact: true }).waitFor({ state: 'visible' })
+  const elevatedProposedRisk = elevatedEditedAcceptedCard.getByRole('heading', {
+    name: '原建议风险依据',
+    exact: true,
+  }).locator('..')
+  await elevatedProposedRisk.getByText(/低风险/u).waitFor({ state: 'visible' })
+  await elevatedProposedRisk.getByText('仅 Contributor 集合发生变化。', { exact: true })
+    .waitFor({ state: 'visible' })
+  const appliedRiskHistory = elevatedEditedAcceptedCard
+    .getByText('实际应用风险：', { exact: true }).locator('..')
+  assert.ok((await appliedRiskHistory.textContent())?.includes('高风险') === true)
+  await elevatedEditedAcceptedCard.getByText('当前状态不可操作，因此不可批量处理。', {
+    exact: true,
+  }).waitFor({ state: 'visible' })
+
+  // Leave one current-base pending and one current-base deferred low-risk card.
+  // Together with the older stale/accepted/rejected cards, every T06 status and
+  // both risk filters can now be exercised against one stable target version.
+  const finalPending = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: feishuSponsorName,
+    contributors: [externalContributorName],
+    sponsor: null,
+  })
+  const finalDeferred = await createProposalViaUi(reviewPanel, activeReviewMembers, {
+    accountable: feishuSponsorName,
+    contributors: [agentAccountableName],
+    sponsor: null,
+  })
+  let finalDeferredCard = reviewCard(reviewPanel, finalDeferred.heading)
+  await chooseDecision(finalDeferredCard, '延期', finalDeferredFeedback)
+
+  await applyReviewFilters(reviewPanel, '待处理', '全部风险', [finalPending.heading])
+  await applyReviewFilters(reviewPanel, '已延期', '全部风险', [finalDeferred.heading])
+  await applyReviewFilters(reviewPanel, '已过期', '全部风险', [lowDeferred.heading])
+  await applyReviewFilters(
+    reviewPanel,
+    '已接受',
+    '全部风险',
+    [highAccepted.heading, editedAccepted.heading, elevatedEditedAccepted.heading],
+  )
+  await applyReviewFilters(reviewPanel, '已拒绝', '全部风险', [staleRejected.heading])
+  await applyReviewFilters(
+    reviewPanel,
+    '全部状态',
+    '低风险',
+    [lowDeferred.heading, staleRejected.heading, finalPending.heading, finalDeferred.heading],
+  )
+  await applyReviewFilters(
+    reviewPanel,
+    '全部状态',
+    '高风险',
+    [highAccepted.heading, editedAccepted.heading, elevatedEditedAccepted.heading],
+  )
+  const allReviewHeadings = [
+    lowDeferred.heading,
+    highAccepted.heading,
+    staleRejected.heading,
+    editedAccepted.heading,
+    elevatedEditedAccepted.heading,
+    finalPending.heading,
+    finalDeferred.heading,
+  ]
+  await applyReviewFilters(reviewPanel, '全部状态', '全部风险', allReviewHeadings)
+  await assertNoBatchAccept(reviewPanel)
+
+  const reviewPrivateValues = [
+    lowDeferredFeedback,
+    highAcceptedFeedback,
+    staleRejectedFeedback,
+    editedAcceptedFeedback,
+    elevatedEditedAcceptedFeedback,
+    finalDeferredFeedback,
+    ...new Set([
+      lowDeferred.evidenceAuditEventId,
+      highAccepted.evidenceAuditEventId,
+      staleRejected.evidenceAuditEventId,
+      editedAccepted.evidenceAuditEventId,
+      elevatedEditedAccepted.evidenceAuditEventId,
+      finalPending.evidenceAuditEventId,
+      finalDeferred.evidenceAuditEventId,
+    ]),
+  ]
+
+  // Exercise the Client's T06 Activity form mapping, not only the Host codec:
+  // the selected object/action must reach the Remote and return exactly the
+  // two edited-accept audit facts while integrity still covers the full chain.
+  await activityObjectType.selectOption('suggested-change')
+  await activityAction.selectOption('workbench.suggested-change.edited-accepted')
+  await activityPanel.getByRole('button', { name: '应用筛选', exact: true }).click()
+  const editedAcceptedActivity = activityPanel.getByRole('heading', {
+    name: '已编辑并接受 SuggestedChange',
+    exact: true,
+  })
+  await waitForCondition(
+    async () => await editedAcceptedActivity.count() === 2,
+    PAGE_TIMEOUT_MS,
+    'T06 Activity object/action filter',
+  )
+  assert.equal(
+    await activityPanel.getByRole('heading', { name: '已创建 SuggestedChange' }).count(),
+    0,
+    'T06 Activity filter was silently widened to every SuggestedChange action',
+  )
+  await activityPanel.getByText('已检查事件: 22', { exact: true }).waitFor({ state: 'visible' })
+  await activityObjectType.selectOption('')
+  await activityAction.selectOption('')
+  await activityPanel.getByRole('button', { name: '应用筛选', exact: true }).click()
+  await assertActivityProjection(
+    firstJourney.page,
+    22,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+    ...teamPrivateValues,
+    ...reviewPrivateValues,
+  )
+
+  const assertRecoveredReview = async page => {
+    const panel = reviewCenterPanel(page)
+    await panel.getByRole('heading', { name: 'Review Center', exact: true })
+      .waitFor({ state: 'visible' })
+    await waitForCondition(
+      async () => await reviewCardHeadings(panel).count() === allReviewHeadings.length,
+      PAGE_TIMEOUT_MS,
+      'durable Review cards',
+    )
+    assert.deepEqual(
+      [...await reviewCardHeadings(panel).allTextContents()].sort(),
+      [...allReviewHeadings].sort(),
+    )
+    await reviewCard(panel, lowDeferred.heading).getByText('已过期', { exact: true }).first()
+      .waitFor({ state: 'visible' })
+    await reviewCard(panel, highAccepted.heading).getByText(highAcceptedFeedback, { exact: true })
+      .waitFor({ state: 'visible' })
+    await reviewCard(panel, staleRejected.heading).getByText(staleRejectedFeedback, { exact: true })
+      .waitFor({ state: 'visible' })
+    const edited = reviewCard(panel, editedAccepted.heading)
+    await edited.getByText(editedAcceptedFeedback, { exact: true }).waitFor({ state: 'visible' })
+    await edited.getByText(/实际应用的 changed fields：.*Contributors/u)
+      .waitFor({ state: 'visible' })
+    assert.equal(await assertAppliedDiff(
+      page,
+      projectId,
+      edited,
+      editedAccepted.heading,
+    ), editedAppliedDigest)
+    const elevated = reviewCard(panel, elevatedEditedAccepted.heading)
+    await elevated.getByText(elevatedEditedAcceptedFeedback, { exact: true })
+      .waitFor({ state: 'visible' })
+    assert.equal(await assertAppliedDiff(
+      page,
+      projectId,
+      elevated,
+      elevatedEditedAccepted.heading,
+    ), elevatedAppliedDigest)
+    await reviewCard(panel, finalPending.heading).getByText('待处理', { exact: true }).first()
+      .waitFor({ state: 'visible' })
+    await reviewCard(panel, finalDeferred.heading).getByText('已延期', { exact: true }).first()
+      .waitFor({ state: 'visible' })
+    await assertNoBatchAccept(panel)
+    return panel
+  }
+
+  const reviewRequestsBeforeHmr = countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH)
   await exerciseClientHmr(
     firstJourney,
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
     message,
+  )
+  assert.equal(
+    countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH),
+    reviewRequestsBeforeHmr,
+    'Client HMR queried Review without a selected Project',
   )
   await reopenProject(firstJourney.page, {
     projectName,
@@ -1460,16 +2300,18 @@ async function main() {
     metricName,
   })
   await assertProjectTeam(firstJourney.page, expectedTeam)
+  await assertRecoveredReview(firstJourney.page)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH) > 0)
   await assertActivityProjection(
     firstJourney.page,
-    8,
+    22,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
     ...teamPrivateValues,
+    ...reviewPrivateValues,
   )
   const sessionBar = firstJourney.page.locator('header').filter({
     has: firstJourney.page.getByRole('button', { name: '退出登录' }),
@@ -1486,6 +2328,8 @@ async function main() {
       metricName,
     })
     const mobileTeam = await assertProjectTeam(firstJourney.page, expectedTeam)
+    const mobileReview = await assertRecoveredReview(firstJourney.page)
+    await applyReviewFilters(mobileReview, '待处理', '全部风险', [finalPending.heading])
     const mobileAddDisclosure = mobileTeam.locator('details').filter({
       hasText: '添加 ProjectMember',
     })
@@ -1511,6 +2355,24 @@ async function main() {
       mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
       'mobile Accountable selector',
     )
+    await assertWithinViewport(
+      reviewFilterSelect(mobileReview, 0),
+      firstJourney.page,
+      'mobile Review status filter',
+    )
+    await assertWithinViewport(
+      mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
+      firstJourney.page,
+      'mobile Review proposal Accountable',
+    )
+    await assertVisibleKeyboardFocus(
+      reviewFilterSelect(mobileReview, 0),
+      'mobile Review status filter',
+    )
+    await assertVisibleKeyboardFocus(
+      mobileReview.getByRole('combobox', { name: '提案 Accountable', exact: true }),
+      'mobile Review proposal Accountable',
+    )
     const layout = await firstJourney.page.evaluate(() => {
       const session = document.querySelector('header[aria-label]')
       const status = document.querySelector('main[data-workbench-phase]')
@@ -1531,6 +2393,7 @@ async function main() {
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-review-center-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   const postLogoutCookies = await firstNetwork.cdp.send('Network.getAllCookies')
@@ -1558,6 +2421,9 @@ async function main() {
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
   await separateLogin.fill(wrongPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
@@ -1572,6 +2438,14 @@ async function main() {
     .filter({ hasText: message })
   await separateProjection.waitFor({ state: 'visible' })
   assert.equal(await separateProjection.textContent(), message)
+  await reviewCenterPanel(separateJourney.page)
+    .getByRole('heading', { name: 'Review Center', exact: true })
+    .waitFor({ state: 'visible' })
+  assert.equal(
+    countRequestsToPath(separateJourney, WORKBENCH_REVIEW_CENTER_PATH),
+    0,
+    'a new browser context queried Review before selecting a Project',
+  )
   await reopenProject(separateJourney.page, {
     projectName,
     primaryGoalName,
@@ -1579,15 +2453,17 @@ async function main() {
     metricName,
   })
   await assertProjectTeam(separateJourney.page, expectedTeam)
+  await assertRecoveredReview(separateJourney.page)
   await assertActivityProjection(
     separateJourney.page,
-    8,
+    22,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
     ...teamPrivateValues,
+    ...reviewPrivateValues,
   )
   await assertNoBrowserErrors(separateJourney, [expectedHttpError])
   await separateJourney.context.close()
@@ -1615,6 +2491,14 @@ async function main() {
   await recoveredProjection.waitFor({ state: 'visible' })
   assert.equal(await recoveredProjection.textContent(), message)
   assert.equal(await secondJourney.page.locator('#workbench-status-editor').inputValue(), message)
+  await reviewCenterPanel(secondJourney.page)
+    .getByRole('heading', { name: 'Review Center', exact: true })
+    .waitFor({ state: 'visible' })
+  assert.equal(
+    countRequestsToPath(secondJourney, WORKBENCH_REVIEW_CENTER_PATH),
+    0,
+    'a restarted Host queried Review before the Owner selected a Project',
+  )
   await reopenProject(secondJourney.page, {
     projectName,
     primaryGoalName,
@@ -1622,15 +2506,17 @@ async function main() {
     metricName,
   })
   await assertProjectTeam(secondJourney.page, expectedTeam)
+  await assertRecoveredReview(secondJourney.page)
   await assertActivityProjection(
     secondJourney.page,
-    8,
+    22,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
     ...teamPrivateValues,
+    ...reviewPrivateValues,
   )
   await ownerCookieFromChrome(secondNetwork)
   await assertNoBrowserErrors(secondJourney)
@@ -1732,6 +2618,14 @@ async function main() {
   await finalProjection.waitFor({ state: 'visible' })
   assert.equal(await finalProjection.textContent(), message)
   assert.equal(await postRecoveryJourney.page.locator('#workbench-status-editor').inputValue(), message)
+  await reviewCenterPanel(postRecoveryJourney.page)
+    .getByRole('heading', { name: 'Review Center', exact: true })
+    .waitFor({ state: 'visible' })
+  assert.equal(
+    countRequestsToPath(postRecoveryJourney, WORKBENCH_REVIEW_CENTER_PATH),
+    0,
+    'post-recovery Client queried Review before selecting a Project',
+  )
   await reopenProject(postRecoveryJourney.page, {
     projectName,
     primaryGoalName,
@@ -1739,24 +2633,27 @@ async function main() {
     metricName,
   })
   await assertProjectTeam(postRecoveryJourney.page, expectedTeam)
+  await assertRecoveredReview(postRecoveryJourney.page)
   await assertActivityProjection(
     postRecoveryJourney.page,
-    8,
+    22,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
     ...teamPrivateValues,
+    ...reviewPrivateValues,
   )
   await assertNoBrowserErrors(postRecoveryJourney, [expectedHttpError])
   await postRecoveryJourney.context.close()
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS real Workbench setup -> audited status -> immutable Project snapshot '
-      + '-> Project Team roster/responsibility -> redacted Activity -> Client HMR '
-      + '-> logout -> restart -> Team reopen -> one-time offline recovery '
+    'PASS T06 real Workbench setup -> Project Team -> low/high SuggestedChange review '
+      + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
+      + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
+      + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',
   )
 }

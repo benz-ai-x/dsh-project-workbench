@@ -49,9 +49,20 @@
 - [x] Let the authenticated browser manage the roster and responsibility accessibly, retain drafts across safe retries, and reopen the Team after HMR/restart.
 - [x] Prove Schema v3→v4 migration, rollback, replay, contention, Remote/Loader, packed artifacts, redaction, and real-browser behavior for T05.
 
+## T06 — Review Center and SuggestedChange (#7)
+
+- [x] Add one immutable SuggestedChange envelope, CAS head, append-only decision history, and authorized Project-scoped Review Center projection.
+- [x] Propose a complete Project Responsibility candidate against an exact Team revision with 1–20 same-Project audit-event EvidenceRefs; derive source, typed diff, digest, and risk on the Host.
+- [x] Filter pending, deferred, stale, accepted, and rejected items plus low/high risk using bounded stable pagination; derive stale from current Host truth.
+- [x] Accept, edit-and-accept, reject, or defer with mandatory feedback, exact SuggestedChange CAS, immutable target base, receipt-first replay, and closed conflicts.
+- [x] Reuse the normal Responsibility invariant planner and atomically commit accepted target state, review history, Outbox, audit, and receipt without nested transactions or duplicate ledger facts.
+- [x] Keep candidate/diff/evidence/feedback out of Activity, Outbox payloads, receipts, diagnostics, and logs while returning complete authorized Review cards.
+- [x] Build an accessible Review Center with one-round-trip proposal context, textual risk/status, semantic before/after diff, evidence choices, high-risk confirmation, safe retry, reconnect, and draft cleanup.
+- [x] Prove Schema v4→v5 migration, five-state filtering, low/high policy, double-CAS/stale races, edit history, rollback/replay/redaction, Loader/Profile, generated fourteen-method Remote, packed artifacts, restart, and real-browser behavior.
+
 ## Later tickets
 
-- [ ] T06+ review, integrations, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T05.
+- [ ] T07+ integrations, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T06.
 
 ## Definition of done
 

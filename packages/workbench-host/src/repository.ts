@@ -1,7 +1,9 @@
 import type {
   AddProjectMemberResult,
   CreateProjectResult,
+  DecideSuggestedChangeResult,
   OutcomeMetric,
+  ProjectResponsibilitySuggestedValue,
   ProjectDetailProjection,
   ProjectMemberDraft,
   ProjectMemberStatus,
@@ -10,6 +12,11 @@ import type {
   ProjectStartProjection,
   ProjectTeamProjection,
   ProjectTemplateSelection,
+  ProposeProjectResponsibilityChangeResult,
+  ReviewCenterFilter,
+  ReviewCenterProjection,
+  SuggestedChangeEvidenceRef,
+  SuggestedChangeRiskLevel,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityResult,
   SetStatusResult,
@@ -117,6 +124,64 @@ export interface WorkbenchProjectResponsibilityMutation {
   }
 }
 
+/** Provider-neutral immutable proposal material; source/diff/risk remain repository-derived. */
+export interface WorkbenchSuggestedChangeProposalMutation {
+  readonly suggestedChangeId: string
+  readonly projectId: string
+  readonly candidate: ProjectResponsibilitySuggestedValue
+  readonly evidenceRefs: readonly SuggestedChangeEvidenceRef[]
+  readonly expectedTeamRevision: number
+  readonly expectedRevision: null
+  readonly createdAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-suggested-change-propose'
+  }
+}
+
+interface WorkbenchSuggestedChangeDecisionMutationBase {
+  readonly decisionId: string
+  readonly projectId: string
+  readonly suggestedChangeId: string
+  readonly expectedSuggestedChangeRevision: number
+  readonly feedback: string
+  readonly decidedAt: string
+}
+
+/** One closed Owner disposition; immutable target base is loaded from the proposal. */
+export type WorkbenchSuggestedChangeDecisionMutation =
+  | WorkbenchSuggestedChangeDecisionMutationBase & {
+    readonly mode: 'accept'
+    readonly acknowledgedRiskLevel: SuggestedChangeRiskLevel
+    readonly candidate?: never
+    readonly command: WorkbenchCommandMetadata & {
+      readonly reason: 'owner-suggested-change-accept'
+    }
+  }
+  | WorkbenchSuggestedChangeDecisionMutationBase & {
+    readonly mode: 'edit-and-accept'
+    readonly acknowledgedRiskLevel: SuggestedChangeRiskLevel
+    readonly candidate: ProjectResponsibilitySuggestedValue
+    readonly command: WorkbenchCommandMetadata & {
+      readonly reason: 'owner-suggested-change-edit-accept'
+    }
+  }
+  | WorkbenchSuggestedChangeDecisionMutationBase & {
+    readonly mode: 'reject'
+    readonly acknowledgedRiskLevel?: never
+    readonly candidate?: never
+    readonly command: WorkbenchCommandMetadata & {
+      readonly reason: 'owner-suggested-change-reject'
+    }
+  }
+  | WorkbenchSuggestedChangeDecisionMutationBase & {
+    readonly mode: 'defer'
+    readonly acknowledgedRiskLevel?: never
+    readonly candidate?: never
+    readonly command: WorkbenchCommandMetadata & {
+      readonly reason: 'owner-suggested-change-defer'
+    }
+  }
+
 /** Host-fixed scope for the Project creation-page read. */
 export interface WorkbenchProjectStartQuery {
   readonly organizationId: string
@@ -134,6 +199,13 @@ export interface WorkbenchProjectReadQuery extends ProjectQuery {
 export interface WorkbenchProjectTeamReadQuery extends ProjectQuery {
   readonly organizationId: string
   readonly teamId: string
+}
+
+/** Host-fixed scope for one Project's Review Center projection. */
+export interface WorkbenchReviewCenterQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly filter: ReviewCenterFilter
 }
 
 /** Host-only query with the actor organization already fixed by authorization. */
@@ -213,6 +285,21 @@ export interface WorkbenchRepository {
     mutation: WorkbenchProjectResponsibilityMutation,
     signal: AbortSignal,
   ): Promise<SetProjectResponsibilityResult>
+  /** Return proposal context and one Host-filtered page of complete Review cards. */
+  readReviewCenter(
+    query: WorkbenchReviewCenterQuery,
+    signal: AbortSignal,
+  ): Promise<ReviewCenterProjection | null>
+  /** Atomically derive and persist one immutable typed Project Responsibility proposal. */
+  commitSuggestedChangeProposal(
+    mutation: WorkbenchSuggestedChangeProposalMutation,
+    signal: AbortSignal,
+  ): Promise<ProposeProjectResponsibilityChangeResult>
+  /** Atomically append one disposition and, for acceptance, the target mutation. */
+  commitSuggestedChangeDecision(
+    mutation: WorkbenchSuggestedChangeDecisionMutation,
+    signal: AbortSignal,
+  ): Promise<DecideSuggestedChangeResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */
@@ -471,6 +558,129 @@ export function projectTeamCommandResult<T extends
         humanSponsorMemberId: error.humanSponsorMemberId,
       }) as T
   }
+}
+
+/** Copy and recursively freeze one complete authorized Review Center projection. */
+export function reviewCenterProjection(value: ReviewCenterProjection): ReviewCenterProjection {
+  return Object.freeze({
+    projectId: value.projectId,
+    proposalBuilder: Object.freeze({
+      projectId: value.proposalBuilder.projectId,
+      teamRevision: value.proposalBuilder.teamRevision,
+      responsibilityRevision: value.proposalBuilder.responsibilityRevision,
+      base: reviewResponsibilityValue(value.proposalBuilder.base),
+      memberOptions: Object.freeze(value.proposalBuilder.memberOptions.map(option => Object.freeze({
+        ...option,
+      }))),
+      evidenceOptions: Object.freeze(value.proposalBuilder.evidenceOptions.map(reviewEvidence)),
+    }),
+    items: Object.freeze(value.items.map(item => Object.freeze({
+      suggestedChangeId: item.suggestedChangeId,
+      sequence: item.sequence,
+      revision: item.revision,
+      projectId: item.projectId,
+      source: Object.freeze({ ...item.source }),
+      target: Object.freeze({ ...item.target }),
+      proposedDiff: reviewDiff(item.proposedDiff),
+      evidence: Object.freeze(item.evidence.map(reviewEvidence)),
+      risk: Object.freeze({
+        proposedLevel: item.risk.proposedLevel,
+        effectiveLevel: item.risk.effectiveLevel,
+        proposedReasonCodes: Object.freeze([...item.risk.proposedReasonCodes]),
+        policyVersion: item.risk.policyVersion,
+        batchPolicy: Object.freeze({ ...item.risk.batchPolicy }),
+      }),
+      originCausationId: item.originCausationId,
+      persistedState: item.persistedState,
+      effectiveStatus: item.effectiveStatus,
+      decisions: Object.freeze(item.decisions.map(decision => Object.freeze({
+        decisionId: decision.decisionId,
+        suggestedChangeRevision: decision.suggestedChangeRevision,
+        mode: decision.mode,
+        actor: Object.freeze({ ...decision.actor }),
+        feedback: decision.feedback,
+        appliedDiff: decision.appliedDiff === null ? null : reviewDiff(decision.appliedDiff),
+        appliedRiskLevel: decision.appliedRiskLevel,
+        appliedRiskReasonCodes: Object.freeze([...decision.appliedRiskReasonCodes]),
+        appliedTeamRevision: decision.appliedTeamRevision,
+        appliedResponsibilityRevision: decision.appliedResponsibilityRevision,
+        causationId: decision.causationId,
+        receipt: Object.freeze({ ...decision.receipt }),
+        decidedAt: decision.decidedAt,
+      }))),
+      allowedDecisions: Object.freeze([...item.allowedDecisions]),
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    }))),
+    nextBeforeSequence: value.nextBeforeSequence,
+  })
+}
+
+/** Copy and freeze a PII-free proposal acknowledgement or closed conflict. */
+export function suggestedChangeProposalResult(
+  value: ProposeProjectResponsibilityChangeResult,
+): ProposeProjectResponsibilityChangeResult {
+  if (value.ok) return Object.freeze({
+    ok: true,
+    value: Object.freeze({ ...value.value }),
+    receipt: Object.freeze({ ...value.receipt }),
+  })
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ ...value.error }),
+  }) as ProposeProjectResponsibilityChangeResult
+}
+
+/** Copy and freeze a PII-free decision acknowledgement or closed conflict. */
+export function suggestedChangeDecisionResult(
+  value: DecideSuggestedChangeResult,
+): DecideSuggestedChangeResult {
+  if (value.ok) return Object.freeze({
+    ok: true,
+    value: Object.freeze({ ...value.value }),
+    receipt: Object.freeze({ ...value.receipt }),
+  })
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ ...value.error }),
+  }) as DecideSuggestedChangeResult
+}
+
+function reviewResponsibilityValue<T extends {
+  readonly accountableMemberId: string | null
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+}>(value: T): T {
+  return Object.freeze({
+    ...value,
+    contributorMemberIds: Object.freeze([...value.contributorMemberIds]),
+  })
+}
+
+function reviewDiff(
+  value: ReviewCenterProjection['items'][number]['proposedDiff'],
+): ReviewCenterProjection['items'][number]['proposedDiff'] {
+  return Object.freeze({
+    kind: 'project-responsibility.diff',
+    schemaVersion: 1,
+    before: reviewResponsibilityValue(value.before),
+    after: reviewResponsibilityValue(value.after),
+    changedFields: Object.freeze([...value.changedFields]),
+    digest: value.digest,
+  })
+}
+
+function reviewEvidence(
+  value: ReviewCenterProjection['items'][number]['evidence'][number],
+): ReviewCenterProjection['items'][number]['evidence'][number] {
+  return Object.freeze({
+    kind: 'workbench-audit-event',
+    auditEventId: value.auditEventId,
+    occurredAt: value.occurredAt,
+    action: value.action,
+    summaryCode: value.summaryCode,
+    object: Object.freeze({ ...value.object }),
+  })
 }
 
 function failedTeamCommand<T extends Readonly<{ code: string; message: string }>>(
