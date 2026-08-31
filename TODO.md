@@ -105,21 +105,31 @@
 
 ## T11 — Deliverable from plan to acceptance (#12)
 
-- [ ] Create an immutable Deliverable Plan with 1–20 Acceptance Criteria, one Accountable, distinct Contributors, the T05 Human Sponsor rule, and one designated active Human Acceptor.
-- [ ] Link 1–50 currently visible Feishu task GUIDs without copying or mutating task authority; block review when no linked task remains visible.
-- [ ] Bind or create one authoritative non-recurring event and enforce cross-Milestone/Deliverable event uniqueness through a migrated Calendar Commitment seam.
-- [ ] Freeze 1–20 immutable declared exact artifact-version references in one Acceptance Request without claiming File-source verification.
-- [ ] Project pending Deliverable Acceptance Requests in the typed Review Center and make a changed calendar authority tuple render the request stale and unapprovable.
-- [ ] Decide approved, rejected, or needs changes with mandatory feedback and a complete per-criterion result set; allow a new round only after rejection/changes.
-- [ ] Create an immutable Final Release atomically on approval by copying the request's complete candidate set exactly, with no decision-time substitution.
-- [ ] Preserve receipt-first replay, Team/Task/Schedule/Deliverable CAS, member-in-use protection, rollback, privacy-redacted generic ledger facts, and replayable authorized Deliverable Activity.
-- [ ] Build localized accessible Project Deliverables and typed acceptance Review Center surfaces with progressive disclosure, exact retry, reconnect, responsive overflow, and protected-draft cleanup.
-- [ ] Prove Schema v9→v10 migration/restart, real SQLite/Scenario/Remote/Loader/Profile/browser lifecycle, Calendar fixtures/reconciliation, generated artifacts, built entries, and packed archives.
+- [x] Create an immutable Deliverable Plan with 1–20 Acceptance Criteria, one Accountable, distinct Contributors, the T05 Human Sponsor rule, and one designated active Human Acceptor.
+- [x] Link 1–50 currently visible Feishu task GUIDs without copying or mutating task authority; block review when no linked task remains visible.
+- [x] Bind or create one authoritative non-recurring event and enforce cross-Milestone/Deliverable event uniqueness through a migrated Calendar Commitment seam.
+- [x] Freeze 1–20 immutable declared exact artifact-version references in one Acceptance Request without claiming File-source verification.
+- [x] Project pending Deliverable Acceptance Requests in the typed Review Center and make a changed calendar authority tuple render the request stale and unapprovable.
+- [x] Decide approved, rejected, or needs changes with mandatory feedback and a complete per-criterion result set; allow a new round only after rejection/changes.
+- [x] Create an immutable Final Release atomically on approval by copying the request's complete candidate set exactly, with no decision-time substitution.
+- [x] Preserve receipt-first replay, Team/Task/Schedule/Deliverable CAS, member-in-use protection, rollback, privacy-redacted generic ledger facts, and replayable authorized Deliverable Activity.
+- [x] Build localized accessible Project Deliverables and typed acceptance Review Center surfaces with progressive disclosure, exact retry, reconnect, responsive overflow, and protected-draft cleanup.
+- [x] Prove Schema v9→v10 migration/restart, real SQLite/Scenario/Remote/Loader/Profile/browser lifecycle, Calendar fixtures/reconciliation, generated artifacts, built entries, and packed archives.
 
-## Later tickets
+## T12 — Independent Risk register and mitigation tasks (#13)
+
+- [ ] Freeze the T12 domain, authority, lifecycle, privacy, migration, Remote, Client, packaging, and testing contract against Issue #13 and the parent V1 spec before implementation.
+- [ ] Model Risk as a first-class Workbench-owned uncertain event with category, trigger, probability interval, impact interval, confidence, Owner, and review date.
+- [ ] Derive exposure deterministically from bounded Risk inputs; never accept an arbitrary exposure label from a caller or model.
+- [ ] Link evidence, dependencies, mitigation tasks, and contingency tasks without copying Feishu task authority or coupling Risk closure to task completion.
+- [ ] Enforce audited Risk status transitions and optimistic concurrency through the existing authorization, replay, Outbox, audit, and Activity seams.
+- [ ] Build a localized accessible Project Risks surface with exposure, status, Owner, trigger, and review-date filters plus lifecycle-safe drafts and retries.
+- [ ] Prove migration/restart, lifecycle rules, deterministic exposure, task/evidence authority, privacy, Scenario/Remote/Loader/Profile/browser behavior, and built/packed artifacts.
+
+## Deferred and later work
 
 - [ ] UI-MANUAL-01 — After all development is complete, manually repeat the zh-CN desktop and 375px visual pass for every new surface in an environment with CJK fonts. Automated Chromium functional, accessibility, keyboard, overflow, and responsive-layout coverage remains required now; this container cannot reliably judge Chinese glyph rendering because it has no CJK font.
-- [ ] T12+ File-source integration, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T11.
+- [ ] T13+ File-source integration, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T12 preparation.
 
 ## Definition of done
 
