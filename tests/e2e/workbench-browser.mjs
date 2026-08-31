@@ -51,6 +51,9 @@ const WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH = '/api/workbench/setProjectResp
 const WORKBENCH_REVIEW_CENTER_PATH = '/api/workbench/reviewCenter'
 const WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH = '/api/workbench/proposeProjectResponsibilityChange'
 const WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH = '/api/workbench/decideSuggestedChange'
+const WORKBENCH_FEISHU_CONNECTION_PATH = '/api/workbench/feishuConnectionCenter'
+const WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH = '/api/workbench/configureFeishuIdentityRoute'
+const WORKBENCH_VERIFY_FEISHU_ROUTE_PATH = '/api/workbench/verifyFeishuIdentityRoute'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -680,6 +683,46 @@ function reviewCenterPanel(page) {
   return page.locator('section[aria-labelledby="workbench-review-center-title"]')
 }
 
+function feishuConnectionPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-feishu-connection-title"]')
+}
+
+async function assertFeishuConnectionCenter(page, expected = {}) {
+  const panel = feishuConnectionPanel(page)
+  await panel.getByRole('heading', { name: '飞书 Bot / User 连接中心', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByText(/不会自动切换到另一个身份/u).waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: 'Bot 身份路由', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: 'User 身份路由', exact: true })
+    .waitFor({ state: 'visible' })
+  if (expected.botAppId === undefined) {
+    assert.equal(await panel.getByText('未配置', { exact: true }).count(), 2)
+    return panel
+  }
+  const bot = panel.locator('article[aria-labelledby="workbench-feishu-bot-title"]')
+  await bot.getByText(expected.botAppId, { exact: true }).first().waitFor({ state: 'visible' })
+  await bot.getByText(expected.credentialRef, { exact: true }).first().waitFor({ state: 'visible' })
+  await bot.getByText('失败', { exact: true }).first().waitFor({ state: 'visible' })
+  await bot.getByText('凭据引用尚未在 DSH 凭据存储中配置。', { exact: true })
+    .waitFor({ state: 'visible' })
+  assert.equal(await bot.getByText(expected.credentialValue, { exact: true }).count(), 0)
+  return panel
+}
+
+async function configureAndVerifyMissingFeishuBot(page, expected) {
+  const panel = await assertFeishuConnectionCenter(page)
+  const bot = panel.locator('article[aria-labelledby="workbench-feishu-bot-title"]')
+  await bot.locator('input[name="feishu-bot-app-id"]').fill(expected.botAppId)
+  await bot.locator('input[name="feishu-bot-credential-ref"]').fill(expected.credentialRef)
+  await bot.getByRole('button', { name: '保存配置', exact: true }).click()
+  await bot.locator('[data-state="configured"]').waitFor({ state: 'visible' })
+  await bot.getByRole('button', { name: '验证此身份', exact: true }).click()
+  await bot.getByText('凭据引用尚未在 DSH 凭据存储中配置。', { exact: true })
+    .waitFor({ state: 'visible' })
+  return await assertFeishuConnectionCenter(page, expected)
+}
+
 function reviewCardHeadings(panel) {
   return panel.getByRole('heading', { name: /^建议 #\d+$/u })
 }
@@ -1270,7 +1313,7 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const initialStyleCount = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).count()
-  assert.equal(initialStyleCount, 6, 'Workbench Client did not own exactly six CSS Module resources')
+  assert.equal(initialStyleCount, 7, 'Workbench Client did not own exactly seven CSS Module resources')
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -1414,6 +1457,8 @@ async function main() {
   const feishuSponsorName = '浏览器飞书 Sponsor'
   const feishuAppId = 'cli.browser:001'
   const feishuOpenId = 'ou-browser_sponsor'
+  const feishuCredentialRef = 'WORKBENCH_E2E_FEISHU_APP_SECRET'
+  const feishuCredentialValue = 'must-never-enter-workbench-browser-or-sqlite'
   const externalContributorName = '浏览器外部 Contributor'
   const externalContact = 'browser.external@example.invalid'
   const agentAccountableName = '浏览器研究 Agent'
@@ -1450,6 +1495,9 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_FEISHU_CONNECTION_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
@@ -1581,6 +1629,7 @@ async function main() {
   const unselectedReview = reviewCenterPanel(firstJourney.page)
   await unselectedReview.getByRole('heading', { name: 'Review Center', exact: true })
     .waitFor({ state: 'visible' })
+  await assertFeishuConnectionCenter(firstJourney.page)
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
@@ -1593,6 +1642,9 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_FEISHU_CONNECTION_PATH) > 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
     0,
@@ -2301,15 +2353,25 @@ async function main() {
   })
   await assertProjectTeam(firstJourney.page, expectedTeam)
   await assertRecoveredReview(firstJourney.page)
+  await configureAndVerifyMissingFeishuBot(firstJourney.page, {
+    botAppId: feishuAppId,
+    credentialRef: feishuCredentialRef,
+    credentialValue: feishuCredentialValue,
+  })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH) > 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH) > 0)
   await assertActivityProjection(
     firstJourney.page,
-    22,
+    24,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    feishuCredentialRef,
+    feishuAppId,
+    feishuCredentialValue,
     ...teamPrivateValues,
     ...reviewPrivateValues,
   )
@@ -2394,6 +2456,7 @@ async function main() {
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-review-center-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-feishu-connection-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   const postLogoutCookies = await firstNetwork.cdp.send('Network.getAllCookies')
@@ -2424,6 +2487,9 @@ async function main() {
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_FEISHU_CONNECTION_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
   await separateLogin.fill(wrongPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
@@ -2441,6 +2507,11 @@ async function main() {
   await reviewCenterPanel(separateJourney.page)
     .getByRole('heading', { name: 'Review Center', exact: true })
     .waitFor({ state: 'visible' })
+  await assertFeishuConnectionCenter(separateJourney.page, {
+    botAppId: feishuAppId,
+    credentialRef: feishuCredentialRef,
+    credentialValue: feishuCredentialValue,
+  })
   assert.equal(
     countRequestsToPath(separateJourney, WORKBENCH_REVIEW_CENTER_PATH),
     0,
@@ -2456,12 +2527,15 @@ async function main() {
   await assertRecoveredReview(separateJourney.page)
   await assertActivityProjection(
     separateJourney.page,
-    22,
+    24,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    feishuCredentialRef,
+    feishuAppId,
+    feishuCredentialValue,
     ...teamPrivateValues,
     ...reviewPrivateValues,
   )
@@ -2494,6 +2568,11 @@ async function main() {
   await reviewCenterPanel(secondJourney.page)
     .getByRole('heading', { name: 'Review Center', exact: true })
     .waitFor({ state: 'visible' })
+  await assertFeishuConnectionCenter(secondJourney.page, {
+    botAppId: feishuAppId,
+    credentialRef: feishuCredentialRef,
+    credentialValue: feishuCredentialValue,
+  })
   assert.equal(
     countRequestsToPath(secondJourney, WORKBENCH_REVIEW_CENTER_PATH),
     0,
@@ -2509,12 +2588,15 @@ async function main() {
   await assertRecoveredReview(secondJourney.page)
   await assertActivityProjection(
     secondJourney.page,
-    22,
+    24,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    feishuCredentialRef,
+    feishuAppId,
+    feishuCredentialValue,
     ...teamPrivateValues,
     ...reviewPrivateValues,
   )
@@ -2621,6 +2703,11 @@ async function main() {
   await reviewCenterPanel(postRecoveryJourney.page)
     .getByRole('heading', { name: 'Review Center', exact: true })
     .waitFor({ state: 'visible' })
+  await assertFeishuConnectionCenter(postRecoveryJourney.page, {
+    botAppId: feishuAppId,
+    credentialRef: feishuCredentialRef,
+    credentialValue: feishuCredentialValue,
+  })
   assert.equal(
     countRequestsToPath(postRecoveryJourney, WORKBENCH_REVIEW_CENTER_PATH),
     0,
@@ -2636,12 +2723,15 @@ async function main() {
   await assertRecoveredReview(postRecoveryJourney.page)
   await assertActivityProjection(
     postRecoveryJourney.page,
-    22,
+    24,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    feishuCredentialRef,
+    feishuAppId,
+    feishuCredentialValue,
     ...teamPrivateValues,
     ...reviewPrivateValues,
   )
@@ -2650,8 +2740,9 @@ async function main() {
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS T06 real Workbench setup -> Project Team -> low/high SuggestedChange review '
+    'PASS T07 real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
+      + '-> explicit Feishu Bot configure/verify without actor fallback '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',

@@ -31,6 +31,7 @@ export interface ActivityPanelCopy {
   readonly objectProjectMember: string
   readonly objectProjectResponsibility: string
   readonly objectSuggestedChange: string
+  readonly objectFeishuConnection: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -44,6 +45,10 @@ export interface ActivityPanelCopy {
   readonly actionSuggestedChangeEditedAccepted: string
   readonly actionSuggestedChangeRejected: string
   readonly actionSuggestedChangeDeferred: string
+  readonly actionFeishuRouteConfigured: string
+  readonly actionFeishuRouteReset: string
+  readonly actionFeishuRouteDisabled: string
+  readonly actionFeishuRouteVerificationRecorded: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -73,6 +78,12 @@ export interface ActivityPanelCopy {
   readonly summarySuggestedChangeEditedAccepted: string
   readonly summarySuggestedChangeRejected: string
   readonly summarySuggestedChangeDeferred: string
+  readonly summaryFeishuRouteConfigured: string
+  readonly summaryFeishuRouteReset: string
+  readonly summaryFeishuRouteDisabled: string
+  readonly summaryFeishuVerificationHealthy: string
+  readonly summaryFeishuVerificationAttention: string
+  readonly summaryFeishuVerificationFailed: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -89,6 +100,10 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerSuggestedChangeEditAccept: string
   readonly reasonOwnerSuggestedChangeReject: string
   readonly reasonOwnerSuggestedChangeDefer: string
+  readonly reasonOwnerFeishuRouteConfigure: string
+  readonly reasonOwnerFeishuRouteReset: string
+  readonly reasonOwnerFeishuRouteDisable: string
+  readonly reasonOwnerFeishuRouteVerify: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -115,6 +130,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectProjectMember: 'ProjectMember',
   objectProjectResponsibility: 'Project Responsibility',
   objectSuggestedChange: 'SuggestedChange',
+  objectFeishuConnection: 'Feishu connection',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -128,6 +144,10 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionSuggestedChangeEditedAccepted: 'SuggestedChange edited and accepted',
   actionSuggestedChangeRejected: 'SuggestedChange rejected',
   actionSuggestedChangeDeferred: 'SuggestedChange deferred',
+  actionFeishuRouteConfigured: 'Feishu route configured',
+  actionFeishuRouteReset: 'Feishu route reset',
+  actionFeishuRouteDisabled: 'Feishu route disabled',
+  actionFeishuRouteVerificationRecorded: 'Feishu route verification recorded',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -157,6 +177,12 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summarySuggestedChangeEditedAccepted: 'SuggestedChange edited and accepted',
   summarySuggestedChangeRejected: 'SuggestedChange rejected',
   summarySuggestedChangeDeferred: 'SuggestedChange deferred',
+  summaryFeishuRouteConfigured: 'Feishu route configured',
+  summaryFeishuRouteReset: 'Feishu route identity reset',
+  summaryFeishuRouteDisabled: 'Feishu route disabled',
+  summaryFeishuVerificationHealthy: 'Feishu route verification healthy',
+  summaryFeishuVerificationAttention: 'Feishu route verification needs attention',
+  summaryFeishuVerificationFailed: 'Feishu route verification failed',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -173,6 +199,10 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerSuggestedChangeEditAccept: 'Owner SuggestedChange edit and acceptance',
   reasonOwnerSuggestedChangeReject: 'Owner SuggestedChange rejection',
   reasonOwnerSuggestedChangeDefer: 'Owner SuggestedChange deferral',
+  reasonOwnerFeishuRouteConfigure: 'Owner Feishu route configuration',
+  reasonOwnerFeishuRouteReset: 'Owner Feishu identity reset',
+  reasonOwnerFeishuRouteDisable: 'Owner Feishu route disable',
+  reasonOwnerFeishuRouteVerify: 'Owner Feishu route verification',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -197,6 +227,7 @@ function isActivityObjectType(
     || value === 'project-member'
     || value === 'project-responsibility'
     || value === 'suggested-change'
+    || value === 'feishu-connection'
 }
 
 function isActivityAction(
@@ -212,6 +243,10 @@ function isActivityAction(
     || value === 'workbench.suggested-change.edited-accepted'
     || value === 'workbench.suggested-change.rejected'
     || value === 'workbench.suggested-change.deferred'
+    || value === 'workbench.feishu-route.configured'
+    || value === 'workbench.feishu-route.reset'
+    || value === 'workbench.feishu-route.disabled'
+    || value === 'workbench.feishu-route.verification-recorded'
 }
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
@@ -353,6 +388,7 @@ export function ActivityPanel({
                 <option value="project-member">{copy.objectProjectMember}</option>
                 <option value="project-responsibility">{copy.objectProjectResponsibility}</option>
                 <option value="suggested-change">{copy.objectSuggestedChange}</option>
+                <option value="feishu-connection">{copy.objectFeishuConnection}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -398,6 +434,16 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.suggested-change.deferred">
                   {copy.actionSuggestedChangeDeferred}
+                </option>
+                <option value="workbench.feishu-route.configured">
+                  {copy.actionFeishuRouteConfigured}
+                </option>
+                <option value="workbench.feishu-route.reset">{copy.actionFeishuRouteReset}</option>
+                <option value="workbench.feishu-route.disabled">
+                  {copy.actionFeishuRouteDisabled}
+                </option>
+                <option value="workbench.feishu-route.verification-recorded">
+                  {copy.actionFeishuRouteVerificationRecorded}
                 </option>
               </select>
             </label>
@@ -574,6 +620,12 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'suggested-change-edited-accepted': return copy.summarySuggestedChangeEditedAccepted
     case 'suggested-change-rejected': return copy.summarySuggestedChangeRejected
     case 'suggested-change-deferred': return copy.summarySuggestedChangeDeferred
+    case 'feishu-route-configured': return copy.summaryFeishuRouteConfigured
+    case 'feishu-route-reset': return copy.summaryFeishuRouteReset
+    case 'feishu-route-disabled': return copy.summaryFeishuRouteDisabled
+    case 'feishu-route-verification-healthy': return copy.summaryFeishuVerificationHealthy
+    case 'feishu-route-verification-attention': return copy.summaryFeishuVerificationAttention
+    case 'feishu-route-verification-failed': return copy.summaryFeishuVerificationFailed
   }
 }
 
@@ -589,6 +641,10 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-suggested-change-edit-accept': return copy.reasonOwnerSuggestedChangeEditAccept
     case 'owner-suggested-change-reject': return copy.reasonOwnerSuggestedChangeReject
     case 'owner-suggested-change-defer': return copy.reasonOwnerSuggestedChangeDefer
+    case 'owner-feishu-route-configure': return copy.reasonOwnerFeishuRouteConfigure
+    case 'owner-feishu-route-reset': return copy.reasonOwnerFeishuRouteReset
+    case 'owner-feishu-route-disable': return copy.reasonOwnerFeishuRouteDisable
+    case 'owner-feishu-route-verify': return copy.reasonOwnerFeishuRouteVerify
   }
 }
 

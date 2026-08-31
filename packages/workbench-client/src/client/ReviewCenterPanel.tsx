@@ -1045,6 +1045,12 @@ function evidenceSummaryKey(
     'suggested-change-edited-accepted': 'activity.summary.suggestedChangeEditedAccepted',
     'suggested-change-rejected': 'activity.summary.suggestedChangeRejected',
     'suggested-change-deferred': 'activity.summary.suggestedChangeDeferred',
+    'feishu-route-configured': 'activity.summary.feishuRouteConfigured',
+    'feishu-route-reset': 'activity.summary.feishuRouteReset',
+    'feishu-route-disabled': 'activity.summary.feishuRouteDisabled',
+    'feishu-route-verification-healthy': 'activity.summary.feishuVerificationHealthy',
+    'feishu-route-verification-attention': 'activity.summary.feishuVerificationAttention',
+    'feishu-route-verification-failed': 'activity.summary.feishuVerificationFailed',
   } satisfies Record<SuggestedChangeEvidenceProjection['summaryCode'], WorkbenchKey>
   return keys[summary]
 }

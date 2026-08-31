@@ -1,7 +1,13 @@
 import type {
   AddProjectMemberResult,
+  ConfigureFeishuIdentityRouteResult,
   CreateProjectResult,
   DecideSuggestedChangeResult,
+  FeishuActorBinding,
+  FeishuConnectionIssue,
+  FeishuIdentityKind,
+  FeishuResourceProbeProjection,
+  FeishuScopeObservation,
   OutcomeMetric,
   ProjectResponsibilitySuggestedValue,
   ProjectDetailProjection,
@@ -20,6 +26,7 @@ import type {
   SetProjectMemberStatusResult,
   SetProjectResponsibilityResult,
   SetStatusResult,
+  VerifyFeishuIdentityRouteResult,
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
@@ -157,6 +164,7 @@ export type WorkbenchSuggestedChangeDecisionMutation =
       readonly reason: 'owner-suggested-change-accept'
     }
   }
+
   | WorkbenchSuggestedChangeDecisionMutationBase & {
     readonly mode: 'edit-and-accept'
     readonly acknowledgedRiskLevel: SuggestedChangeRiskLevel
@@ -181,6 +189,96 @@ export type WorkbenchSuggestedChangeDecisionMutation =
       readonly reason: 'owner-suggested-change-defer'
     }
   }
+
+/** Host-only connection-center read scope fixed by the authorized Owner. */
+export interface WorkbenchFeishuConnectionQuery {
+  readonly organizationId: string
+  readonly teamId: string
+}
+
+/** SQLite-owned route facts before live DSH credential-description enrichment. */
+export interface WorkbenchStoredFeishuIdentityRouteProjection {
+  readonly kind: FeishuIdentityKind
+  readonly state: 'unconfigured' | 'configured' | 'disabled'
+  readonly generation: number | null
+  readonly appId: string | null
+  readonly credentialRef: string | null
+  readonly actor: FeishuActorBinding | null
+  readonly displayLabel: string | null
+  readonly lastVerification: import('./client.ts').FeishuVerificationProjection | null
+}
+
+/** Durable connection truth; configured/source/writable stay owned by DSH Credentials. */
+export interface WorkbenchStoredFeishuConnectionProjection {
+  readonly connectionId: 'feishu-primary'
+  readonly realm: 'feishu-cn'
+  readonly revision: number
+  readonly bot: WorkbenchStoredFeishuIdentityRouteProjection
+  readonly user: WorkbenchStoredFeishuIdentityRouteProjection
+  readonly updatedAt: string | null
+}
+
+/** One route-generation transition; credential values can never enter this shape. */
+export interface WorkbenchFeishuRouteMutation {
+  readonly kind: FeishuIdentityKind
+  readonly mode: 'set' | 'reset' | 'disable'
+  readonly appId: string | null
+  readonly credentialRef: string | null
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number | null
+  readonly updatedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason:
+      | 'owner-feishu-route-configure'
+      | 'owner-feishu-route-reset'
+      | 'owner-feishu-route-disable'
+  }
+}
+
+/** Safe provider observation produced outside the database transaction. */
+export interface WorkbenchFeishuVerificationObservation {
+  readonly result: 'healthy' | 'attention' | 'failed'
+  readonly identity: {
+    readonly state: 'verified' | 'failed'
+    readonly issue: FeishuConnectionIssue | null
+  }
+  readonly actor: Omit<FeishuActorBinding, 'connectionId' | 'routeGeneration'> | null
+  readonly displayLabel: string | null
+  readonly scopeInspection: {
+    readonly state: 'observed' | 'unavailable' | 'not-inspected'
+    readonly scopes: readonly FeishuScopeObservation[]
+    readonly issue: FeishuConnectionIssue | null
+  }
+  readonly resourceProbe: FeishuResourceProbeProjection
+}
+
+/** Append one verification fact against the exact route generation that was probed. */
+export interface WorkbenchFeishuVerificationMutation {
+  readonly verificationId: string
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | null
+  readonly observation: WorkbenchFeishuVerificationObservation
+  readonly checkedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-feishu-route-verify'
+  }
+}
+
+/** Idempotency preflight used before any external provider call. */
+export interface WorkbenchFeishuVerificationReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-route-verify'
+}
 
 /** Host-fixed scope for the Project creation-page read. */
 export interface WorkbenchProjectStartQuery {
@@ -300,6 +398,26 @@ export interface WorkbenchRepository {
     mutation: WorkbenchSuggestedChangeDecisionMutation,
     signal: AbortSignal,
   ): Promise<DecideSuggestedChangeResult>
+  /** Read both independent Feishu routes from local truth; credential presence is enriched later. */
+  readFeishuConnection(
+    query: WorkbenchFeishuConnectionQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchStoredFeishuConnectionProjection>
+  /** Atomically advance one route generation with audit, Outbox, and replay receipt. */
+  commitFeishuRoute(
+    mutation: WorkbenchFeishuRouteMutation,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuIdentityRouteResult>
+  /** Return a committed verification replay/conflict, or null before any external read. */
+  replayFeishuVerification(
+    query: WorkbenchFeishuVerificationReplayQuery,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult | null>
+  /** Atomically record one safe provider observation with route/connection CAS. */
+  commitFeishuVerification(
+    mutation: WorkbenchFeishuVerificationMutation,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */

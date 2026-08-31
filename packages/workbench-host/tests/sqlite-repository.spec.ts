@@ -1186,7 +1186,7 @@ describe('SqliteWorkbenchRepository', () => {
     await expect(workbench.open()).rejects.toThrow(/closed/u)
   })
 
-  it('migrates v2 through v5, seeds the exact template, and preserves the T03 ledger', async () => {
+  it('migrates v2 through v6, seeds the exact template, and preserves the T03 ledger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1195,6 +1195,18 @@ describe('SqliteWorkbenchRepository', () => {
 
     const legacy = new DatabaseSync(path)
     legacy.exec(`
+      DROP TRIGGER workbench_feishu_verification_no_delete;
+      DROP TRIGGER workbench_feishu_verification_no_update;
+      DROP TRIGGER workbench_feishu_binding_no_delete;
+      DROP TRIGGER workbench_feishu_binding_no_update;
+      DROP TRIGGER workbench_feishu_route_no_delete;
+      DROP TRIGGER workbench_feishu_route_no_update;
+      DROP TRIGGER workbench_feishu_connection_no_delete;
+      DROP TRIGGER workbench_feishu_connection_scope_no_update;
+      DROP TABLE workbench_feishu_identity_binding;
+      DROP TABLE workbench_feishu_verification;
+      DROP TABLE workbench_feishu_route_version;
+      DROP TABLE workbench_feishu_connection;
       DROP TRIGGER workbench_suggested_change_decision_no_delete;
       DROP TRIGGER workbench_suggested_change_decision_no_update;
       DROP TRIGGER workbench_suggested_change_evidence_no_delete;
@@ -1236,7 +1248,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({
-      user_version: 5,
+      user_version: 6,
     })
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({
       id: 'status-legacy-v2',
@@ -1859,7 +1871,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates v3 through v5, backfills one empty Team per Project, and creates heads for new Projects', async () => {
+  it('migrates v3 through v6, backfills one empty Team per Project, and creates heads for new Projects', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1868,6 +1880,18 @@ describe('SqliteWorkbenchRepository', () => {
 
     const legacy = new DatabaseSync(path)
     legacy.exec(`
+      DROP TRIGGER workbench_feishu_verification_no_delete;
+      DROP TRIGGER workbench_feishu_verification_no_update;
+      DROP TRIGGER workbench_feishu_binding_no_delete;
+      DROP TRIGGER workbench_feishu_binding_no_update;
+      DROP TRIGGER workbench_feishu_route_no_delete;
+      DROP TRIGGER workbench_feishu_route_no_update;
+      DROP TRIGGER workbench_feishu_connection_no_delete;
+      DROP TRIGGER workbench_feishu_connection_scope_no_update;
+      DROP TABLE workbench_feishu_identity_binding;
+      DROP TABLE workbench_feishu_verification;
+      DROP TABLE workbench_feishu_route_version;
+      DROP TABLE workbench_feishu_connection;
       DROP TRIGGER workbench_suggested_change_decision_no_delete;
       DROP TRIGGER workbench_suggested_change_decision_no_update;
       DROP TRIGGER workbench_suggested_change_evidence_no_delete;
@@ -1896,7 +1920,7 @@ describe('SqliteWorkbenchRepository', () => {
 
     const upgraded = repository(path)
     await upgraded.open()
-    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
     await expect(upgraded.readProjectTeam({
       organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
     }, signal)).resolves.toEqual({
@@ -1929,7 +1953,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates an exact v4 database to v5 and validates every SuggestedChange trigger', async () => {
+  it('migrates an exact v4 database to v6 and validates every SuggestedChange trigger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1938,6 +1962,18 @@ describe('SqliteWorkbenchRepository', () => {
 
     const legacy = new DatabaseSync(path)
     legacy.exec(`
+      DROP TRIGGER workbench_feishu_verification_no_delete;
+      DROP TRIGGER workbench_feishu_verification_no_update;
+      DROP TRIGGER workbench_feishu_binding_no_delete;
+      DROP TRIGGER workbench_feishu_binding_no_update;
+      DROP TRIGGER workbench_feishu_route_no_delete;
+      DROP TRIGGER workbench_feishu_route_no_update;
+      DROP TRIGGER workbench_feishu_connection_no_delete;
+      DROP TRIGGER workbench_feishu_connection_scope_no_update;
+      DROP TABLE workbench_feishu_identity_binding;
+      DROP TABLE workbench_feishu_verification;
+      DROP TABLE workbench_feishu_route_version;
+      DROP TABLE workbench_feishu_connection;
       DROP TRIGGER workbench_suggested_change_decision_no_delete;
       DROP TRIGGER workbench_suggested_change_decision_no_update;
       DROP TRIGGER workbench_suggested_change_evidence_no_delete;
@@ -1955,7 +1991,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     const database = connection(upgraded)
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
     expect(database.prepare(`
       SELECT name FROM sqlite_schema
       WHERE type = 'table' AND name LIKE 'workbench_suggested_change%'

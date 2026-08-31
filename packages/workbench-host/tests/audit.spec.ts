@@ -359,6 +359,86 @@ describe('audit hash envelope', () => {
       summary: { code: 'suggested-change-rejected', changedFields: ['decision'] },
     })).toThrow(/correlated combination/u)
   })
+
+  it('admits only workspace-scoped, credential-free Feishu connection vocabulary', () => {
+    const cases = [
+      [
+        'workbench.feishu-route.configured',
+        'owner-feishu-route-configure',
+        'workbench.feishu-route.configure',
+        'feishu-route-configured',
+        ['route', 'credentialRef'],
+      ],
+      [
+        'workbench.feishu-route.reset',
+        'owner-feishu-route-reset',
+        'workbench.feishu-route.reset',
+        'feishu-route-reset',
+        ['route', 'identityBinding'],
+      ],
+      [
+        'workbench.feishu-route.disabled',
+        'owner-feishu-route-disable',
+        'workbench.feishu-route.disable',
+        'feishu-route-disabled',
+        ['route', 'state'],
+      ],
+      [
+        'workbench.feishu-route.verification-recorded',
+        'owner-feishu-route-verify',
+        'workbench.feishu-route.verify',
+        'feishu-route-verification-attention',
+        ['verification'],
+      ],
+    ] as const
+
+    for (const [action, reason, commandType, summaryCode, changedFields] of cases) {
+      const input: AuditEventInput = {
+        ...eventInput(),
+        action,
+        scope: {
+          organizationId: 'organization-001',
+          teamId: 'team-001',
+          projectId: null,
+        },
+        reason: { code: reason },
+        object: { type: 'feishu-connection', id: 'feishu-primary', version: '3' },
+        command: { id: 'command-feishu-001', type: commandType },
+        summary: { code: summaryCode, changedFields },
+      }
+      const created = createAuditEvent(input)
+      expect(created).toMatchObject({
+        action,
+        scope: { projectId: null },
+        object: { type: 'feishu-connection', id: 'feishu-primary' },
+        reason: { code: reason },
+        summary: { code: summaryCode },
+      })
+      expect(created.canonicalEnvelope).not.toMatch(
+        /app-secret|user-access-token|cli_feishu|ou_private|tasklist-private/u,
+      )
+    }
+
+    expect(() => createAuditEvent({
+      ...eventInput(),
+      action: 'workbench.feishu-route.verification-recorded',
+      scope: {
+        organizationId: 'organization-001', teamId: 'team-001', projectId: 'project-001',
+      },
+      reason: { code: 'owner-feishu-route-verify' },
+      object: { type: 'feishu-connection', id: 'feishu-primary', version: '3' },
+      command: { id: 'command-feishu-001', type: 'workbench.feishu-route.verify' },
+      summary: { code: 'feishu-route-verification-attention', changedFields: ['verification'] },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...eventInput(),
+      action: 'workbench.feishu-route.configured',
+      reason: { code: 'owner-feishu-route-configure' },
+      object: { type: 'feishu-connection', id: 'feishu-primary', version: '3' },
+      command: { id: 'command-feishu-001', type: 'workbench.feishu-route.configure' },
+      summary: { code: 'feishu-route-configured', changedFields: ['route', 'appSecret'] },
+    })).toThrow(/correlated combination/u)
+  })
 })
 
 describe('audit chain verification', () => {

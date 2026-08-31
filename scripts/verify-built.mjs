@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T06 actually loads.
+ * Verify the executable artifacts that T07 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -84,12 +84,59 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
-    check(main.WORKBENCH_SCHEMA_VERSION === 5, `${packageName}: built SQLite authority exports Schema v5`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 6, `${packageName}: built SQLite authority exports Schema v6`)
+    check(typeof main.DshFeishuConnectionAdapter === 'function', `${packageName}: production Feishu adapter is a packed main export`)
+    check(main.FEISHU_CONNECTION_ADAPTER_ID === 'feishu-open-platform-v1', `${packageName}: Feishu adapter exports its stable identity`)
+    check(
+      typeof main.DshFeishuConnectionAdapter.prototype.startIdentityVerification === 'function'
+        && !Object.hasOwn(main.DshFeishuConnectionAdapter.prototype, 'verify'),
+      `${packageName}: Feishu adapter starts identity verification explicitly and has no legacy one-phase verify method`,
+    )
+  }
+
+  const feishuAdapterDeclaration = readArtifact(
+    hostDir,
+    './lib/types/feishu-connection-adapter.d.ts',
+    `${packageName}: Feishu adapter declaration`,
+  )
+  const scenarioDeclaration = readArtifact(
+    hostDir,
+    './lib/types/scenario.d.ts',
+    `${packageName}: Scenario declaration`,
+  )
+  if (feishuAdapterDeclaration !== undefined && scenarioDeclaration !== undefined) {
+    const identityInput = scenarioDeclaration.match(
+      /export interface WorkbenchFeishuIdentityVerificationInput \{([\s\S]*?)\n\}/u,
+    )?.[1]
+    const verifiedSession = scenarioDeclaration.match(
+      /export interface WorkbenchFeishuVerifiedIdentitySession \{([\s\S]*?)\n\}/u,
+    )?.[1]
+    check(
+      /\bstartIdentityVerification\(/u.test(feishuAdapterDeclaration)
+        && !/\n\s+verify\(/u.test(feishuAdapterDeclaration),
+      `${packageName}: public adapter declaration exposes startIdentityVerification and no one-phase verify`,
+    )
+    check(
+      typeof identityInput === 'string'
+        && identityInput.includes('kind: FeishuIdentityKind')
+        && identityInput.includes('appId: string')
+        && identityInput.includes('credentialRef: string')
+        && !identityInput.includes('resourceProbe'),
+      `${packageName}: identity phase declaration cannot receive a resource identifier`,
+    )
+    check(
+      typeof verifiedSession === 'string'
+        && verifiedSession.includes('finishVerification(')
+        && verifiedSession.includes('resourceId: string')
+        && verifiedSession.includes('dispose(): void'),
+      `${packageName}: verified identity returns an opaque one-shot resource continuation with disposal`,
+    )
   }
 
   const browserContract = await importArtifact(hostDir, './lib/client.js', `${packageName}: browser-safe contract`)
   if (browserContract !== undefined) {
     check(!('default' in browserContract), `${packageName}/client has no accidental default export`)
+    check(browserContract.FEISHU_CONNECTION_ID === 'feishu-primary', `${packageName}/client exports the stable Feishu connection identity`)
   }
 
   const auth = await importArtifact(hostDir, './lib/owner-auth-service.js', `${packageName}: Owner auth Service`)
@@ -195,8 +242,11 @@ function verifyPublicHostImports(packageDir, packageName) {
     const remote = await import(${JSON.stringify(`${packageName}/remote`)})
     const recovery = await import(${JSON.stringify(`${packageName}/recovery`)})
     if (typeof main.default !== 'function' || main.default !== main.WorkbenchService) throw new Error('invalid Host default export')
+    if (typeof main.DshFeishuConnectionAdapter !== 'function' || main.FEISHU_CONNECTION_ADAPTER_ID !== 'feishu-open-platform-v1') throw new Error('invalid Feishu adapter export')
+    if (typeof main.DshFeishuConnectionAdapter.prototype.startIdentityVerification !== 'function' || Object.hasOwn(main.DshFeishuConnectionAdapter.prototype, 'verify')) throw new Error('invalid two-phase Feishu adapter surface')
     if (typeof auth.default !== 'function' || auth.default !== auth.OwnerAuthService) throw new Error('invalid Owner auth export')
     if ('default' in contract) throw new Error('browser-safe contract has an accidental default export')
+    if (contract.FEISHU_CONNECTION_ID !== 'feishu-primary') throw new Error('invalid Feishu browser contract export')
     if (typert.TYPERT?.package !== ${JSON.stringify(packageName)}) throw new Error('invalid Host Typert export')
     if (remote.TYPERT_REMOTE?.package !== ${JSON.stringify(packageName)}) throw new Error('invalid Remote Typert export')
     if (typeof recovery.recoverOwnerOffline !== 'function' || 'default' in recovery) throw new Error('invalid recovery export')
@@ -244,7 +294,9 @@ function verifyTypertFace(face, packageName, label) {
     'activity',
     'addProjectMember',
     'auditIntegrity',
+    'configureFeishuIdentityRoute',
     'createProject',
+    'feishuConnectionCenter',
     'project',
     'projectStart',
     'projectTeam',
@@ -255,10 +307,11 @@ function verifyTypertFace(face, packageName, label) {
     'setProjectResponsibility',
     'setStatus',
     'snapshot',
+    'verifyFeishuIdentityRoute',
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the fourteen T06 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the seventeen T07 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -268,6 +321,12 @@ function verifyTypertFace(face, packageName, label) {
   const addProjectMember = invocations.find(invocation => invocation?.method === 'addProjectMember')
   const auditIntegrity = invocations.find(invocation => invocation?.method === 'auditIntegrity')
   const createProject = invocations.find(invocation => invocation?.method === 'createProject')
+  const configureFeishuIdentityRoute = invocations.find(
+    invocation => invocation?.method === 'configureFeishuIdentityRoute',
+  )
+  const feishuConnectionCenter = invocations.find(
+    invocation => invocation?.method === 'feishuConnectionCenter',
+  )
   const project = invocations.find(invocation => invocation?.method === 'project')
   const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
   const projectTeam = invocations.find(invocation => invocation?.method === 'projectTeam')
@@ -286,11 +345,16 @@ function verifyTypertFace(face, packageName, label) {
   )
   const setStatus = invocations.find(invocation => invocation?.method === 'setStatus')
   const snapshot = invocations.find(invocation => invocation?.method === 'snapshot')
+  const verifyFeishuIdentityRoute = invocations.find(
+    invocation => invocation?.method === 'verifyFeishuIdentityRoute',
+  )
   for (const invocation of [
     activity,
     addProjectMember,
     auditIntegrity,
+    configureFeishuIdentityRoute,
     createProject,
+    feishuConnectionCenter,
     project,
     projectStart,
     projectTeam,
@@ -301,6 +365,7 @@ function verifyTypertFace(face, packageName, label) {
     setProjectResponsibility,
     setStatus,
     snapshot,
+    verifyFeishuIdentityRoute,
   ]) {
     check(
       invocation?.cancellation?.parameter === 'signal',
@@ -362,6 +427,21 @@ function verifyTypertFace(face, packageName, label) {
         limit: 5,
       }),
     `${packageName}: ${label} Activity filter carries T06 SuggestedChange vocabulary and rejects unknown actions`,
+  )
+  check(
+    schemaAccepts(activityFilter?.codec?.schema, {
+      projectId: null,
+      objectType: 'feishu-connection',
+      action: 'workbench.feishu-route.verification-recorded',
+      limit: 5,
+    })
+      && schemaRejects(activityFilter?.codec?.schema, {
+        projectId: null,
+        objectType: 'feishu-connection',
+        action: 'workbench.feishu-route.fallback',
+        limit: 5,
+      }),
+    `${packageName}: ${label} Activity filter carries the closed T07 Feishu vocabulary without a fallback action`,
   )
   const activityShape = unwrapSchema(activity?.result?.schema)?.def?.shape
   check(
@@ -1129,6 +1209,254 @@ function verifyTypertFace(face, packageName, label) {
     )
   }
 
+  const connectionShape = unwrapSchema(feishuConnectionCenter?.result?.schema)?.def?.shape
+  const botRouteShape = unwrapSchema(connectionShape?.bot)?.def?.shape
+  const actorSchema = unionOptions(botRouteShape?.actor)
+    .find(option => schemaObjectKeys(option).includes('openId'))
+  const verificationSchema = unionOptions(botRouteShape?.lastVerification)
+    .find(option => schemaObjectKeys(option).includes('verificationId'))
+  const verificationShape = unwrapSchema(verificationSchema)?.def?.shape
+  const unavailableProbe = unionOptions(verificationShape?.resourceProbe)
+    .find(option => schemaObjectKeys(option).includes('issue'))
+  const unavailableProbeShape = unwrapSchema(unavailableProbe)?.def?.shape
+  const issueShape = unwrapSchema(unavailableProbeShape?.issue)?.def?.shape
+  check(
+    (feishuConnectionCenter?.parameters?.length ?? -1) === 0
+      && sameStrings(schemaObjectKeys(feishuConnectionCenter?.result?.schema), [
+        'bot',
+        'connectionId',
+        'realm',
+        'revision',
+        'updatedAt',
+        'user',
+      ])
+      && sameStrings(schemaObjectKeys(connectionShape?.bot), [
+        'actor',
+        'appId',
+        'credential',
+        'displayLabel',
+        'generation',
+        'kind',
+        'lastVerification',
+        'state',
+      ])
+      && sameStrings(schemaObjectKeys(connectionShape?.user), schemaObjectKeys(connectionShape?.bot)),
+    `${packageName}: ${label} Connection Center is one exact Bot/User whole-value projection`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(botRouteShape?.credential), [
+      'configured',
+      'ref',
+      'source',
+      'writable',
+    ])
+      && sameStrings(schemaObjectKeys(actorSchema), [
+        'appId',
+        'connectionId',
+        'kind',
+        'openId',
+        'realm',
+        'routeGeneration',
+        'tenantKey',
+      ])
+      && sameStrings(schemaObjectKeys(verificationSchema), [
+        'checkedAt',
+        'identity',
+        'resourceProbe',
+        'result',
+        'routeGeneration',
+        'scopeInspection',
+        'sequence',
+        'verificationId',
+      ]),
+    `${packageName}: ${label} Connection Center exposes references, identity binding, and dated verification without credential values`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(verificationShape?.identity), ['issue', 'state'])
+      && sameStrings(schemaObjectKeys(verificationShape?.scopeInspection), [
+        'issue',
+        'scopes',
+        'state',
+      ])
+      && sameStrings(schemaObjectKeys(unavailableProbeShape?.issue), [
+        'code',
+        'grantPlane',
+        'missingScopes',
+        'recovery',
+        'retryAt',
+      ]),
+    `${packageName}: ${label} Feishu failures use only the closed redacted issue schema`,
+  )
+  check(
+    sameStrings(schemaLiteralTreeValues(issueShape?.code), [
+      'credential-unconfigured',
+      'credential-invalid',
+      'credential-expired',
+      'user-authorization-revoked',
+      'app-disabled',
+      'missing-app-scope',
+      'missing-user-grant',
+      'outside-app-data-range',
+      'resource-access-unavailable',
+      'resource-not-found',
+      'unsupported-actor',
+      'identity-continuity-mismatch',
+      'tenant-mismatch',
+      'rate-limited',
+      'provider-unavailable',
+      'provider-response-invalid',
+      'unknown-provider-error',
+    ])
+      && sameStrings(schemaLiteralTreeValues(issueShape?.recovery), [
+        'configure-credential',
+        'rotate-credential',
+        'enable-app',
+        'grant-app-scope',
+        'reauthorize-user',
+        'expand-app-data-range',
+        'share-resource',
+        'check-resource-id',
+        'reset-identity-binding',
+        'retry-later',
+        'inspect-provider',
+      ])
+      && sameStrings(
+        unionOptions(verificationShape?.resourceProbe).flatMap(option => {
+          const shape = unwrapSchema(option)?.def?.shape
+          return schemaLiteralTreeValues(shape?.state)
+        }),
+        ['not-tested', 'accessible', 'unavailable'],
+      ),
+    `${packageName}: ${label} Feishu issue, recovery, and resource-state vocabularies are exact closed T07 unions`,
+  )
+
+  const configureFeishuRequest = configureFeishuIdentityRoute?.parameters
+    ?.find(parameter => parameter?.name === 'request')
+  const configureFeishuOptions = unionOptions(configureFeishuRequest?.codec?.schema)
+  const feishuCommandBase = {
+    kind: 'bot',
+    expectedConnectionRevision: 0,
+    expectedRouteGeneration: null,
+    idempotencyKey: 'built-feishu-idempotency-0001',
+    causationId: 'built-feishu-causation-0001',
+  }
+  check(
+    configureFeishuOptions.length === 3
+      && configureFeishuOptions.every(option => sameStrings(schemaObjectKeys(option), [
+        'appId',
+        'causationId',
+        'credentialRef',
+        'expectedConnectionRevision',
+        'expectedRouteGeneration',
+        'idempotencyKey',
+        'kind',
+        'mode',
+        'reason',
+      ])),
+    `${packageName}: ${label} Feishu route configuration is a closed set/reset/disable carrier with reference metadata only`,
+  )
+  check(
+    schemaAccepts(configureFeishuRequest?.codec?.schema, {
+      ...feishuCommandBase,
+      mode: 'set',
+      appId: 'cli_built_feishu',
+      credentialRef: 'FEISHU_BUILT_BOT_SECRET',
+      reason: 'owner-feishu-route-configure',
+    })
+      && schemaAccepts(configureFeishuRequest?.codec?.schema, {
+        ...feishuCommandBase,
+        mode: 'reset',
+        reason: 'owner-feishu-route-reset',
+      })
+      && schemaAccepts(configureFeishuRequest?.codec?.schema, {
+        ...feishuCommandBase,
+        mode: 'disable',
+        reason: 'owner-feishu-route-disable',
+      })
+      && schemaRejects(configureFeishuRequest?.codec?.schema, {
+        ...feishuCommandBase,
+        mode: 'reset',
+        appId: 'cli_forbidden_reset_rebind',
+        reason: 'owner-feishu-route-reset',
+      })
+      && schemaRejects(configureFeishuRequest?.codec?.schema, {
+        ...feishuCommandBase,
+        mode: 'fallback',
+        appId: 'cli_forbidden_fallback',
+        credentialRef: 'FEISHU_FALLBACK_SECRET',
+        reason: 'owner-feishu-route-configure',
+      }),
+    `${packageName}: ${label} Feishu route schema accepts explicit modes and has no actor-fallback mode`,
+  )
+  const configureFeishuSuccess = unionOptions(configureFeishuIdentityRoute?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('receipt'))
+  const configureFeishuSuccessShape = unwrapSchema(configureFeishuSuccess)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(configureFeishuSuccess), ['ok', 'receipt', 'value'])
+      && sameStrings(schemaObjectKeys(configureFeishuSuccessShape?.value), [
+        'connectionId',
+        'connectionRevision',
+        'kind',
+        'routeGeneration',
+        'state',
+      ]),
+    `${packageName}: ${label} Feishu configuration returns only a redacted acknowledgement and receipt`,
+  )
+
+  const verifyFeishuRequest = verifyFeishuIdentityRoute?.parameters
+    ?.find(parameter => parameter?.name === 'request')
+  const verifyFeishuRequestShape = unwrapSchema(verifyFeishuRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(verifyFeishuRequest?.codec?.schema), [
+      'causationId',
+      'expectedConnectionRevision',
+      'expectedRouteGeneration',
+      'idempotencyKey',
+      'kind',
+      'reason',
+      'resourceProbe',
+    ])
+      && sameStrings(schemaObjectKeys(verifyFeishuRequestShape?.resourceProbe), [
+        'kind',
+        'resourceId',
+      ]),
+    `${packageName}: ${label} Feishu verification selects one route and optional read-only Task-list probe`,
+  )
+  check(
+    schemaAccepts(verifyFeishuRequest?.codec?.schema, {
+      ...feishuCommandBase,
+      resourceProbe: { kind: 'task-list', resourceId: 'tasklist_built_feishu' },
+      reason: 'owner-feishu-route-verify',
+    })
+      && schemaRejects(verifyFeishuRequest?.codec?.schema, {
+        ...feishuCommandBase,
+        kind: 'fallback',
+        resourceProbe: { kind: 'task-list', resourceId: 'tasklist_built_feishu' },
+        reason: 'owner-feishu-route-verify',
+      })
+      && schemaRejects(verifyFeishuRequest?.codec?.schema, {
+        ...feishuCommandBase,
+        resourceProbe: { kind: 'calendar', resourceId: 'calendar_forbidden' },
+        reason: 'owner-feishu-route-verify',
+      }),
+    `${packageName}: ${label} Feishu verification rejects alternate actors and non-T07 resource probes`,
+  )
+  const verifyFeishuSuccess = unionOptions(verifyFeishuIdentityRoute?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('receipt'))
+  const verifyFeishuSuccessShape = unwrapSchema(verifyFeishuSuccess)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(verifyFeishuSuccess), ['ok', 'receipt', 'value'])
+      && sameStrings(schemaObjectKeys(verifyFeishuSuccessShape?.value), [
+        'connectionId',
+        'connectionRevision',
+        'kind',
+        'result',
+        'routeGeneration',
+        'verificationSequence',
+      ]),
+    `${packageName}: ${label} Feishu verification returns only status/version facts and a receipt`,
+  )
+
   const projectQuery = project?.parameters?.find(parameter => parameter?.name === 'query')
   check(
     sameStrings(schemaObjectKeys(projectQuery?.codec?.schema), ['projectId']),
@@ -1190,6 +1518,15 @@ function unionOptions(value) {
 function schemaLiteralValues(value) {
   const values = unwrapSchema(value)?.def?.values
   return Array.isArray(values) ? values : []
+}
+
+function schemaLiteralTreeValues(value) {
+  const unwrapped = unwrapSchema(value)
+  const direct = Array.isArray(unwrapped?.def?.values) ? unwrapped.def.values : []
+  const nested = Array.isArray(unwrapped?.def?.options)
+    ? unwrapped.def.options.flatMap(option => schemaLiteralTreeValues(option))
+    : []
+  return [...new Set([...direct, ...nested])]
 }
 
 function isOptionalNever(value) {

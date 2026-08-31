@@ -22,6 +22,10 @@ import {
   WorkbenchReviewController,
   type WorkbenchReviewRemote,
 } from './review-controller.ts'
+import {
+  WorkbenchFeishuConnectionController,
+  type WorkbenchFeishuConnectionRemote,
+} from './feishu-connection-controller.ts'
 
 /** User-visible shell modes. */
 export type OwnerPhase =
@@ -53,6 +57,7 @@ export interface OwnerClientState {
   readonly projects: WorkbenchProjectController | null
   readonly projectTeam: WorkbenchProjectTeamController | null
   readonly review: WorkbenchReviewController | null
+  readonly feishuConnection: WorkbenchFeishuConnectionController | null
   readonly activity: WorkbenchActivityController | null
   readonly recoveryCode: string | null
   readonly issue: OwnerIssue | null
@@ -65,6 +70,7 @@ const INITIAL_STATE: OwnerClientState = Object.freeze({
   projects: null,
   projectTeam: null,
   review: null,
+  feishuConnection: null,
   activity: null,
   recoveryCode: null,
   issue: null,
@@ -91,6 +97,7 @@ export class OwnerController {
   private projects: WorkbenchProjectController | null = null
   private projectTeam: WorkbenchProjectTeamController | null = null
   private review: WorkbenchReviewController | null = null
+  private feishuConnection: WorkbenchFeishuConnectionController | null = null
   private activity: WorkbenchActivityController | null = null
   private projectSelectionOff: (() => void) | null = null
   private authEpoch = 0
@@ -102,7 +109,7 @@ export class OwnerController {
   constructor(
     private readonly auth: OwnerAuthHttp,
     private readonly remote: WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
-      & WorkbenchReviewRemote,
+      & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote,
     private readonly options: OwnerControllerOptions = {},
   ) {}
 
@@ -126,6 +133,7 @@ export class OwnerController {
     this.projects?.markDisconnected()
     this.projectTeam?.markDisconnected()
     this.review?.markDisconnected()
+    this.feishuConnection?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -174,6 +182,7 @@ export class OwnerController {
     this.projects?.markDisconnected()
     this.projectTeam?.markDisconnected()
     this.review?.markDisconnected()
+    this.feishuConnection?.markDisconnected()
     this.activity?.markDisconnected()
 
     const unavailable = ownerIssue(connectionFallbackOperation(this.state.phase), 'unavailable')
@@ -195,6 +204,7 @@ export class OwnerController {
     this.projects?.markDisconnected()
     this.projectTeam?.markDisconnected()
     this.review?.markDisconnected()
+    this.feishuConnection?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -211,6 +221,7 @@ export class OwnerController {
     const currentProjects = this.projects
     const currentProjectTeam = this.projectTeam
     const currentReview = this.review
+    const currentFeishuConnection = this.feishuConnection
     const currentActivity = this.activity
     this.projectSelectionOff?.()
     this.projectSelectionOff = null
@@ -218,11 +229,13 @@ export class OwnerController {
     this.projects = null
     this.projectTeam = null
     this.review = null
+    this.feishuConnection = null
     this.activity = null
     const statusDisposal = currentStatus?.dispose()
     const projectDisposal = currentProjects?.dispose()
     const projectTeamDisposal = currentProjectTeam?.dispose()
     const reviewDisposal = currentReview?.dispose()
+    const feishuConnectionDisposal = currentFeishuConnection?.dispose()
     const activityDisposal = currentActivity?.dispose()
     this.state = INITIAL_STATE
     this.listeners.clear()
@@ -231,6 +244,7 @@ export class OwnerController {
     if (projectDisposal !== undefined) pending.push(projectDisposal)
     if (projectTeamDisposal !== undefined) pending.push(projectTeamDisposal)
     if (reviewDisposal !== undefined) pending.push(reviewDisposal)
+    if (feishuConnectionDisposal !== undefined) pending.push(feishuConnectionDisposal)
     if (activityDisposal !== undefined) pending.push(activityDisposal)
     this.disposal = Promise.allSettled(pending).then(() => undefined)
     return this.disposal
@@ -284,6 +298,7 @@ export class OwnerController {
             projects: null,
             projectTeam: null,
             review: null,
+            feishuConnection: null,
             activity: null,
             recoveryCode: null,
             issue,
@@ -301,6 +316,7 @@ export class OwnerController {
         projects: null,
         projectTeam: null,
         review: null,
+        feishuConnection: null,
         activity: null,
         recoveryCode: result.value.recoveryCode,
         issue: null,
@@ -354,6 +370,7 @@ export class OwnerController {
     this.projects?.markDisconnected()
     this.projectTeam?.markDisconnected()
     this.review?.markDisconnected()
+    this.feishuConnection?.markDisconnected()
     this.activity?.markDisconnected()
     this.publish({ ...this.state, phase: 'logout-pending', issue: null })
     try {
@@ -379,6 +396,7 @@ export class OwnerController {
         projects: null,
         projectTeam: null,
         review: null,
+        feishuConnection: null,
         activity: null,
         recoveryCode: null,
         issue: null,
@@ -424,6 +442,7 @@ export class OwnerController {
           projects: null,
           projectTeam: null,
           review: null,
+          feishuConnection: null,
           activity: null,
           recoveryCode: this.state.recoveryCode,
           issue: null,
@@ -444,6 +463,7 @@ export class OwnerController {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -459,23 +479,26 @@ export class OwnerController {
     if (this.disposed || epoch !== this.authEpoch) return
     const existingAccess = this.state.access
     if ((this.status !== null || this.projects !== null || this.projectTeam !== null
-      || this.review !== null || this.activity !== null)
+      || this.review !== null || this.feishuConnection !== null || this.activity !== null)
       && existingAccess?.state === 'signed-in'
       && existingAccess.ownerId !== access.ownerId) {
       await this.retireProtectedControllers()
       if (this.disposed || epoch !== this.authEpoch) return
     }
     const created = this.status === null || this.projects === null
-      || this.projectTeam === null || this.review === null || this.activity === null
+      || this.projectTeam === null || this.review === null
+      || this.feishuConnection === null || this.activity === null
     const status = this.status ?? this.createStatusController()
     const projects = this.projects ?? this.createProjectController()
     const projectTeam = this.projectTeam ?? this.createProjectTeamController()
     const review = this.review ?? this.createReviewController()
+    const feishuConnection = this.feishuConnection ?? this.createFeishuConnectionController()
     const activity = this.activity ?? this.createActivityController()
     this.status = status
     this.projects = projects
     this.projectTeam = projectTeam
     this.review = review
+    this.feishuConnection = feishuConnection
     this.activity = activity
     this.publish({
       phase: 'authenticated',
@@ -484,6 +507,7 @@ export class OwnerController {
       projects,
       projectTeam,
       review,
+      feishuConnection,
       activity,
       recoveryCode: null,
       issue: null,
@@ -496,6 +520,7 @@ export class OwnerController {
         created ? projects.refresh() : projects.connectionReset(),
         created ? Promise.resolve() : projectTeam.connectionReset(),
         created ? Promise.resolve() : review.connectionReset(),
+        created ? feishuConnection.refresh() : feishuConnection.connectionReset(),
         activity.refresh(),
       ])
     }
@@ -546,6 +571,14 @@ export class OwnerController {
     })
   }
 
+  private createFeishuConnectionController(): WorkbenchFeishuConnectionController {
+    return new WorkbenchFeishuConnectionController(this.remote, {
+      onBeforeProtectedOperation: () => this.admitProtectedOperation(),
+      onTransportFailure: () => { this.revalidateAfterStatusFailure() },
+      onCommitted: () => { void this.activity?.refresh() },
+    })
+  }
+
   private bindProjectSelection(
     projects: WorkbenchProjectController,
     projectTeam: WorkbenchProjectTeamController,
@@ -581,6 +614,7 @@ export class OwnerController {
     const currentProjects = this.projects
     const currentProjectTeam = this.projectTeam
     const currentReview = this.review
+    const currentFeishuConnection = this.feishuConnection
     const currentActivity = this.activity
     this.projectSelectionOff?.()
     this.projectSelectionOff = null
@@ -588,12 +622,14 @@ export class OwnerController {
     this.projects = null
     this.projectTeam = null
     this.review = null
+    this.feishuConnection = null
     this.activity = null
     return Promise.allSettled([
       currentStatus?.dispose() ?? Promise.resolve(),
       currentProjects?.dispose() ?? Promise.resolve(),
       currentProjectTeam?.dispose() ?? Promise.resolve(),
       currentReview?.dispose() ?? Promise.resolve(),
+      currentFeishuConnection?.dispose() ?? Promise.resolve(),
       currentActivity?.dispose() ?? Promise.resolve(),
     ]).then(() => undefined)
   }
@@ -661,6 +697,7 @@ export class OwnerController {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -681,6 +718,7 @@ export class OwnerController {
       && this.projects !== null
       && this.projectTeam !== null
       && this.review !== null
+      && this.feishuConnection !== null
       && this.activity !== null) {
       this.publish({
         ...this.state,
@@ -689,6 +727,7 @@ export class OwnerController {
         projects: this.projects,
         projectTeam: this.projectTeam,
         review: this.review,
+        feishuConnection: this.feishuConnection,
         activity: this.activity,
         issue,
       })

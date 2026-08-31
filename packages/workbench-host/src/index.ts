@@ -3,13 +3,17 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  ConfigureFeishuIdentityRouteRequest,
+  ConfigureFeishuIdentityRouteResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  FeishuConnectionCenterProjection,
   ProjectDetailProjection,
   ProjectQuery,
   ProjectStartFilter,
@@ -30,10 +34,11 @@ import type {
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
   WorkbenchStatusSnapshot,
+  VerifyFeishuIdentityRouteRequest,
+  VerifyFeishuIdentityRouteResult,
 } from './client.ts'
 import type { WorkbenchRepository } from './repository.ts'
 import {
-  noWorkbenchExternalAdapters,
   randomWorkbenchIds,
   systemWorkbenchClock,
   WorkbenchScenario,
@@ -46,6 +51,7 @@ import {
   SqliteWorkbenchRepository,
   type WorkbenchJournalMode,
 } from './sqlite-repository.ts'
+import { DshFeishuConnectionAdapter } from './feishu-connection-adapter.ts'
 
 export type * from './client.ts'
 export type * from './repository.ts'
@@ -136,6 +142,11 @@ export type {
   WorkbenchClock,
   WorkbenchExternalAdapter,
   WorkbenchExternalAdapters,
+  WorkbenchFeishuExternalAdapter,
+  WorkbenchFeishuIdentityVerificationInput,
+  WorkbenchFeishuIdentityVerificationResult,
+  WorkbenchFeishuResourceVerificationObservation,
+  WorkbenchFeishuVerifiedIdentitySession,
   WorkbenchIdGenerator,
   WorkbenchScenarioOptions,
 } from './scenario.ts'
@@ -148,6 +159,19 @@ export type {
   SqliteWorkbenchRepositoryOptions,
   WorkbenchJournalMode,
 } from './sqlite-repository.ts'
+export {
+  DEFAULT_FEISHU_MAX_RESPONSE_BYTES,
+  DEFAULT_FEISHU_REQUEST_TIMEOUT_MS,
+  DshFeishuConnectionAdapter,
+  FEISHU_CONNECTION_ADAPTER_ID,
+  FeishuCredentialDescriptionError,
+} from './feishu-connection-adapter.ts'
+export type {
+  DshFeishuConnectionAdapterOptions,
+  FeishuConnectionAdapter,
+  FeishuConnectionVerificationInput,
+  FeishuFetch,
+} from './feishu-connection-adapter.ts'
 
 export const DEFAULT_WORKBENCH_DATABASE_PATH = '.dsh/project-workbench.sqlite'
 export const DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS = 5_000
@@ -205,7 +229,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Cordis class plugin owning the singleton status command/query path. */
 export class WorkbenchService extends TypertRemoteService {
-  static inject = ['workbenchAuth']
+  static inject = ['workbenchAuth', 'credentials']
   static Config = Config
 
   /** Highest-level seam shared with all future feature scenarios. */
@@ -223,7 +247,9 @@ export class WorkbenchService extends TypertRemoteService {
       clock: internals.clock ?? systemWorkbenchClock,
       ids: internals.ids ?? randomWorkbenchIds,
       repository,
-      adapters: internals.adapters ?? noWorkbenchExternalAdapters,
+      adapters: internals.adapters ?? Object.freeze({
+        feishu: new DshFeishuConnectionAdapter(ctx.credentials as CredentialProvider),
+      }),
       authorization: internals.authorization ?? ctx.workbenchAuth.authorization,
       maxStatusLength: resolved.maxStatusLength,
     })
@@ -260,6 +286,30 @@ export class WorkbenchService extends TypertRemoteService {
   @Remote
   auditIntegrity(signal: AbortSignal): Promise<WorkbenchAuditIntegrityProjection> {
     return this.scenario.auditIntegrity(signal)
+  }
+
+  /** Read the authorized Feishu Bot/User Connection Center. */
+  @Remote
+  feishuConnectionCenter(signal: AbortSignal): Promise<FeishuConnectionCenterProjection> {
+    return this.scenario.feishuConnectionCenter(signal)
+  }
+
+  /** Configure, reset, or disable one explicit Feishu identity route. */
+  @Remote
+  configureFeishuIdentityRoute(
+    request: ConfigureFeishuIdentityRouteRequest,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuIdentityRouteResult> {
+    return this.scenario.configureFeishuIdentityRoute(request, signal)
+  }
+
+  /** Verify one exact Feishu identity route without actor fallback. */
+  @Remote
+  verifyFeishuIdentityRoute(
+    request: VerifyFeishuIdentityRouteRequest,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult> {
+    return this.scenario.verifyFeishuIdentityRoute(request, signal)
   }
 
   /** Read the immutable template and a stable descending Project catalog page. */

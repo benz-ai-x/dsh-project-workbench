@@ -8,6 +8,7 @@ import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/src/client/reg
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import { describe, expect, it, vi } from 'vitest'
 import type {
+  FeishuConnectionCenterProjection,
   OwnerAccessProjection,
   OwnerAuthResponse,
   ProjectDetailProjection,
@@ -62,6 +63,27 @@ function emptyActivity(): WorkbenchActivityProjection {
       headHash: `sha256:${'0'.repeat(64)}`,
       issue: null,
     },
+  }
+}
+
+function unconfiguredFeishuCenter(): FeishuConnectionCenterProjection {
+  const route = (kind: 'bot' | 'user') => ({
+    kind,
+    state: 'unconfigured' as const,
+    generation: null,
+    appId: null,
+    credential: { ref: null, configured: false, source: null, writable: false },
+    actor: null,
+    displayLabel: null,
+    lastVerification: null,
+  })
+  return {
+    connectionId: 'feishu-primary',
+    realm: 'feishu-cn',
+    revision: 0,
+    bot: route('bot'),
+    user: route('user'),
+    updatedAt: null,
   }
 }
 
@@ -219,6 +241,13 @@ async function bench(options: {
       value: emptyReviewCenter(filter.projectId),
     })
   })
+  const feishuConnectionCenterGate = vi.fn((_signal?: AbortSignal) => {
+    requestOrder.push('feishu')
+    return Promise.resolve({
+      ok: true as const,
+      value: unconfiguredFeishuCenter(),
+    })
+  })
   const authStateSource = options.authState ?? (() => Promise.resolve({
     ok: true as const,
     value: signedIn(),
@@ -315,6 +344,15 @@ async function bench(options: {
       ok: true as const,
       value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
     })),
+    feishuConnectionCenter: feishuConnectionCenterGate,
+    configureFeishuIdentityRoute: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
+    verifyFeishuIdentityRoute: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -360,6 +398,7 @@ async function bench(options: {
     projectStartGate,
     projectTeamGate,
     reviewCenterGate,
+    feishuConnectionCenterGate,
     authStateGate,
     auth,
     disposeLayout,
@@ -397,13 +436,19 @@ describe('Project Workbench browser plugin lifecycle', () => {
       expect(owner).toMatchObject({ phase: 'authenticated', access: signedIn() })
       expect(owner.status?.getSnapshot()).toMatchObject({ phase: 'value', snapshot: status() })
       expect(owner.projects?.getSnapshot()).toMatchObject({ phase: 'ready', start: emptyProjectStart() })
+      expect(owner.feishuConnection?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        center: { bot: { state: 'unconfigured' }, user: { state: 'unconfigured' } },
+      })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'activity'])
+    const feishuConnection = injected.controller.getSnapshot().feishuConnection
+    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'feishu', 'activity'])
 
     await b.fiber?.dispose()
     expect(b.ctx.slots.entries('conversation')).toHaveLength(0)
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
     expect(b.order).toEqual(['remote'])
+    expect(feishuConnection?.getSnapshot()).toMatchObject({ phase: 'loading', center: null })
 
     const replacement = b.ctx.plugin({
       inject: [...browserInject],
@@ -426,9 +471,11 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const statusController = controller.getSnapshot().status
     const projectController = controller.getSnapshot().projects
     const activityController = controller.getSnapshot().activity
+    const feishuConnectionController = controller.getSnapshot().feishuConnection
     expect(statusController).not.toBeNull()
     expect(activityController).not.toBeNull()
     expect(projectController).not.toBeNull()
+    expect(feishuConnectionController).not.toBeNull()
 
     b.disconnect()
     expect(statusController?.getSnapshot()).toMatchObject({ phase: 'stale', snapshot: status() })
@@ -439,6 +486,10 @@ describe('Project Workbench browser plugin lifecycle', () => {
     expect(projectController?.getSnapshot()).toMatchObject({
       phase: 'stale',
       start: emptyProjectStart(),
+    })
+    expect(feishuConnectionController?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      center: unconfiguredFeishuCenter(),
     })
     b.requestOrder.length = 0
     b.reconnect()
@@ -453,12 +504,17 @@ describe('Project Workbench browser plugin lifecycle', () => {
         phase: 'ready',
         start: emptyProjectStart(),
       })
+      expect(feishuConnectionController?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        center: unconfiguredFeishuCenter(),
+      })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'activity'])
+    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'feishu', 'activity'])
     expect(b.authStateGate).toHaveBeenCalledTimes(2)
     expect(b.snapshotGate).toHaveBeenCalledTimes(2)
     expect(b.activityGate).toHaveBeenCalledTimes(2)
     expect(b.projectStartGate).toHaveBeenCalledTimes(2)
+    expect(b.feishuConnectionCenterGate).toHaveBeenCalledTimes(2)
     await b.fiber?.dispose()
   })
 
@@ -523,7 +579,9 @@ describe('Project Workbench browser plugin lifecycle', () => {
         proposalDraftDirty: true,
       })
     })
-    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'team', 'review', 'activity'])
+    expect(b.requestOrder).toEqual([
+      'auth', 'status', 'projects', 'team', 'review', 'feishu', 'activity',
+    ])
     expect(b.projectTeamGate).toHaveBeenCalledTimes(2)
     expect(b.reviewCenterGate).toHaveBeenCalledTimes(2)
 

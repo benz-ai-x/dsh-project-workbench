@@ -2,7 +2,7 @@
 
 ## Product outcome
 
-Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity, T04 added immutable Template-driven Project creation, and T05 added the Project-scoped roster and responsibility tuple. The current implementation boundary is GitHub Issue #7 (T06): an evidence-backed Review Center and stale-safe SuggestedChange lifecycle over one real Project Responsibility target.
+Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity, T04 added immutable Template-driven Project creation, T05 added the Project-scoped roster and responsibility tuple, and T06 added evidence-backed review. The current implementation boundary is GitHub Issue #8 (T07): a credential-safe Feishu Connection Center with explicit Bot/User identity continuity and read-only permission diagnostics.
 
 ## Runtime shape
 
@@ -10,7 +10,7 @@ Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide
 - `@benz-ai-x/dsh-project-workbench-client` owns the browser projection and UI. It mounts the generated Remote artifact before registering into the `conversation` Slot and tears down in reverse order.
 - `@benz-ai-x/dsh-project-workbench-bundle` inserts the Host and Client rows. The tracked `workbench-test` profile composes `dsh-base`, `dsh-web-app`, and this bundle.
 - Host state never crosses through a custom Session event. Client code never imports Node, repository, credentials, or external adapter implementations.
-- T03 still uses the neutral status value as its first formal command target. It is not a Project, Goal, risk, or topic; those aggregates begin in T04 and later tickets.
+- The neutral status remains the first formal command target; T04–T07 extend the same ledger rather than creating parallel authority paths.
 
 ## Pinned baseline
 
@@ -91,9 +91,21 @@ Before runtime changes:
 - Full proposal candidates, before/after member IDs, EvidenceRef contents, and Owner feedback remain in authorized Review storage/projections. They never enter Activity, generic audit fields, Outbox payloads, receipts, logs, diagnostics, or raw error messages.
 - The Review Client distinguishes a domain item's effective `stale` status from a disconnected transport projection, prevents duplicate decisions, retains only exact ambiguous-transport retry envelopes, and never auto-submits after refresh. Project switch, logout, expiry, HMR/Fiber disposal, and selection clearing erase protected drafts; reopening reads Host truth.
 
+## T07 Feishu Connection Center invariants
+
+- One workspace-scoped Feishu Connection owns independent `bot` and `user` Identity Routes. Every provider operation receives exactly one route; a scope, authorization, credential, or ACL failure never retries through the other actor.
+- Route configuration persists only `appId` and a DSH `CredentialRef`. Secret and token values are resolved once per external operation, remain in the smallest Host lexical scope, and never enter SQLite, Remote projections, audit, Activity, Outbox, receipts, logs, or browser state.
+- Configuration, reset, and disable create append-only route generations under connection and route CAS. Ordinary configuration edits and disable/re-enable preserve a separate identity-continuity epoch; reset alone advances that epoch and is the only intentional way to clear its binding. Disable never promotes the other route to fallback.
+- The first successful verification of a continuity epoch creates one immutable Actor Binding with its original route-generation provenance. A later `appId/openId/tenantKey` mismatch is an append-only failed verification with closed recovery guidance and cannot overwrite the binding.
+- Bot verification exchanges the exact route's App Secret for an ephemeral tenant token and calls Bot self-info. User verification calls User self-info with the exact configured User token. Neither self endpoint is represented as proof of Task, Calendar, Docs, tenant-wide, or resource authorization.
+- Existing Actor Binding continuity is checked after self-info and before any optional resource request, then enforced again at the durable commit boundary. Optional Task-list diagnostics use the same one-shot actor session and are read-only. Missing app scope, missing User grant, resource ACL denial, and resource-not-found remain different closed facts and recovery paths; unknown effective scope remains honestly unknown and an unrecognized User 403 is never guessed to be authorization revocation.
+- Provider network reads occur outside SQLite write transactions. Receipt replay is checked before any provider call; the safe observation, connection revision, one pending Outbox fact, hash-chained audit event, and immutable receipt commit atomically afterward.
+- The authorized settings projection may show `appId`, credential-reference presence metadata, bound `openId/tenantKey`, safe scope facts, resource ID, and the latest verification. Generic audit/Activity/Outbox surfaces remain credential-, identity-, and resource-ID-free.
+- The Client keeps Bot/User forms and results separate, retains only exact response-loss retry identity, preserves drafts across same-Owner reconnect, and erases protected values on logout, expiry, Owner change, and Fiber disposal.
+
 ## Ticket boundary
 
-T06 adds only the Review governance kernel, one typed Project Responsibility target, Owner-created proposals, immutable audit-event EvidenceRefs, stale-safe decisions, and their authorized browser/ledger paths. It does not implement AI/model producers, Intelligence Runs, feedback-driven Profile mutation, batch commands, auto/force accept, rebase/merge, Risk/Topic/Decision/Deliverable/file/permission/Feishu/Webhook/external-action adapters, scheduler reminders, multi-reviewer approval, or a plugin-facing adapter API.
+T07 adds only Feishu Bot/User route configuration, credential-reference status, self-identity verification, optional Task-list read diagnostics, identity continuity, and their authorized browser/ledger paths. It does not implement OAuth callback/refresh ownership, tenant-wide discovery, Project Task-list or Calendar binding, Tasks/Calendar/Docs mutation, Webhooks/events/reconciliation, assignee validation, file embedding, permission administration, or a general integration-adapter registry.
 
 ## Required evidence
 
@@ -108,3 +120,4 @@ T06 adds only the Review governance kernel, one typed Project Responsibility tar
 - T04 additionally requires immutable Template Version and Project Template Snapshot evidence, Goal/Outcome/Project relationship and metric validation, catalog/Supporting Goal conflict and rollback matrices, response-loss replay, Project-scoped Activity redaction, migration/restart, generated seven-method Typert faces, and a real-browser create/reopen journey.
 - T05 additionally requires discriminated member-identity validation, app-scoped Feishu declaration semantics, unique Accountable and Sponsor policy evidence, retained inactive/history facts, Project Team CAS/replay/rollback, PII-redacted Activity and receipts, Schema v3→v4 migration/restart, generated eleven-method Typert faces, and a real-browser roster/responsibility journey.
 - T06 additionally requires immutable proposal/original-vs-applied diff evidence, same-Project audit EvidenceRef validation, Host risk derivation, all five effective filters, Review and Team double-CAS races, stale reject/no-overwrite, mandatory feedback history, edited-risk non-downgrade, receipt-first replay, rollback fault points, privacy checks, Schema v4→v5 migration/restart, generated fourteen-method Typert faces, and a real-browser low/high/defer/stale/edited-accept journey.
+- T07 additionally requires credential describe/resolve/rotation evidence, exact Bot/User route calls, scope-vs-User-grant-vs-resource-ACL-vs-not-found fixtures, cross-configuration immutable actor continuity, identity-before-resource ordering, receipt-before-provider replay, cancellation/timeout/response-size limits, Schema v5→v6 migration/restart, generated seventeen-method Typert faces, Loader/Profile credential injection, packed-artifact verification, redacted Activity, and an authenticated browser Connection Center journey without a live production Feishu mutation.

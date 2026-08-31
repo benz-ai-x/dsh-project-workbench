@@ -1,4 +1,5 @@
 import type {
+  FeishuConnectionCenterProjection,
   InitializeOwnerResult,
   LoginOwnerResult,
   OwnerAccessProjection,
@@ -17,6 +18,7 @@ import type { WorkbenchRemote } from '../src/client/controller.ts'
 import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
 import type { WorkbenchProjectTeamRemote } from '../src/client/project-team-controller.ts'
 import type { WorkbenchReviewRemote } from '../src/client/review-controller.ts'
+import type { WorkbenchFeishuConnectionRemote } from '../src/client/feishu-connection-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 
 function fakeClock(initial: string) {
@@ -98,6 +100,27 @@ function activityProjection(): WorkbenchActivityProjection {
       headHash: '',
       issue: null,
     },
+  }
+}
+
+function unconfiguredFeishuCenter(): FeishuConnectionCenterProjection {
+  const route = (kind: 'bot' | 'user') => ({
+    kind,
+    state: 'unconfigured' as const,
+    generation: null,
+    appId: null,
+    credential: { ref: null, configured: false, source: null, writable: false },
+    actor: null,
+    displayLabel: null,
+    lastVerification: null,
+  })
+  return {
+    connectionId: 'feishu-primary',
+    realm: 'feishu-cn',
+    revision: 0,
+    bot: route('bot'),
+    user: route('user'),
+    updatedAt: null,
   }
 }
 
@@ -293,7 +316,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
 }
 
 type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
-  & WorkbenchReviewRemote
+  & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -351,6 +374,18 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       ok: false as const,
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
+    feishuConnectionCenter: overrides.feishuConnectionCenter
+      ?? vi.fn(() => Promise.resolve(remoteOk(unconfiguredFeishuCenter()))),
+    configureFeishuIdentityRoute: overrides.configureFeishuIdentityRoute
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    verifyFeishuIdentityRoute: overrides.verifyFeishuIdentityRoute
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
   }
 }
 
@@ -396,6 +431,7 @@ describe('OwnerController', () => {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -455,6 +491,7 @@ describe('OwnerController', () => {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: 'WB1-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH',
     })
@@ -712,6 +749,7 @@ describe('OwnerController', () => {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -756,6 +794,7 @@ describe('OwnerController', () => {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -838,24 +877,45 @@ describe('OwnerController', () => {
       order.push('status')
       return Promise.resolve(remoteOk(snapshot()))
     })
-    const controller = new OwnerController(auth({ state }), remote({ snapshot: snapshotRemote }))
+    const feishuConnectionCenter = vi.fn(() => {
+      order.push('feishu')
+      return Promise.resolve(remoteOk(unconfiguredFeishuCenter()))
+    })
+    const controller = new OwnerController(auth({ state }), remote({
+      snapshot: snapshotRemote,
+      feishuConnectionCenter,
+    }))
     await controller.start()
     const status = controller.getSnapshot().status
     const projects = controller.getSnapshot().projects
+    const feishuConnection = controller.getSnapshot().feishuConnection
+    expect(feishuConnection?.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      center: { revision: 0, bot: { state: 'unconfigured' }, user: { state: 'unconfigured' } },
+    })
     status?.setDraft('recoverable draft')
     if (projects !== null) completeProjectDraft(projects)
     order.length = 0
 
     controller.markDisconnected()
+    expect(feishuConnection?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      center: { revision: 0 },
+    })
     await controller.connectionReset()
 
-    expect(order).toEqual(['auth', 'status'])
+    expect(order).toEqual(['auth', 'status', 'feishu'])
     expect(controller.getSnapshot()).toMatchObject({ phase: 'authenticated', access: access() })
     expect(status?.getSnapshot()).toMatchObject({
       phase: 'value',
       draft: 'recoverable draft',
       draftDirty: true,
     })
+    expect(feishuConnection?.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      center: { bot: { state: 'unconfigured' }, user: { state: 'unconfigured' } },
+    })
+    expect(feishuConnectionCenter).toHaveBeenCalledTimes(2)
     expect(projects?.getSnapshot()).toMatchObject({
       phase: 'ready',
       draft: { projectName: 'Sensitive Project draft' },
@@ -1113,6 +1173,7 @@ describe('OwnerController', () => {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1127,8 +1188,13 @@ describe('OwnerController', () => {
     await controller.start()
     const projects = controller.getSnapshot().projects
     const activity = controller.getSnapshot().activity
+    const feishuConnection = controller.getSnapshot().feishuConnection
     if (projects !== null) completeProjectDraft(projects)
     expect(activity?.getSnapshot().phase).toBe('ready')
+    expect(feishuConnection?.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      center: { bot: { state: 'unconfigured' }, user: { state: 'unconfigured' } },
+    })
 
     const disposal = controller.dispose()
     expect(controller.getSnapshot()).toEqual({
@@ -1138,6 +1204,7 @@ describe('OwnerController', () => {
       projects: null,
       projectTeam: null,
       review: null,
+      feishuConnection: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1152,6 +1219,11 @@ describe('OwnerController', () => {
       start: null,
       detail: null,
       draft: { projectName: '', primaryGoalName: '', supportingGoals: [] },
+    })
+    expect(feishuConnection?.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      center: null,
+      pendingOperation: null,
     })
     await disposal
   })

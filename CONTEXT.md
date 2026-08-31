@@ -60,6 +60,30 @@ _Avoid_: Agent runtime, model profile
 An app-scoped `{appId, openId}` declaration that makes the member eligible for a future formal Feishu assignee mapping once the authoritative connector validates and uses it.
 _Avoid_: Verified Feishu connection, Workbench account
 
+**Feishu Connection**:
+The workspace-scoped integration aggregate that owns two independent Feishu Identity Routes, one Bot and one User. It is configuration and verification truth, not a Project resource binding.
+_Avoid_: Shared token pool, automatic actor selector
+
+**Feishu Identity Route**:
+One explicit `appId + Credential Reference + actor kind` configuration generation used for every verification and later resource operation. Configuration generations are append-only, while ordinary edits and disable/re-enable preserve the separate identity-continuity epoch. A failed route is never replaced by the other route as a permission fallback.
+_Avoid_: Credential candidate, any available identity
+
+**Credential Reference**:
+A value-free name resolved by the DSH credential provider for each external operation. Workbench stores and projects the name and presence metadata, never the secret or token value.
+_Avoid_: App Secret, access token, encrypted business-table credential
+
+**Feishu Actor Binding**:
+The immutable `realm + appId + kind + openId + tenantKey` subject established by the first successful verification of one Identity Route continuity epoch. Changing configuration or disabling a route does not clear it; an intentional actor change requires an explicit reset that advances the epoch.
+_Avoid_: Last verified user, mutable identity cache
+
+**Feishu Verification Fact**:
+An append-only observation for one exact Identity Route generation, recording only closed identity, scope, resource-probe, result, and recovery codes. Provider bodies, messages, request IDs, credentials, and tokens are not facts.
+_Avoid_: Live authorization guarantee, raw API response
+
+**Feishu Resource Probe**:
+An optional read-only check of one concrete resource with the same explicit actor route, performed only after identity continuity passes. It distinguishes API-scope or user-grant failure, resource ACL denial, and resource-not-found, and does not create a Project resource binding.
+_Avoid_: Tenant-wide discovery, actor fallback
+
 **External Contact**:
 Human contact information for a ProjectMember without a Feishu identity reference. The member may hold Workbench responsibility but is not a formal Feishu assignee.
 _Avoid_: Guest login

@@ -2,7 +2,7 @@
 
 Project Workbench 是一个外置 DeepSeek Harness Cordis 插件，目标是把项目状态、证据、文档、协作和 AI 原生项目分析组织成可追溯的项目驾驶舱。
 
-当前已完成 T06：Owner 可针对一个精确 Project Team revision 提交完整的 Project Responsibility 候选值，并引用 1–20 条同 Project 审计证据。Host 持久化不可变 SuggestedChange、语义化 before/after diff 与摘要、版本化低/高风险依据及追加式决定历史；Review Center 支持 pending、deferred、stale、accepted、rejected 筛选，并以双 CAS 安全地接受、编辑后接受、拒绝或延期。过期建议只能拒绝，接受路径会在同一事务中复用正常 Responsibility 规则，不会覆盖更新状态。下一阶段 T07 将建设飞书 Bot/User 双身份连接中心；文件和 AI 分析由后续票据逐步实现。
+当前已完成 T07：Owner 可在一个连接中心分别配置飞书 Bot 与 User 的 `appId + DSH CredentialRef`，查看凭据存在性、不可变 actor 绑定、scope 事实、可选 Task-list ACL 探测和最近验证。Host 每次只解析并调用一个明确身份；self-info 通过持久化身份连续性检查后，才允许同一个 one-shot actor session 读取资源。缺少应用 scope、缺少 User grant、具体资源 ACL 或资源不存在会给出不同的安全错误与恢复建议，绝不通过另一个身份回退。普通配置编辑和停用/重启用保留身份绑定，只有显式重置能推进 continuity epoch。配置、重置、停用与验证均复用 CAS、幂等回执、Outbox 和哈希审计链；secret/token、provider 原文、身份与资源 ID 不进入通用活动账本。飞书资源绑定/写入、文件和 AI 分析由后续票据逐步实现。
 
 ## Workspace layout
 
@@ -53,6 +53,6 @@ Workbench 会话 Cookie 使用 `__Host-` 前缀、`Secure`、`HttpOnly`、`SameS
 
 ## Verification boundary
 
-`pnpm verify` 覆盖 Config/Scenario/SQLite、Owner credential/session/recovery、Schema v2→v3、v3→v4 与 v4→v5 migration、不可变 Template Version 与 Project-owned snapshot、Goal/Outcome/Project/Supporting Goal 关系、ProjectMember 身份/状态与 Project Responsibility 政策、Review Center 五态过滤、EvidenceRef 完整性、低/高风险策略、Review/Team 双 CAS、编辑历史、事务回滚与响应丢失重放、审计链及关联回执/Outbox 篡改检测、四态 Outbox、Activity 过滤与脱敏、真实 Loader、Client 状态与 HMR 生命周期、Profile 组合、14 方法生成 Remote、真实 Chrome 的设置/登录/Project 创建/Team 管理/Review/Activity/HMR/恢复/重启旅程、built exports、恢复 CLI 和三个真实 tarball。当前三个 Workbench 包仍是 `private`，DSH 依赖仍绑定到经审计源码；因此这些结果证明本地源码兼容和产物完整性，不代表已完成纯 registry 发布闭包。
+`pnpm verify` 覆盖 Config/Scenario/SQLite、Owner credential/session/recovery、Schema v2→v3、v3→v4、v4→v5 与 v5→v6 migration、不可变 Template Version 与 Project-owned snapshot、Goal/Outcome/Project/Supporting Goal 关系、ProjectMember 身份/状态与 Project Responsibility 政策、Review Center 五态过滤、Feishu Bot/User exact-route credential/identity/scope/ACL 契约、不可变 actor continuity、事务回滚与响应丢失重放、审计链及关联回执/Outbox 篡改检测、四态 Outbox、Activity 过滤与脱敏、真实 Loader、Client 状态与 HMR 生命周期、Profile 组合、17 方法生成 Remote、真实 Chrome 的设置/登录/Project/Team/Review/Feishu Connection/Activity/HMR/恢复/重启旅程、built exports、恢复 CLI 和三个真实 tarball。当前三个 Workbench 包仍是 `private`，DSH 依赖仍绑定到经审计源码；因此这些结果证明本地源码兼容和产物完整性，不代表已完成纯 registry 发布闭包。
 
 协作代理在修改前应先阅读 [AGENTS.md](./AGENTS.md) 和 [Project Contract](./docs/agent/PROJECT_CONTRACT.md)。

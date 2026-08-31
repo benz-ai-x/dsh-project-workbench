@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type {
+  FeishuConnectionCenterProjection,
   InitializeOwnerResult,
   LoginOwnerResult,
   OwnerAccessProjection,
@@ -15,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
 import type { WorkbenchRemote } from '../src/client/controller.ts'
 import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
+import type { WorkbenchFeishuConnectionRemote } from '../src/client/feishu-connection-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 import { OwnerPage } from '../src/client/OwnerPage.tsx'
 import { zh, type WorkbenchKey } from '../src/client/locales.ts'
@@ -73,6 +75,27 @@ function activityProjection(): WorkbenchActivityProjection {
   }
 }
 
+function unconfiguredFeishuCenter(): FeishuConnectionCenterProjection {
+  const route = (kind: 'bot' | 'user') => ({
+    kind,
+    state: 'unconfigured' as const,
+    generation: null,
+    appId: null,
+    credential: { ref: null, configured: false, source: null, writable: false },
+    actor: null,
+    displayLabel: null,
+    lastVerification: null,
+  })
+  return {
+    connectionId: 'feishu-primary',
+    realm: 'feishu-cn',
+    revision: 0,
+    bot: route('bot'),
+    user: route('user'),
+    updatedAt: null,
+  }
+}
+
 function projectStartProjection(): ProjectStartProjection {
   const definitionDigest = `sha256:${'a'.repeat(64)}` as const
   return {
@@ -113,7 +136,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
   }
 }
 
-type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote
+type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchFeishuConnectionRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -141,6 +164,18 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
     project: overrides.project ?? vi.fn(() => Promise.resolve(remoteOk(null))),
+    feishuConnectionCenter: overrides.feishuConnectionCenter
+      ?? vi.fn(() => Promise.resolve(remoteOk(unconfiguredFeishuCenter()))),
+    configureFeishuIdentityRoute: overrides.configureFeishuIdentityRoute
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    verifyFeishuIdentityRoute: overrides.verifyFeishuIdentityRoute
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
   }
 }
 
@@ -254,6 +289,10 @@ describe('OwnerPage', () => {
     expect(screen.getByText('打开一个 Project 后，可在该项目的详情下管理成员与责任。')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Review Center' })).toBeTruthy()
     expect(screen.getByText('请先打开一个 Project，再查看或创建项目建议。')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '飞书 Bot / User 连接中心' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Bot 身份路由' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'User 身份路由' })).toBeTruthy()
+    expect(screen.getAllByText('未配置')).toHaveLength(2)
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     expect(screen.getByText('审计链验证通过')).toBeTruthy()
     expect(screen.queryByText(recoveryCode)).toBeNull()
@@ -294,10 +333,13 @@ describe('OwnerPage', () => {
     const projectController = controller.getSnapshot().projects
     const projectTeamController = controller.getSnapshot().projectTeam
     const reviewController = controller.getSnapshot().review
+    const feishuConnectionController = controller.getSnapshot().feishuConnection
     const activityController = controller.getSnapshot().activity
     expect(screen.getByRole('heading', { name: '从知识工作模板创建项目' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Project Team' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Review Center' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '飞书 Bot / User 连接中心' })).toBeTruthy()
+    expect(screen.getAllByText('未配置')).toHaveLength(2)
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     fireEvent.change(screen.getByRole('textbox', { name: '项目状态' }), {
       target: { value: '退出后必须清除的草稿' },
@@ -314,6 +356,7 @@ describe('OwnerPage', () => {
     expect(screen.queryByRole('heading', { name: '从知识工作模板创建项目' })).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Project Team' })).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Review Center' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: '飞书 Bot / User 连接中心' })).toBeNull()
     expect(screen.queryByRole('heading', { name: '活动记录' })).toBeNull()
     expect(statusController?.getSnapshot()).toMatchObject({ snapshot: null, draft: '' })
     expect(activityController?.getSnapshot()).toMatchObject({
@@ -339,6 +382,11 @@ describe('OwnerPage', () => {
       review: null,
       proposalDraftDirty: false,
       decisionDrafts: {},
+    })
+    expect(feishuConnectionController?.getSnapshot()).toMatchObject({
+      phase: 'loading',
+      center: null,
+      pendingOperation: null,
     })
   })
 })

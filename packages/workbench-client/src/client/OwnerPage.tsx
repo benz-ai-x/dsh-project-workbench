@@ -14,6 +14,10 @@ import { ActivityPanel, type ActivityPanelCopy } from './ActivityPanel.tsx'
 import { ProjectsPanel } from './ProjectsPanel.tsx'
 import { ProjectTeamPanel } from './ProjectTeamPanel.tsx'
 import { ReviewCenterPanel } from './ReviewCenterPanel.tsx'
+import {
+  FeishuConnectionPanel,
+  type FeishuConnectionPanelCopy,
+} from './FeishuConnectionPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -226,6 +230,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.projects !== null
     && state.projectTeam !== null
     && state.review !== null
+    && state.feishuConnection !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -263,6 +268,10 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
           <ProjectsPanel controller={state.projects} t={t} />
           <ProjectTeamPanel controller={state.projectTeam} t={t} />
           <ReviewCenterPanel controller={state.review} t={t} />
+          <FeishuConnectionPanel
+            controller={state.feishuConnection}
+            copy={feishuConnectionCopy(t)}
+          />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
       </div>
@@ -366,6 +375,7 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectProjectMember: t('activity.object.projectMember'),
     objectProjectResponsibility: t('activity.object.projectResponsibility'),
     objectSuggestedChange: t('activity.object.suggestedChange'),
+    objectFeishuConnection: t('activity.object.feishuConnection'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
@@ -379,6 +389,10 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     actionSuggestedChangeEditedAccepted: t('activity.action.suggestedChangeEditedAccepted'),
     actionSuggestedChangeRejected: t('activity.action.suggestedChangeRejected'),
     actionSuggestedChangeDeferred: t('activity.action.suggestedChangeDeferred'),
+    actionFeishuRouteConfigured: t('activity.action.feishuRouteConfigured'),
+    actionFeishuRouteReset: t('activity.action.feishuRouteReset'),
+    actionFeishuRouteDisabled: t('activity.action.feishuRouteDisabled'),
+    actionFeishuRouteVerificationRecorded: t('activity.action.feishuRouteVerificationRecorded'),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -408,6 +422,12 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     summarySuggestedChangeEditedAccepted: t('activity.summary.suggestedChangeEditedAccepted'),
     summarySuggestedChangeRejected: t('activity.summary.suggestedChangeRejected'),
     summarySuggestedChangeDeferred: t('activity.summary.suggestedChangeDeferred'),
+    summaryFeishuRouteConfigured: t('activity.summary.feishuRouteConfigured'),
+    summaryFeishuRouteReset: t('activity.summary.feishuRouteReset'),
+    summaryFeishuRouteDisabled: t('activity.summary.feishuRouteDisabled'),
+    summaryFeishuVerificationHealthy: t('activity.summary.feishuVerificationHealthy'),
+    summaryFeishuVerificationAttention: t('activity.summary.feishuVerificationAttention'),
+    summaryFeishuVerificationFailed: t('activity.summary.feishuVerificationFailed'),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -424,6 +444,10 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonOwnerSuggestedChangeEditAccept: t('activity.reason.ownerSuggestedChangeEditAccept'),
     reasonOwnerSuggestedChangeReject: t('activity.reason.ownerSuggestedChangeReject'),
     reasonOwnerSuggestedChangeDefer: t('activity.reason.ownerSuggestedChangeDefer'),
+    reasonOwnerFeishuRouteConfigure: t('activity.reason.ownerFeishuRouteConfigure'),
+    reasonOwnerFeishuRouteReset: t('activity.reason.ownerFeishuRouteReset'),
+    reasonOwnerFeishuRouteDisable: t('activity.reason.ownerFeishuRouteDisable'),
+    reasonOwnerFeishuRouteVerify: t('activity.reason.ownerFeishuRouteVerify'),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),
@@ -431,5 +455,177 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     outboxDelivered: t('activity.outbox.delivered'),
     outboxUnknown: t('activity.outbox.unknown'),
     outboxFailed: t('activity.outbox.failed'),
+  }
+}
+
+function feishuConnectionCopy(
+  t: (key: WorkbenchKey) => string,
+): FeishuConnectionPanelCopy {
+  return {
+    kicker: t('feishu.kicker'),
+    title: t('feishu.title'),
+    subtitle: t('feishu.subtitle'),
+    noActorFallback: t('feishu.noActorFallback'),
+    loading: t('feishu.loading'),
+    unavailable: t('feishu.unavailable'),
+    phase: {
+      loading: t('feishu.phase.loading'),
+      ready: t('feishu.phase.ready'),
+      pending: t('feishu.phase.pending'),
+      stale: t('feishu.phase.stale'),
+      error: t('feishu.phase.error'),
+      conflict: t('feishu.phase.conflict'),
+    },
+    routeTitle: {
+      bot: t('feishu.route.bot.title'),
+      user: t('feishu.route.user.title'),
+    },
+    routeBody: {
+      bot: t('feishu.route.bot.body'),
+      user: t('feishu.route.user.body'),
+    },
+    credentialReferenceLabel: {
+      bot: t('feishu.route.bot.credentialReference'),
+      user: t('feishu.route.user.credentialReference'),
+    },
+    routeState: {
+      unconfigured: t('feishu.route.state.unconfigured'),
+      configured: t('feishu.route.state.configured'),
+      disabled: t('feishu.route.state.disabled'),
+    },
+    verificationResult: {
+      healthy: t('feishu.verification.result.healthy'),
+      attention: t('feishu.verification.result.attention'),
+      failed: t('feishu.verification.result.failed'),
+    },
+    identityState: {
+      verified: t('feishu.identity.state.verified'),
+      failed: t('feishu.identity.state.failed'),
+    },
+    scopeInspectionState: {
+      observed: t('feishu.scopeInspection.observed'),
+      unavailable: t('feishu.scopeInspection.unavailable'),
+      'not-inspected': t('feishu.scopeInspection.notInspected'),
+    },
+    scopeState: {
+      configured: t('feishu.scope.state.configured'),
+      verified: t('feishu.scope.state.verified'),
+      missing: t('feishu.scope.state.missing'),
+      unknown: t('feishu.scope.state.unknown'),
+    },
+    tokenType: {
+      tenant: t('feishu.token.tenant'),
+      user: t('feishu.token.user'),
+    },
+    providerIssue: {
+      'credential-unconfigured': t('feishu.issue.credentialUnconfigured'),
+      'credential-invalid': t('feishu.issue.credentialInvalid'),
+      'credential-expired': t('feishu.issue.credentialExpired'),
+      'user-authorization-revoked': t('feishu.issue.userAuthorizationRevoked'),
+      'app-disabled': t('feishu.issue.appDisabled'),
+      'missing-app-scope': t('feishu.issue.missingAppScope'),
+      'missing-user-grant': t('feishu.issue.missingUserGrant'),
+      'outside-app-data-range': t('feishu.issue.outsideAppDataRange'),
+      'resource-access-unavailable': t('feishu.issue.resourceAccessUnavailable'),
+      'resource-not-found': t('feishu.issue.resourceNotFound'),
+      'unsupported-actor': t('feishu.issue.unsupportedActor'),
+      'identity-continuity-mismatch': t('feishu.issue.identityContinuityMismatch'),
+      'tenant-mismatch': t('feishu.issue.tenantMismatch'),
+      'rate-limited': t('feishu.issue.rateLimited'),
+      'provider-unavailable': t('feishu.issue.providerUnavailable'),
+      'provider-response-invalid': t('feishu.issue.providerResponseInvalid'),
+      'unknown-provider-error': t('feishu.issue.unknownProviderError'),
+    },
+    recovery: {
+      'configure-credential': t('feishu.recovery.configureCredential'),
+      'rotate-credential': t('feishu.recovery.rotateCredential'),
+      'enable-app': t('feishu.recovery.enableApp'),
+      'grant-app-scope': t('feishu.recovery.grantAppScope'),
+      'reauthorize-user': t('feishu.recovery.reauthorizeUser'),
+      'expand-app-data-range': t('feishu.recovery.expandAppDataRange'),
+      'share-resource': t('feishu.recovery.shareResource'),
+      'check-resource-id': t('feishu.recovery.checkResourceId'),
+      'reset-identity-binding': t('feishu.recovery.resetIdentityBinding'),
+      'retry-later': t('feishu.recovery.retryLater'),
+      'inspect-provider': t('feishu.recovery.inspectProvider'),
+    },
+    clientIssue: {
+      unavailable: t('feishu.clientIssue.unavailable'),
+      unauthorized: t('feishu.clientIssue.unauthorized'),
+      forbidden: t('feishu.clientIssue.forbidden'),
+      'rate-limited': t('feishu.clientIssue.rateLimited'),
+      internal: t('feishu.clientIssue.internal'),
+      'transport-failure': t('feishu.clientIssue.transportFailure'),
+      'bad-request': t('feishu.clientIssue.badRequest'),
+      'idempotency-conflict': t('feishu.clientIssue.idempotencyKeyReused'),
+      'connection-revision-conflict': t('feishu.clientIssue.connectionRevisionConflict'),
+      'route-generation-conflict': t('feishu.clientIssue.routeGenerationConflict'),
+      'route-unconfigured': t('feishu.clientIssue.routeUnconfigured'),
+      'no-op-route-configuration': t('feishu.clientIssue.noopRouteConfiguration'),
+      'route-disabled': t('feishu.clientIssue.routeDisabled'),
+    },
+    operation: {
+      'read-connection': t('feishu.operation.read'),
+      configure: t('feishu.operation.configure'),
+      reset: t('feishu.operation.reset'),
+      disable: t('feishu.operation.disable'),
+      verify: t('feishu.operation.verify'),
+    },
+    connectionId: t('feishu.meta.connectionId'),
+    realm: t('feishu.meta.realm'),
+    revision: t('feishu.meta.revision'),
+    updatedAt: t('feishu.meta.updatedAt'),
+    routeGeneration: t('feishu.meta.routeGeneration'),
+    configuration: t('feishu.configuration'),
+    appId: t('feishu.appId'),
+    credential: t('feishu.credential'),
+    credentialReference: t('feishu.credentialReference'),
+    credentialConfigured: t('feishu.credentialConfigured'),
+    credentialSource: t('feishu.credentialSource'),
+    credentialWritable: t('feishu.credentialWritable'),
+    actor: t('feishu.actor'),
+    displayLabel: t('feishu.displayLabel'),
+    openId: t('feishu.openId'),
+    tenantKey: t('feishu.tenantKey'),
+    authorization: t('feishu.authorization'),
+    scopes: t('feishu.scopes'),
+    scope: t('feishu.scope'),
+    token: t('feishu.token'),
+    status: t('feishu.status'),
+    latestVerification: t('feishu.latestVerification'),
+    verificationSequence: t('feishu.verificationSequence'),
+    verificationCheckedAt: t('feishu.verificationCheckedAt'),
+    identityCheck: t('feishu.identityCheck'),
+    scopeInspection: t('feishu.scopeInspection'),
+    resourceProbe: t('feishu.resourceProbe'),
+    resourceAccessible: t('feishu.resourceAccessible'),
+    resourceUnavailable: t('feishu.resourceUnavailable'),
+    resourceNotTested: t('feishu.resourceNotTested'),
+    taskListProbe: t('feishu.taskListProbe'),
+    taskListProbeHint: t('feishu.taskListProbeHint'),
+    externalProvisioningHint: t('feishu.externalProvisioningHint'),
+    resetIdentityHint: t('feishu.resetIdentityHint'),
+    disableHint: t('feishu.disableHint'),
+    draftStale: t('feishu.draftStale'),
+    invalidConfiguration: t('feishu.invalidConfiguration'),
+    invalidProbe: t('feishu.invalidProbe'),
+    issueTitle: t('feishu.issueTitle'),
+    recoveryTitle: t('feishu.recoveryTitle'),
+    missingScopes: t('feishu.missingScopes'),
+    retryAt: t('feishu.retryAt'),
+    yes: t('feishu.yes'),
+    no: t('feishu.no'),
+    none: t('feishu.none'),
+    notValidated: t('feishu.notValidated'),
+    notInspected: t('feishu.notInspected'),
+    refresh: t('feishu.action.refresh'),
+    retryExact: t('feishu.action.retryExact'),
+    saveConfiguration: t('feishu.action.saveConfiguration'),
+    reenableRoute: t('feishu.action.reenableRoute'),
+    resetForm: t('feishu.action.resetForm'),
+    adoptLatest: t('feishu.action.adoptLatest'),
+    resetIdentity: t('feishu.action.resetIdentity'),
+    disableRoute: t('feishu.action.disableRoute'),
+    verifyRoute: t('feishu.action.verifyRoute'),
   }
 }

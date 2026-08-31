@@ -61,6 +61,10 @@ export interface AuditCommandReference {
     | 'workbench.suggested-change.edit-accept'
     | 'workbench.suggested-change.reject'
     | 'workbench.suggested-change.defer'
+    | 'workbench.feishu-route.configure'
+    | 'workbench.feishu-route.reset'
+    | 'workbench.feishu-route.disable'
+    | 'workbench.feishu-route.verify'
 }
 
 export interface AuditCausationReference {
@@ -421,7 +425,11 @@ function normalizeReason(value: unknown): AuditReason {
     && record.code !== 'owner-suggested-change-accept'
     && record.code !== 'owner-suggested-change-edit-accept'
     && record.code !== 'owner-suggested-change-reject'
-    && record.code !== 'owner-suggested-change-defer') {
+    && record.code !== 'owner-suggested-change-defer'
+    && record.code !== 'owner-feishu-route-configure'
+    && record.code !== 'owner-feishu-route-reset'
+    && record.code !== 'owner-feishu-route-disable'
+    && record.code !== 'owner-feishu-route-verify') {
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -514,7 +522,11 @@ function auditAction(value: unknown): WorkbenchAuditAction {
     && value !== 'workbench.suggested-change.accepted'
     && value !== 'workbench.suggested-change.edited-accepted'
     && value !== 'workbench.suggested-change.rejected'
-    && value !== 'workbench.suggested-change.deferred') {
+    && value !== 'workbench.suggested-change.deferred'
+    && value !== 'workbench.feishu-route.configured'
+    && value !== 'workbench.feishu-route.reset'
+    && value !== 'workbench.feishu-route.disabled'
+    && value !== 'workbench.feishu-route.verification-recorded') {
     throw new TypeError('Audit action is unsupported')
   }
   return value
@@ -525,7 +537,8 @@ function auditObjectType(value: unknown): WorkbenchAuditObjectType {
     && value !== 'project'
     && value !== 'project-member'
     && value !== 'project-responsibility'
-    && value !== 'suggested-change') {
+    && value !== 'suggested-change'
+    && value !== 'feishu-connection') {
     throw new TypeError('Audit object type is unsupported')
   }
   return value
@@ -541,7 +554,11 @@ function auditCommandType(value: unknown): AuditCommandReference['type'] {
     && value !== 'workbench.suggested-change.accept'
     && value !== 'workbench.suggested-change.edit-accept'
     && value !== 'workbench.suggested-change.reject'
-    && value !== 'workbench.suggested-change.defer') {
+    && value !== 'workbench.suggested-change.defer'
+    && value !== 'workbench.feishu-route.configure'
+    && value !== 'workbench.feishu-route.reset'
+    && value !== 'workbench.feishu-route.disable'
+    && value !== 'workbench.feishu-route.verify') {
     throw new TypeError('Audit command type is unsupported')
   }
   return value
@@ -557,7 +574,13 @@ function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
     && value !== 'suggested-change-accepted'
     && value !== 'suggested-change-edited-accepted'
     && value !== 'suggested-change-rejected'
-    && value !== 'suggested-change-deferred') {
+    && value !== 'suggested-change-deferred'
+    && value !== 'feishu-route-configured'
+    && value !== 'feishu-route-reset'
+    && value !== 'feishu-route-disabled'
+    && value !== 'feishu-route-verification-healthy'
+    && value !== 'feishu-route-verification-attention'
+    && value !== 'feishu-route-verification-failed') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -653,6 +676,36 @@ function assertCorrelatedVocabulary(
           && summary.code === 'suggested-change-deferred'
           && exactChangedFields(summary, ['decision'])
           && scope.projectId !== null
+      case 'workbench.feishu-route.configured':
+        return reason.code === 'owner-feishu-route-configure'
+          && object.type === 'feishu-connection'
+          && command.type === 'workbench.feishu-route.configure'
+          && summary.code === 'feishu-route-configured'
+          && exactChangedFields(summary, ['route', 'credentialRef'])
+          && scope.projectId === null
+      case 'workbench.feishu-route.reset':
+        return reason.code === 'owner-feishu-route-reset'
+          && object.type === 'feishu-connection'
+          && command.type === 'workbench.feishu-route.reset'
+          && summary.code === 'feishu-route-reset'
+          && exactChangedFields(summary, ['route', 'identityBinding'])
+          && scope.projectId === null
+      case 'workbench.feishu-route.disabled':
+        return reason.code === 'owner-feishu-route-disable'
+          && object.type === 'feishu-connection'
+          && command.type === 'workbench.feishu-route.disable'
+          && summary.code === 'feishu-route-disabled'
+          && exactChangedFields(summary, ['route', 'state'])
+          && scope.projectId === null
+      case 'workbench.feishu-route.verification-recorded':
+        return reason.code === 'owner-feishu-route-verify'
+          && object.type === 'feishu-connection'
+          && command.type === 'workbench.feishu-route.verify'
+          && (summary.code === 'feishu-route-verification-healthy'
+            || summary.code === 'feishu-route-verification-attention'
+            || summary.code === 'feishu-route-verification-failed')
+          && exactChangedFields(summary, ['verification'])
+          && scope.projectId === null
     }
   })()
   if (!correlated) {

@@ -60,9 +60,19 @@
 - [x] Build an accessible Review Center with one-round-trip proposal context, textual risk/status, semantic before/after diff, evidence choices, high-risk confirmation, safe retry, reconnect, and draft cleanup.
 - [x] Prove Schema v4→v5 migration, five-state filtering, low/high policy, double-CAS/stale races, edit history, rollback/replay/redaction, Loader/Profile, generated fourteen-method Remote, packed artifacts, restart, and real-browser behavior.
 
+## T07 — Feishu Bot/User dual-identity Connection Center (#8)
+
+- [x] Model one workspace Feishu Connection with independent append-only Bot/User route generations and immutable first-verified actor bindings.
+- [x] Store only DSH credential references and live presence metadata; resolve the exact App Secret/User token once per verification without caching or browser/business-database exposure.
+- [x] Verify Bot and User through their distinct self-identity paths and optionally probe one Task list with the same actor, never an automatic fallback.
+- [x] Preserve missing application scope, missing User grant, and concrete resource ACL denial as different safe issues and recovery guidance.
+- [x] Commit configure/reset/disable/verification facts through the T03 CAS, replay, Outbox, audit, receipt, and privacy invariants.
+- [x] Build an accessible localized Connection Center with independent drafts, exact ambiguous-response retry, reconnect retention, and logout/expiry/Fiber cleanup.
+- [x] Complete the final Schema v5→v6 migration, scenario, Loader/Profile, generated seventeen-method Remote, packed artifact, restart, and browser verification evidence.
+
 ## Later tickets
 
-- [ ] T07+ integrations, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T06.
+- [ ] T08+ Feishu resource bindings/actions, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T07.
 
 ## Definition of done
 

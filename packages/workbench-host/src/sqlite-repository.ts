@@ -6,8 +6,15 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type {
   AddProjectMemberResult,
+  ConfigureFeishuIdentityRouteResult,
   CreateProjectResult,
   DecideSuggestedChangeResult,
+  FEISHU_CONNECTION_ID,
+  FeishuConnectionIssue,
+  FeishuIdentityKind,
+  FeishuResourceProbeProjection,
+  FeishuScopeObservation,
+  FeishuVerificationProjection,
   GoalProjection,
   GoalSummaryProjection,
   KnowledgeWorkTemplateDefinitionV1,
@@ -31,6 +38,7 @@ import type {
   SetStatusResult,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityResult,
+  VerifyFeishuIdentityRouteResult,
   SuggestedChangeDecisionMode,
   SuggestedChangeEvidenceProjection,
   SuggestedChangePersistedState,
@@ -71,6 +79,12 @@ import {
   statusSnapshot,
   type WorkbenchActivityQuery,
   type WorkbenchCommandMetadata,
+  type WorkbenchFeishuConnectionQuery,
+  type WorkbenchFeishuRouteMutation,
+  type WorkbenchFeishuVerificationMutation,
+  type WorkbenchFeishuVerificationObservation,
+  type WorkbenchFeishuVerificationReplayQuery,
+  type WorkbenchStoredFeishuConnectionProjection,
   type WorkbenchOutboxClaim,
   type WorkbenchOutboxClaimRequest,
   type WorkbenchOutboxSettlement,
@@ -88,7 +102,7 @@ import {
   type WorkbenchSuggestedChangeProposalMutation,
 } from './repository.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 5
+export const WORKBENCH_SCHEMA_VERSION = 6
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -146,6 +160,29 @@ const SUGGESTED_CHANGE_OBJECT_TYPE = 'suggested-change'
 const SUGGESTED_CHANGE_TARGET_ADAPTER = 'project-responsibility.replace'
 const SUGGESTED_CHANGE_POLICY_VERSION = 'project-responsibility-v1'
 const SUGGESTED_CHANGE_REPRESENTATION_VERSION = 1
+const FEISHU_CONNECTION_ID_VALUE: typeof FEISHU_CONNECTION_ID = 'feishu-primary'
+const FEISHU_REALM = 'feishu-cn'
+const FEISHU_ROUTE_SET_COMMAND_TYPE = 'workbench.feishu-route.configure'
+const FEISHU_ROUTE_RESET_COMMAND_TYPE = 'workbench.feishu-route.reset'
+const FEISHU_ROUTE_DISABLE_COMMAND_TYPE = 'workbench.feishu-route.disable'
+const FEISHU_VERIFY_COMMAND_TYPE = 'workbench.feishu-route.verify'
+const FEISHU_CONNECTION_OBJECT_TYPE = 'feishu-connection'
+const FEISHU_ROUTE_SET_AUDIT_ACTION = 'workbench.feishu-route.configured'
+const FEISHU_ROUTE_RESET_AUDIT_ACTION = 'workbench.feishu-route.reset'
+const FEISHU_ROUTE_DISABLE_AUDIT_ACTION = 'workbench.feishu-route.disabled'
+const FEISHU_VERIFY_AUDIT_ACTION = 'workbench.feishu-route.verification-recorded'
+const FEISHU_ROUTE_SET_REASON = 'owner-feishu-route-configure'
+const FEISHU_ROUTE_RESET_REASON = 'owner-feishu-route-reset'
+const FEISHU_ROUTE_DISABLE_REASON = 'owner-feishu-route-disable'
+const FEISHU_VERIFY_REASON = 'owner-feishu-route-verify'
+const FEISHU_ROUTE_SET_SUMMARY = 'feishu-route-configured'
+const FEISHU_ROUTE_RESET_SUMMARY = 'feishu-route-reset'
+const FEISHU_ROUTE_DISABLE_SUMMARY = 'feishu-route-disabled'
+const FEISHU_VERIFY_HEALTHY_SUMMARY = 'feishu-route-verification-healthy'
+const FEISHU_VERIFY_ATTENTION_SUMMARY = 'feishu-route-verification-attention'
+const FEISHU_VERIFY_FAILED_SUMMARY = 'feishu-route-verification-failed'
+const FEISHU_ROUTE_OUTBOX_TOPIC = 'workbench.feishu-route.changed.v1'
+const FEISHU_VERIFY_OUTBOX_TOPIC = 'workbench.feishu-route.verified.v1'
 const MAX_REVIEW_CENTER_LIMIT = 50
 const MAX_SUGGESTED_CHANGE_EVIDENCE = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
@@ -163,6 +200,9 @@ const MAX_MEMBER_DISPLAY_NAME_LENGTH = 200
 const MAX_FEISHU_APP_ID_LENGTH = 128
 const MAX_FEISHU_OPEN_ID_LENGTH = 128
 const MAX_EXTERNAL_CONTACT_LENGTH = 320
+const MAX_FEISHU_CREDENTIAL_REF_LENGTH = 128
+const MAX_FEISHU_DISPLAY_LABEL_LENGTH = 200
+const MAX_FEISHU_RESOURCE_ID_LENGTH = 256
 
 export type WorkbenchJournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
@@ -277,6 +317,67 @@ interface SuggestedChangeEvidenceRow {
   readonly suggested_change_id: string
   readonly ordinal: number
   readonly audit_event_id: string
+}
+
+interface FeishuConnectionRow {
+  readonly organization_id: string
+  readonly team_id: string
+  readonly connection_id: string
+  readonly realm: string
+  readonly revision: number
+  readonly updated_at: string
+}
+
+interface FeishuRouteRow {
+  readonly organization_id: string
+  readonly team_id: string
+  readonly kind: string
+  readonly generation: number
+  readonly identity_epoch: number
+  readonly state: string
+  readonly app_id: string
+  readonly credential_ref: string
+  readonly command_id: string
+  readonly created_at: string
+}
+
+interface FeishuIdentityBindingRow {
+  readonly organization_id: string
+  readonly team_id: string
+  readonly kind: string
+  readonly identity_epoch: number
+  readonly route_generation: number
+  readonly app_id: string
+  readonly open_id: string
+  readonly tenant_key: string | null
+  readonly verification_id: string
+  readonly bound_at: string
+}
+
+interface FeishuVerificationRow {
+  readonly sequence: number
+  readonly route_sequence: number
+  readonly id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly kind: string
+  readonly route_generation: number
+  readonly identity_epoch: number
+  readonly connection_revision: number
+  readonly result: string
+  readonly identity_state: string
+  readonly identity_issue_json: string | null
+  readonly actor_app_id: string | null
+  readonly actor_open_id: string | null
+  readonly actor_tenant_key: string | null
+  readonly display_label: string | null
+  readonly scope_state: string
+  readonly scopes_json: string
+  readonly scope_issue_json: string | null
+  readonly requested_resource_probe_json: string
+  readonly resource_probe_json: string
+  readonly command_id: string
+  readonly checked_at: string
 }
 
 interface TemplateVersionRow {
@@ -490,6 +591,14 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_suggested_change_evidence_no_delete',
   'workbench_suggested_change_decision_no_update',
   'workbench_suggested_change_decision_no_delete',
+  'workbench_feishu_connection_scope_no_update',
+  'workbench_feishu_connection_no_delete',
+  'workbench_feishu_route_no_update',
+  'workbench_feishu_route_no_delete',
+  'workbench_feishu_binding_no_update',
+  'workbench_feishu_binding_no_delete',
+  'workbench_feishu_verification_no_update',
+  'workbench_feishu_verification_no_delete',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -1724,6 +1833,444 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     }
   }
 
+  async readFeishuConnection(
+    query: WorkbenchFeishuConnectionQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchStoredFeishuConnectionProjection> {
+    throwIfAborted(signal)
+    validateFeishuConnectionQuery(query)
+    const projection = readFeishuConnectionProjection(
+      this.requireDatabase(),
+      query.organizationId,
+      query.teamId,
+    )
+    throwIfAborted(signal)
+    return projection
+  }
+
+  async commitFeishuRoute(
+    mutation: WorkbenchFeishuRouteMutation,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuIdentityRouteResult> {
+    throwIfAborted(signal)
+    validateFeishuRouteMutation(mutation)
+    const database = this.requireDatabase()
+    const vocabulary = feishuRouteVocabulary(mutation.mode)
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = feishuRouteRequestHash(mutation, vocabulary.commandType)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== vocabulary.commandType
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return feishuIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeFeishuRouteResult(receipt.result_json, receipt)
+        throwIfAborted(signal)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+
+      assertValidLedger(database)
+      const connection = readFeishuConnectionRow(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+      )
+      const currentRevision = connection?.revision ?? 0
+      if (currentRevision !== mutation.expectedConnectionRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuConnectionRevisionConflict(
+          mutation.expectedConnectionRevision,
+          currentRevision,
+        )
+      }
+      const currentRoute = readCurrentFeishuRoute(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.kind,
+      )
+      const currentGeneration = currentRoute?.generation ?? null
+      if (currentGeneration !== mutation.expectedRouteGeneration) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuRouteGenerationConflict(
+          mutation.kind,
+          mutation.expectedRouteGeneration,
+          currentGeneration,
+        )
+      }
+      if (mutation.mode !== 'set'
+        && (currentRoute === null || currentRoute.state !== 'configured')) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuRouteStateError('route-unconfigured', mutation.kind)
+      }
+      if (mutation.mode === 'set'
+        && currentRoute !== null
+        && currentRoute.state === 'configured'
+        && currentRoute.app_id === mutation.appId
+        && currentRoute.credential_ref === mutation.credentialRef) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuRouteStateError('no-op-route-configuration', mutation.kind)
+      }
+      if (currentRevision >= Number.MAX_SAFE_INTEGER
+        || (currentRoute?.generation ?? 0) >= Number.MAX_SAFE_INTEGER
+        || (mutation.mode === 'reset'
+          && (currentRoute?.identity_epoch ?? 0) >= Number.MAX_SAFE_INTEGER)) {
+        throw new Error('Workbench Feishu connection revision exhausted')
+      }
+      const nextRevision = currentRevision + 1
+      const nextGeneration = (currentRoute?.generation ?? 0) + 1
+      // Config generations fence stale commands; only an explicit reset starts new identity continuity.
+      const nextIdentityEpoch = currentRoute === null
+        ? 1
+        : mutation.mode === 'reset'
+          ? currentRoute.identity_epoch + 1
+          : currentRoute.identity_epoch
+      const appId = mutation.mode === 'set'
+        ? mutation.appId as string
+        : currentRoute?.app_id as string
+      const credentialRef = mutation.mode === 'set'
+        ? mutation.credentialRef as string
+        : currentRoute?.credential_ref as string
+      const state = mutation.mode === 'disable' ? 'disabled' as const : 'configured' as const
+
+      if (connection === null) {
+        const inserted = database.prepare(`
+          INSERT INTO workbench_feishu_connection (
+            organization_id, team_id, connection_id, realm, revision, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          FEISHU_CONNECTION_ID_VALUE,
+          FEISHU_REALM,
+          nextRevision,
+          mutation.updatedAt,
+        )
+        if (inserted.changes !== 1) {
+          throw new Error('Workbench Feishu connection was not inserted exactly once')
+        }
+      } else {
+        const advanced = database.prepare(`
+          UPDATE workbench_feishu_connection SET revision = ?, updated_at = ?
+          WHERE organization_id = ? AND team_id = ? AND revision = ?
+        `).run(
+          nextRevision,
+          mutation.updatedAt,
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          currentRevision,
+        )
+        if (advanced.changes !== 1) {
+          throw new Error('Workbench Feishu connection did not advance exactly once')
+        }
+      }
+      const insertedRoute = database.prepare(`
+        INSERT INTO workbench_feishu_route_version (
+          organization_id, team_id, kind, generation, identity_epoch, state,
+          app_id, credential_ref, command_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.kind,
+        nextGeneration,
+        nextIdentityEpoch,
+        state,
+        appId,
+        credentialRef,
+        mutation.command.commandId,
+        mutation.updatedAt,
+      )
+      if (insertedRoute.changes !== 1) {
+        throw new Error('Workbench Feishu route version was not inserted exactly once')
+      }
+
+      const committed = Object.freeze({
+        ok: true,
+        value: Object.freeze({
+          connectionId: FEISHU_CONNECTION_ID_VALUE,
+          connectionRevision: nextRevision,
+          kind: mutation.kind,
+          routeGeneration: nextGeneration,
+          state,
+        }),
+        receipt: Object.freeze({
+          commandId: mutation.command.commandId,
+          auditEventId: mutation.command.auditEventId,
+          outboxId: mutation.command.outboxId,
+        }),
+      }) satisfies Extract<ConfigureFeishuIdentityRouteResult, { readonly ok: true }>
+      appendFeishuLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: vocabulary.commandType,
+        auditAction: vocabulary.auditAction,
+        summaryCode: vocabulary.summaryCode,
+        changedFields: mutation.mode === 'set'
+          ? ['route', 'credentialRef']
+          : mutation.mode === 'reset' ? ['route', 'identityBinding'] : ['route', 'state'],
+        outboxTopic: FEISHU_ROUTE_OUTBOX_TOPIC,
+        connectionRevision: nextRevision,
+        routeKind: mutation.kind,
+        routeGeneration: nextGeneration,
+        result: committed,
+      })
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async replayFeishuVerification(
+    query: WorkbenchFeishuVerificationReplayQuery,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult | null> {
+    throwIfAborted(signal)
+    validateFeishuVerificationReplayQuery(query)
+    const database = this.requireDatabase()
+    const receipt = database.prepare(`
+      SELECT command_type, request_hash, command_id, audit_event_id, outbox_id, result_json
+      FROM workbench_command_receipt
+      WHERE organization_id = ? AND actor_id = ? AND idempotency_key_hash = ?
+    `).get(
+      query.organizationId,
+      query.actorId,
+      idempotencyKeyHash(query.idempotencyKey),
+    ) as ReceiptRow | undefined
+    if (receipt === undefined) return null
+    const requestHash = feishuVerificationRequestHash(query)
+    if (receipt.command_type !== FEISHU_VERIFY_COMMAND_TYPE
+      || receipt.request_hash !== requestHash) {
+      return feishuVerificationIdempotencyConflict()
+    }
+    assertValidLedger(database)
+    throwIfAborted(signal)
+    return decodeFeishuVerificationResult(receipt.result_json, receipt)
+  }
+
+  async commitFeishuVerification(
+    mutation: WorkbenchFeishuVerificationMutation,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult> {
+    throwIfAborted(signal)
+    validateFeishuVerificationMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = feishuVerificationRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== FEISHU_VERIFY_COMMAND_TYPE
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return feishuVerificationIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeFeishuVerificationResult(receipt.result_json, receipt)
+        throwIfAborted(signal)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+
+      assertValidLedger(database)
+      const connection = readFeishuConnectionRow(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+      )
+      const currentRevision = connection?.revision ?? 0
+      if (currentRevision !== mutation.expectedConnectionRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuVerificationConnectionRevisionConflict(
+          mutation.expectedConnectionRevision,
+          currentRevision,
+        )
+      }
+      const currentRoute = readCurrentFeishuRoute(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.kind,
+      )
+      if (currentRoute === null) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuVerificationRouteStateError('route-unconfigured', mutation.kind)
+      }
+      if (currentRoute.generation !== mutation.expectedRouteGeneration) {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuVerificationRouteGenerationConflict(
+          mutation.kind,
+          mutation.expectedRouteGeneration,
+          currentRoute.generation,
+        )
+      }
+      if (currentRoute.state === 'disabled') {
+        database.exec('ROLLBACK')
+        began = false
+        return feishuVerificationRouteStateError('route-disabled', mutation.kind)
+      }
+      if (currentRevision >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('Workbench Feishu connection revision exhausted')
+      }
+      const existingBinding = readFeishuIdentityBinding(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.kind,
+        currentRoute.identity_epoch,
+      )
+      const effective = enforceFeishuIdentityContinuity(
+        mutation.observation,
+        currentRoute,
+        existingBinding,
+      )
+      if (existingBinding === null && effective.actor !== null
+        && effective.identity.state === 'verified') {
+        const bound = database.prepare(`
+          INSERT INTO workbench_feishu_identity_binding (
+            organization_id, team_id, kind, identity_epoch, route_generation,
+            app_id, open_id, tenant_key, verification_id, bound_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          mutation.kind,
+          currentRoute.identity_epoch,
+          currentRoute.generation,
+          effective.actor.appId,
+          effective.actor.openId,
+          effective.actor.tenantKey,
+          mutation.verificationId,
+          mutation.checkedAt,
+        )
+        if (bound.changes !== 1) {
+          throw new Error('Workbench Feishu identity binding was not inserted exactly once')
+        }
+      }
+      const routeSequence = integerField(database.prepare(`
+        SELECT COUNT(*) AS count FROM workbench_feishu_verification
+        WHERE organization_id = ? AND team_id = ? AND kind = ? AND route_generation = ?
+      `).get(
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.kind,
+        currentRoute.generation,
+      ), 'count') + 1
+      const nextRevision = currentRevision + 1
+      const inserted = database.prepare(`
+        INSERT INTO workbench_feishu_verification (
+          route_sequence, id, organization_id, team_id, kind, route_generation,
+          identity_epoch, connection_revision, result, identity_state, identity_issue_json,
+          actor_app_id, actor_open_id, actor_tenant_key,
+          display_label, scope_state, scopes_json, scope_issue_json,
+          requested_resource_probe_json, resource_probe_json, command_id, checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        routeSequence,
+        mutation.verificationId,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.kind,
+        currentRoute.generation,
+        currentRoute.identity_epoch,
+        nextRevision,
+        effective.result,
+        effective.identity.state,
+        effective.identity.issue === null ? null : canonicalizeJson(effective.identity.issue),
+        effective.actor?.appId ?? null,
+        effective.actor?.openId ?? null,
+        effective.actor?.tenantKey ?? null,
+        effective.displayLabel,
+        effective.scopeInspection.state,
+        canonicalizeJson(effective.scopeInspection.scopes),
+        effective.scopeInspection.issue === null
+          ? null
+          : canonicalizeJson(effective.scopeInspection.issue),
+        canonicalizeJson(mutation.resourceProbe),
+        canonicalizeJson(effective.resourceProbe),
+        mutation.command.commandId,
+        mutation.checkedAt,
+      )
+      if (inserted.changes !== 1) {
+        throw new Error('Workbench Feishu verification was not inserted exactly once')
+      }
+      const advanced = database.prepare(`
+        UPDATE workbench_feishu_connection SET revision = ?, updated_at = ?
+        WHERE organization_id = ? AND team_id = ? AND revision = ?
+      `).run(
+        nextRevision,
+        mutation.checkedAt,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        currentRevision,
+      )
+      if (advanced.changes !== 1) {
+        throw new Error('Workbench Feishu verification did not advance its connection exactly once')
+      }
+      const committed = Object.freeze({
+        ok: true,
+        value: Object.freeze({
+          connectionId: FEISHU_CONNECTION_ID_VALUE,
+          connectionRevision: nextRevision,
+          kind: mutation.kind,
+          routeGeneration: currentRoute.generation,
+          verificationSequence: routeSequence,
+          result: effective.result,
+        }),
+        receipt: Object.freeze({
+          commandId: mutation.command.commandId,
+          auditEventId: mutation.command.auditEventId,
+          outboxId: mutation.command.outboxId,
+        }),
+      }) satisfies Extract<VerifyFeishuIdentityRouteResult, { readonly ok: true }>
+      appendFeishuLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: FEISHU_VERIFY_COMMAND_TYPE,
+        auditAction: FEISHU_VERIFY_AUDIT_ACTION,
+        summaryCode: feishuVerificationSummary(effective.result),
+        changedFields: ['verification'],
+        outboxTopic: FEISHU_VERIFY_OUTBOX_TOPIC,
+        connectionRevision: nextRevision,
+        routeKind: mutation.kind,
+        routeGeneration: currentRoute.generation,
+        result: committed,
+      })
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
   async readActivity(
     query: WorkbenchActivityQuery,
     signal: AbortSignal,
@@ -2003,6 +2550,1154 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     }
     return value.toISOString()
   }
+}
+
+interface FeishuRouteVocabulary {
+  readonly commandType: AuditEvent['command']['type']
+  readonly auditAction:
+    | typeof FEISHU_ROUTE_SET_AUDIT_ACTION
+    | typeof FEISHU_ROUTE_RESET_AUDIT_ACTION
+    | typeof FEISHU_ROUTE_DISABLE_AUDIT_ACTION
+  readonly reason:
+    | typeof FEISHU_ROUTE_SET_REASON
+    | typeof FEISHU_ROUTE_RESET_REASON
+    | typeof FEISHU_ROUTE_DISABLE_REASON
+  readonly summaryCode:
+    | typeof FEISHU_ROUTE_SET_SUMMARY
+    | typeof FEISHU_ROUTE_RESET_SUMMARY
+    | typeof FEISHU_ROUTE_DISABLE_SUMMARY
+}
+
+function feishuRouteVocabulary(mode: WorkbenchFeishuRouteMutation['mode']): FeishuRouteVocabulary {
+  if (mode === 'set') {
+    return {
+      commandType: FEISHU_ROUTE_SET_COMMAND_TYPE,
+      auditAction: FEISHU_ROUTE_SET_AUDIT_ACTION,
+      reason: FEISHU_ROUTE_SET_REASON,
+      summaryCode: FEISHU_ROUTE_SET_SUMMARY,
+    }
+  }
+  if (mode === 'reset') {
+    return {
+      commandType: FEISHU_ROUTE_RESET_COMMAND_TYPE,
+      auditAction: FEISHU_ROUTE_RESET_AUDIT_ACTION,
+      reason: FEISHU_ROUTE_RESET_REASON,
+      summaryCode: FEISHU_ROUTE_RESET_SUMMARY,
+    }
+  }
+  return {
+    commandType: FEISHU_ROUTE_DISABLE_COMMAND_TYPE,
+    auditAction: FEISHU_ROUTE_DISABLE_AUDIT_ACTION,
+    reason: FEISHU_ROUTE_DISABLE_REASON,
+    summaryCode: FEISHU_ROUTE_DISABLE_SUMMARY,
+  }
+}
+
+function readFeishuConnectionRow(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+): FeishuConnectionRow | null {
+  const row = database.prepare(`
+    SELECT organization_id, team_id, connection_id, realm, revision, updated_at
+    FROM workbench_feishu_connection WHERE organization_id = ? AND team_id = ?
+  `).get(organizationId, teamId) as FeishuConnectionRow | undefined
+  if (row === undefined) return null
+  if (row.organization_id !== organizationId || row.team_id !== teamId
+    || row.connection_id !== FEISHU_CONNECTION_ID_VALUE || row.realm !== FEISHU_REALM) {
+    throw new Error('Workbench database contains an invalid Feishu connection scope')
+  }
+  positiveInteger(row.revision, 'Feishu connection revision')
+  canonicalInstant(row.updated_at, 'Feishu connection updatedAt')
+  return row
+}
+
+function readCurrentFeishuRoute(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+  kind: FeishuIdentityKind,
+): FeishuRouteRow | null {
+  const row = database.prepare(`
+    SELECT organization_id, team_id, kind, generation, identity_epoch, state, app_id,
+      credential_ref, command_id, created_at
+    FROM workbench_feishu_route_version
+    WHERE organization_id = ? AND team_id = ? AND kind = ?
+    ORDER BY generation DESC LIMIT 1
+  `).get(organizationId, teamId, kind) as FeishuRouteRow | undefined
+  if (row === undefined) return null
+  validateFeishuRouteRow(row, organizationId, teamId, kind)
+  return row
+}
+
+function validateFeishuRouteRow(
+  row: FeishuRouteRow,
+  organizationId: string,
+  teamId: string,
+  kind: FeishuIdentityKind,
+): void {
+  if (row.organization_id !== organizationId || row.team_id !== teamId || row.kind !== kind
+    || (row.state !== 'configured' && row.state !== 'disabled')) {
+    throw new Error('Workbench database contains an invalid Feishu route scope')
+  }
+  positiveInteger(row.generation, 'Feishu route generation')
+  positiveInteger(row.identity_epoch, 'Feishu route identity epoch')
+  validateFeishuAppId(row.app_id, 'Feishu route app id')
+  validateCredentialRef(row.credential_ref, 'Feishu route credential ref')
+  boundedReference(row.command_id, 'Feishu route command id')
+  canonicalInstant(row.created_at, 'Feishu route createdAt')
+}
+
+function readFeishuIdentityBinding(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+  kind: FeishuIdentityKind,
+  identityEpoch: number,
+): FeishuIdentityBindingRow | null {
+  const row = database.prepare(`
+    SELECT organization_id, team_id, kind, identity_epoch, route_generation,
+      app_id, open_id, tenant_key, verification_id, bound_at
+    FROM workbench_feishu_identity_binding
+    WHERE organization_id = ? AND team_id = ? AND kind = ? AND identity_epoch = ?
+  `).get(organizationId, teamId, kind, identityEpoch) as FeishuIdentityBindingRow | undefined
+  if (row === undefined) return null
+  if (row.organization_id !== organizationId || row.team_id !== teamId
+    || row.kind !== kind || row.identity_epoch !== identityEpoch) {
+    throw new Error('Workbench database contains an invalid Feishu identity binding scope')
+  }
+  positiveInteger(row.identity_epoch, 'Feishu binding identity epoch')
+  positiveInteger(row.route_generation, 'Feishu binding route generation')
+  validateFeishuAppId(row.app_id, 'Feishu binding app id')
+  validateBoundedReference(row.open_id, 'Feishu binding open id')
+  if (row.tenant_key !== null) validateBoundedReference(row.tenant_key, 'Feishu binding tenant key')
+  boundedReference(row.verification_id, 'Feishu binding verification id')
+  canonicalInstant(row.bound_at, 'Feishu binding boundAt')
+  return row
+}
+
+function readLatestFeishuVerification(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+  kind: FeishuIdentityKind,
+  generation: number,
+): FeishuVerificationRow | null {
+  const row = database.prepare(`
+    SELECT sequence, route_sequence, id, organization_id, team_id, kind,
+      route_generation, identity_epoch, connection_revision, result, identity_state,
+      identity_issue_json, actor_app_id, actor_open_id, actor_tenant_key,
+      display_label, scope_state, scopes_json,
+      scope_issue_json, requested_resource_probe_json, resource_probe_json,
+      command_id, checked_at
+    FROM workbench_feishu_verification
+    WHERE organization_id = ? AND team_id = ? AND kind = ? AND route_generation = ?
+    ORDER BY route_sequence DESC LIMIT 1
+  `).get(organizationId, teamId, kind, generation) as FeishuVerificationRow | undefined
+  return row ?? null
+}
+
+function readFeishuBindingVerification(
+  database: DatabaseSync,
+  binding: FeishuIdentityBindingRow,
+): FeishuVerificationRow {
+  const row = database.prepare(`
+    SELECT sequence, route_sequence, id, organization_id, team_id, kind,
+      route_generation, identity_epoch, connection_revision, result, identity_state,
+      identity_issue_json, actor_app_id, actor_open_id, actor_tenant_key,
+      display_label, scope_state, scopes_json,
+      scope_issue_json, requested_resource_probe_json, resource_probe_json,
+      command_id, checked_at
+    FROM workbench_feishu_verification WHERE id = ?
+  `).get(binding.verification_id) as FeishuVerificationRow | undefined
+  if (row === undefined
+    || row.organization_id !== binding.organization_id
+    || row.team_id !== binding.team_id
+    || row.kind !== binding.kind
+    || row.identity_epoch !== binding.identity_epoch
+    || row.route_generation !== binding.route_generation
+    || row.identity_state !== 'verified') {
+    throw new Error('Workbench Feishu identity binding lost its source verification')
+  }
+  feishuVerificationProjectionFromRow(row)
+  return row
+}
+
+function readFeishuConnectionProjection(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+): WorkbenchStoredFeishuConnectionProjection {
+  const connection = readFeishuConnectionRow(database, organizationId, teamId)
+  const route = (kind: FeishuIdentityKind) => {
+    const current = readCurrentFeishuRoute(database, organizationId, teamId, kind)
+    if (current === null) {
+      return Object.freeze({
+        kind,
+        state: 'unconfigured' as const,
+        generation: null,
+        appId: null,
+        credentialRef: null,
+        actor: null,
+        displayLabel: null,
+        lastVerification: null,
+      })
+    }
+    const binding = readFeishuIdentityBinding(
+      database,
+      organizationId,
+      teamId,
+      kind,
+      current.identity_epoch,
+    )
+    const latest = readLatestFeishuVerification(
+      database,
+      organizationId,
+      teamId,
+      kind,
+      current.generation,
+    )
+    const bindingVerification = binding === null
+      ? null
+      : readFeishuBindingVerification(database, binding)
+    const verification = latest === null ? null : feishuVerificationProjectionFromRow(latest)
+    return Object.freeze({
+      kind,
+      state: current.state as 'configured' | 'disabled',
+      generation: current.generation,
+      appId: current.app_id,
+      credentialRef: current.credential_ref,
+      actor: binding === null ? null : Object.freeze({
+        connectionId: FEISHU_CONNECTION_ID_VALUE,
+        realm: FEISHU_REALM,
+        appId: binding.app_id,
+        kind,
+        routeGeneration: binding.route_generation,
+        openId: binding.open_id,
+        tenantKey: binding.tenant_key,
+      }),
+      displayLabel: latest?.display_label ?? bindingVerification?.display_label ?? null,
+      lastVerification: verification,
+    })
+  }
+  return Object.freeze({
+    connectionId: FEISHU_CONNECTION_ID_VALUE,
+    realm: FEISHU_REALM,
+    revision: connection?.revision ?? 0,
+    bot: route('bot'),
+    user: route('user'),
+    updatedAt: connection?.updated_at ?? null,
+  })
+}
+
+function feishuVerificationProjectionFromRow(
+  row: FeishuVerificationRow,
+): FeishuVerificationProjection {
+  positiveInteger(row.sequence, 'Feishu verification storage sequence')
+  const sequence = positiveInteger(row.route_sequence, 'Feishu verification route sequence')
+  const routeGeneration = positiveInteger(row.route_generation, 'Feishu verification generation')
+  positiveInteger(row.identity_epoch, 'Feishu verification identity epoch')
+  positiveInteger(row.connection_revision, 'Feishu verification connection revision')
+  const result = feishuVerificationResult(row.result)
+  const identityState = row.identity_state === 'verified'
+    ? 'verified' as const
+    : row.identity_state === 'failed' ? 'failed' as const : null
+  if (identityState === null) throw new Error('Workbench database contains invalid Feishu identity state')
+  const identityIssue = row.identity_issue_json === null
+    ? null
+    : decodeFeishuIssue(row.identity_issue_json)
+  if ((identityState === 'verified') !== (identityIssue === null)) {
+    throw new Error('Workbench database contains inconsistent Feishu identity evidence')
+  }
+  if (identityState === 'verified') {
+    if (row.actor_app_id === null || row.actor_open_id === null) {
+      throw new Error('Workbench database Feishu verification lost its actor')
+    }
+    validateFeishuAppId(row.actor_app_id, 'Feishu verification actor app id')
+    validateBoundedReference(row.actor_open_id, 'Feishu verification actor open id')
+    if (row.actor_tenant_key !== null) {
+      validateBoundedReference(row.actor_tenant_key, 'Feishu verification actor tenant key')
+    }
+  } else if (row.actor_app_id !== null || row.actor_open_id !== null
+    || row.actor_tenant_key !== null) {
+    throw new Error('Workbench database failed Feishu verification contains an actor')
+  }
+  const scopeState = row.scope_state === 'observed'
+    || row.scope_state === 'unavailable'
+    || row.scope_state === 'not-inspected'
+    ? row.scope_state
+    : null
+  if (scopeState === null) throw new Error('Workbench database contains invalid Feishu scope state')
+  const scopes = decodeFeishuScopes(row.scopes_json)
+  const scopeIssue = row.scope_issue_json === null ? null : decodeFeishuIssue(row.scope_issue_json)
+  if (scopeState === 'observed' && scopeIssue !== null) {
+    throw new Error('Workbench database contains inconsistent Feishu scope evidence')
+  }
+  const requestedResourceProbe = decodeFeishuRequestedResourceProbe(
+    row.requested_resource_probe_json,
+  )
+  const resourceProbe = decodeFeishuResourceProbe(row.resource_probe_json)
+  if (resourceProbe.state !== 'not-tested'
+    && (requestedResourceProbe === null
+      || requestedResourceProbe.kind !== resourceProbe.kind
+      || requestedResourceProbe.resourceId !== resourceProbe.resourceId)) {
+    throw new Error('Workbench database Feishu resource result escaped its requested probe')
+  }
+  if (row.display_label !== null) {
+    validateSafeText(row.display_label, 'Feishu display label', MAX_FEISHU_DISPLAY_LABEL_LENGTH)
+  }
+  return Object.freeze({
+    verificationId: boundedReference(row.id, 'Feishu verification id'),
+    sequence,
+    routeGeneration,
+    checkedAt: canonicalInstant(row.checked_at, 'Feishu verification checkedAt'),
+    result,
+    identity: Object.freeze({ state: identityState, issue: identityIssue }),
+    scopeInspection: Object.freeze({
+      state: scopeState,
+      scopes: Object.freeze(scopes),
+      issue: scopeIssue,
+    }),
+    resourceProbe,
+  })
+}
+
+function findFeishuReceipt(
+  database: DatabaseSync,
+  command: WorkbenchCommandMetadata,
+  keyHash: string,
+): ReceiptRow | undefined {
+  return database.prepare(`
+    SELECT command_type, request_hash, command_id, audit_event_id, outbox_id, result_json
+    FROM workbench_command_receipt
+    WHERE organization_id = ? AND actor_id = ? AND idempotency_key_hash = ?
+  `).get(
+    command.actor.organizationId,
+    command.actor.id,
+    keyHash,
+  ) as ReceiptRow | undefined
+}
+
+function feishuRouteRequestHash(
+  mutation: WorkbenchFeishuRouteMutation,
+  commandType: string,
+): string {
+  return digest(canonicalizeJson({
+    commandType,
+    target: FEISHU_CONNECTION_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+    },
+    kind: mutation.kind,
+    mode: mutation.mode,
+    ...(mutation.mode === 'set'
+      ? { appId: mutation.appId, credentialRef: mutation.credentialRef }
+      : {}),
+    expectedConnectionRevision: mutation.expectedConnectionRevision,
+    expectedRouteGeneration: mutation.expectedRouteGeneration,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+type FeishuVerificationHashInput = WorkbenchFeishuVerificationMutation
+  | WorkbenchFeishuVerificationReplayQuery
+
+function feishuVerificationRequestHash(input: FeishuVerificationHashInput): string {
+  return digest(canonicalizeJson({
+    commandType: FEISHU_VERIFY_COMMAND_TYPE,
+    target: FEISHU_CONNECTION_OBJECT_TYPE,
+    scope: {
+      organizationId: 'command' in input
+        ? input.command.actor.organizationId
+        : input.organizationId,
+      teamId: 'command' in input ? input.command.actor.teamId : input.teamId,
+    },
+    kind: input.kind,
+    expectedConnectionRevision: input.expectedConnectionRevision,
+    expectedRouteGeneration: input.expectedRouteGeneration,
+    resourceProbe: input.resourceProbe,
+    reason: 'command' in input ? input.command.reason : input.reason,
+    causationId: 'command' in input ? input.command.causationId : input.causationId,
+  }))
+}
+
+type FeishuCommittedResult =
+  | Extract<ConfigureFeishuIdentityRouteResult, { readonly ok: true }>
+  | Extract<VerifyFeishuIdentityRouteResult, { readonly ok: true }>
+
+interface FeishuLedgerInput {
+  readonly command: WorkbenchCommandMetadata
+  readonly requestHash: string
+  readonly commandType: AuditEvent['command']['type']
+  readonly auditAction: WorkbenchAuditAction
+  readonly summaryCode: WorkbenchActivitySummaryCode
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+  readonly connectionRevision: number
+  readonly routeKind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly result: FeishuCommittedResult
+}
+
+function appendFeishuLedger(database: DatabaseSync, input: FeishuLedgerInput): void {
+  const payload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: input.command.commandId,
+    auditEventId: input.command.auditEventId,
+    requestHash: input.requestHash,
+    connectionRevision: input.connectionRevision,
+    routeKind: input.routeKind,
+    routeGeneration: input.routeGeneration,
+    causationId: input.command.causationId,
+  })
+  const outbox = database.prepare(`
+    INSERT INTO workbench_outbox (
+      id, command_id, organization_id, topic, effect_key, project_id,
+      object_type, object_id, object_version, causation_id, payload_json,
+      state, attempt_count, created_at, updated_at, error_code
+    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
+  `).run(
+    input.command.outboxId,
+    input.command.commandId,
+    input.command.actor.organizationId,
+    input.outboxTopic,
+    `workbench:${input.command.outboxId}`,
+    FEISHU_CONNECTION_OBJECT_TYPE,
+    FEISHU_CONNECTION_ID_VALUE,
+    input.connectionRevision,
+    input.command.causationId,
+    payload,
+    input.command.occurredAt,
+    input.command.occurredAt,
+  )
+  if (outbox.changes !== 1) {
+    throw new Error('Workbench Feishu Outbox intent was not inserted exactly once')
+  }
+  const head = readAuditHead(database)
+  if (head.sequence >= Number.MAX_SAFE_INTEGER) throw new Error('Workbench audit sequence exhausted')
+  const sequence = head.sequence + 1
+  const event = createAuditEvent({
+    sequence: String(sequence),
+    previousHash: auditHash(head.head_hash),
+    auditId: input.command.auditEventId,
+    occurredAt: input.command.occurredAt,
+    actor: { kind: input.command.actor.kind, id: input.command.actor.id },
+    action: input.auditAction,
+    scope: {
+      organizationId: input.command.actor.organizationId,
+      teamId: input.command.actor.teamId,
+      projectId: null,
+    },
+    reason: { code: input.command.reason },
+    object: {
+      type: FEISHU_CONNECTION_OBJECT_TYPE,
+      id: FEISHU_CONNECTION_ID_VALUE,
+      version: String(input.connectionRevision),
+    },
+    command: { id: input.command.commandId, type: input.commandType },
+    causation: { id: input.command.causationId },
+    outbox: { id: input.command.outboxId, state: 'pending' },
+    outcome: 'committed',
+    summary: { code: input.summaryCode, changedFields: input.changedFields },
+  })
+  insertAuditEvent(database, event)
+  const advanced = database.prepare(`
+    UPDATE workbench_audit_head SET sequence = ?, head_hash = ?
+    WHERE singleton = 1 AND sequence = ? AND head_hash = ?
+  `).run(sequence, event.eventHash, head.sequence, head.head_hash)
+  if (advanced.changes !== 1) throw new Error('Workbench audit head did not advance exactly once')
+  const receipt = database.prepare(`
+    INSERT INTO workbench_command_receipt (
+      organization_id, actor_id, idempotency_key_hash, command_type,
+      request_hash, command_id, audit_event_id, outbox_id, result_json, committed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.command.actor.organizationId,
+    input.command.actor.id,
+    idempotencyKeyHash(input.command.idempotencyKey),
+    input.commandType,
+    input.requestHash,
+    input.command.commandId,
+    input.command.auditEventId,
+    input.command.outboxId,
+    canonicalizeJson(input.result),
+    input.command.occurredAt,
+  )
+  if (receipt.changes !== 1) {
+    throw new Error('Workbench Feishu command receipt was not inserted exactly once')
+  }
+}
+
+function enforceFeishuIdentityContinuity(
+  observation: WorkbenchFeishuVerificationObservation,
+  route: FeishuRouteRow,
+  binding: FeishuIdentityBindingRow | null,
+): WorkbenchFeishuVerificationObservation {
+  const actor = observation.actor
+  if (observation.identity.state !== 'verified' || actor === null) return observation
+  if (actor.realm !== FEISHU_REALM || actor.kind !== route.kind || actor.appId !== route.app_id) {
+    return failedFeishuObservation('provider-response-invalid', 'inspect-provider')
+  }
+  if (binding === null) return observation
+  if (binding.app_id !== actor.appId || binding.open_id !== actor.openId) {
+    return failedFeishuObservation('identity-continuity-mismatch', 'reset-identity-binding')
+  }
+  if (binding.tenant_key !== actor.tenantKey) {
+    return failedFeishuObservation('tenant-mismatch', 'reset-identity-binding')
+  }
+  return observation
+}
+
+function failedFeishuObservation(
+  code: FeishuConnectionIssue['code'],
+  recovery: FeishuConnectionIssue['recovery'],
+): WorkbenchFeishuVerificationObservation {
+  const issue = Object.freeze({
+    code,
+    recovery,
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+  return Object.freeze({
+    result: 'failed',
+    identity: Object.freeze({ state: 'failed', issue }),
+    actor: null,
+    displayLabel: null,
+    scopeInspection: Object.freeze({
+      state: 'not-inspected',
+      scopes: Object.freeze([]),
+      issue: null,
+    }),
+    resourceProbe: Object.freeze({ state: 'not-tested' }),
+  })
+}
+
+function feishuVerificationSummary(
+  result: WorkbenchFeishuVerificationObservation['result'],
+): typeof FEISHU_VERIFY_HEALTHY_SUMMARY
+  | typeof FEISHU_VERIFY_ATTENTION_SUMMARY
+  | typeof FEISHU_VERIFY_FAILED_SUMMARY {
+  return result === 'healthy'
+      ? FEISHU_VERIFY_HEALTHY_SUMMARY
+    : result === 'attention' ? FEISHU_VERIFY_ATTENTION_SUMMARY : FEISHU_VERIFY_FAILED_SUMMARY
+}
+
+const FEISHU_CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
+const FEISHU_SCOPE_PATTERN = /^[a-z][a-z0-9._:-]{0,127}$/u
+const FEISHU_ISSUE_CODES = new Set<FeishuConnectionIssue['code']>([
+  'credential-unconfigured',
+  'credential-invalid',
+  'credential-expired',
+  'user-authorization-revoked',
+  'app-disabled',
+  'missing-app-scope',
+  'missing-user-grant',
+  'outside-app-data-range',
+  'resource-access-unavailable',
+  'resource-not-found',
+  'unsupported-actor',
+  'identity-continuity-mismatch',
+  'tenant-mismatch',
+  'rate-limited',
+  'provider-unavailable',
+  'provider-response-invalid',
+  'unknown-provider-error',
+])
+const FEISHU_RECOVERY_CODES = new Set<FeishuConnectionIssue['recovery']>([
+  'configure-credential',
+  'rotate-credential',
+  'enable-app',
+  'grant-app-scope',
+  'reauthorize-user',
+  'expand-app-data-range',
+  'share-resource',
+  'check-resource-id',
+  'reset-identity-binding',
+  'retry-later',
+  'inspect-provider',
+])
+
+function validateFeishuConnectionQuery(query: WorkbenchFeishuConnectionQuery): void {
+  validateBoundedReference(query.organizationId, 'Feishu organization id')
+  validateBoundedReference(query.teamId, 'Feishu team id')
+}
+
+function validateFeishuRouteMutation(mutation: WorkbenchFeishuRouteMutation): void {
+  if (mutation.kind !== 'bot' && mutation.kind !== 'user') {
+    throw new TypeError('Feishu route kind must be bot or user')
+  }
+  const vocabulary = feishuRouteVocabulary(mutation.mode)
+  if (mutation.command.reason !== vocabulary.reason) {
+    throw new TypeError('Feishu route reason does not match its mode')
+  }
+  nonNegativeStoredRevision(
+    mutation.expectedConnectionRevision,
+    'Feishu expected connection revision',
+  )
+  nullablePositiveStoredRevision(
+    mutation.expectedRouteGeneration,
+    'Feishu expected route generation',
+  )
+  if (mutation.mode === 'set') {
+    if (mutation.appId === null || mutation.credentialRef === null) {
+      throw new TypeError('Feishu set route requires appId and credentialRef')
+    }
+    validateFeishuAppId(mutation.appId, 'Feishu route app id')
+    validateCredentialRef(mutation.credentialRef, 'Feishu route credential ref')
+  } else if (mutation.appId !== null || mutation.credentialRef !== null) {
+    throw new TypeError('Feishu reset/disable route must not carry new credential material')
+  }
+  validateInstant(mutation.updatedAt, 'Feishu route updatedAt')
+  validateFeishuCommand(mutation.command)
+  if (mutation.updatedAt !== mutation.command.occurredAt) {
+    throw new TypeError('Feishu route and command instants must match')
+  }
+}
+
+function validateFeishuVerificationReplayQuery(
+  query: WorkbenchFeishuVerificationReplayQuery,
+): void {
+  validateBoundedReference(query.organizationId, 'Feishu replay organization id')
+  validateBoundedReference(query.teamId, 'Feishu replay team id')
+  validateBoundedReference(query.actorId, 'Feishu replay actor id')
+  if (query.kind !== 'bot' && query.kind !== 'user') {
+    throw new TypeError('Feishu replay kind must be bot or user')
+  }
+  nonNegativeStoredRevision(
+    query.expectedConnectionRevision,
+    'Feishu replay connection revision',
+  )
+  positiveInteger(query.expectedRouteGeneration, 'Feishu replay route generation')
+  validateFeishuResourceProbeInput(query.resourceProbe)
+  validateReference(query.idempotencyKey, 'Feishu replay idempotency key')
+  validateReference(query.causationId, 'Feishu replay causation id')
+  if (query.reason !== FEISHU_VERIFY_REASON) {
+    throw new TypeError('Feishu replay reason is unsupported')
+  }
+}
+
+function validateFeishuVerificationMutation(
+  mutation: WorkbenchFeishuVerificationMutation,
+): void {
+  validateBoundedReference(mutation.verificationId, 'Feishu verification id')
+  if (mutation.kind !== 'bot' && mutation.kind !== 'user') {
+    throw new TypeError('Feishu verification kind must be bot or user')
+  }
+  nonNegativeStoredRevision(
+    mutation.expectedConnectionRevision,
+    'Feishu expected connection revision',
+  )
+  positiveInteger(mutation.expectedRouteGeneration, 'Feishu expected route generation')
+  validateFeishuResourceProbeInput(mutation.resourceProbe)
+  validateFeishuObservation(mutation.observation, mutation.kind)
+  validateInstant(mutation.checkedAt, 'Feishu verification checkedAt')
+  validateFeishuCommand(mutation.command)
+  if (mutation.command.reason !== FEISHU_VERIFY_REASON
+    || mutation.checkedAt !== mutation.command.occurredAt) {
+    throw new TypeError('Feishu verification command metadata is inconsistent')
+  }
+}
+
+function validateFeishuCommand(command: WorkbenchCommandMetadata): void {
+  for (const [label, value] of [
+    ['Feishu command id', command.commandId],
+    ['Feishu audit event id', command.auditEventId],
+    ['Feishu Outbox id', command.outboxId],
+    ['Feishu idempotency key', command.idempotencyKey],
+    ['Feishu causation id', command.causationId],
+    ['Feishu actor id', command.actor.id],
+    ['Feishu organization id', command.actor.organizationId],
+    ['Feishu team id', command.actor.teamId],
+  ] as const) validateReference(value, label)
+  if (command.actor.kind !== 'owner') throw new TypeError('Feishu command actor must be owner')
+  validateInstant(command.occurredAt, 'Feishu command occurredAt')
+}
+
+function validateFeishuResourceProbeInput(
+  probe: { readonly kind: 'task-list'; readonly resourceId: string } | null,
+): void {
+  if (probe === null) return
+  if (probe.kind !== 'task-list') throw new TypeError('Feishu resource probe kind is unsupported')
+  validateFeishuResourceId(probe.resourceId, 'Feishu resource probe id')
+}
+
+function validateFeishuObservation(
+  observation: WorkbenchFeishuVerificationObservation,
+  kind: FeishuIdentityKind,
+): void {
+  const identityIssue = observation.identity.issue === null
+    ? null
+    : safeFeishuIssue(observation.identity.issue, 'Feishu identity issue')
+  if (observation.identity.state === 'verified') {
+    if (identityIssue !== null || observation.actor === null) {
+      throw new TypeError('Verified Feishu identity requires one actor and no issue')
+    }
+    validateFeishuActor(observation.actor, kind)
+  } else if (observation.identity.state === 'failed') {
+    if (identityIssue === null || observation.actor !== null) {
+      throw new TypeError('Failed Feishu identity requires one issue and no actor')
+    }
+  } else {
+    throw new TypeError('Feishu identity observation state is unsupported')
+  }
+  if (observation.displayLabel !== null) {
+    validateSafeText(
+      observation.displayLabel,
+      'Feishu display label',
+      MAX_FEISHU_DISPLAY_LABEL_LENGTH,
+    )
+  }
+  if (observation.scopeInspection.state === 'observed') {
+    if (observation.scopeInspection.issue !== null) {
+      throw new TypeError('Observed Feishu scopes cannot carry an inspection issue')
+    }
+  } else if (observation.scopeInspection.state === 'unavailable') {
+    if (observation.scopeInspection.issue === null) {
+      throw new TypeError('Unavailable Feishu scope inspection requires an issue')
+    }
+    safeFeishuIssue(observation.scopeInspection.issue, 'Feishu scope issue')
+  } else if (observation.scopeInspection.state === 'not-inspected') {
+    if (observation.scopeInspection.issue !== null
+      || observation.scopeInspection.scopes.length !== 0) {
+      throw new TypeError('Uninspected Feishu scopes cannot carry evidence')
+    }
+  } else {
+    throw new TypeError('Feishu scope inspection state is unsupported')
+  }
+  if (!Array.isArray(observation.scopeInspection.scopes)
+    || observation.scopeInspection.scopes.length > 100) {
+    throw new TypeError('Feishu scopes must be a bounded array')
+  }
+  for (const scope of observation.scopeInspection.scopes) validateFeishuScope(scope)
+  validateFeishuResourceProjection(observation.resourceProbe)
+  const hasAttention = observation.scopeInspection.state === 'unavailable'
+    || observation.scopeInspection.scopes.some(scope => scope.state === 'missing')
+    || observation.resourceProbe.state === 'unavailable'
+  const expectedResult = observation.identity.state === 'failed'
+    ? 'failed'
+    : hasAttention ? 'attention' : 'healthy'
+  if (observation.result !== expectedResult) {
+    throw new TypeError('Feishu verification result does not match its evidence')
+  }
+}
+
+function validateFeishuActor(
+  actor: WorkbenchFeishuVerificationObservation['actor'] & object,
+  kind: FeishuIdentityKind,
+): void {
+  if (actor.realm !== FEISHU_REALM || actor.kind !== kind) {
+    throw new TypeError('Feishu actor route is inconsistent')
+  }
+  validateFeishuAppId(actor.appId, 'Feishu actor app id')
+  validateBoundedReference(actor.openId, 'Feishu actor open id')
+  if (actor.tenantKey !== null) validateBoundedReference(actor.tenantKey, 'Feishu actor tenant key')
+}
+
+function validateFeishuScope(scope: FeishuScopeObservation): void {
+  if (typeof scope.scope !== 'string' || !FEISHU_SCOPE_PATTERN.test(scope.scope)) {
+    throw new TypeError('Feishu scope name is invalid')
+  }
+  if (scope.tokenType !== 'tenant' && scope.tokenType !== 'user') {
+    throw new TypeError('Feishu scope token type is invalid')
+  }
+  if (scope.state !== 'configured' && scope.state !== 'verified'
+    && scope.state !== 'missing' && scope.state !== 'unknown') {
+    throw new TypeError('Feishu scope state is invalid')
+  }
+}
+
+function validateFeishuResourceProjection(probe: FeishuResourceProbeProjection): void {
+  if (probe.state === 'not-tested') return
+  if (probe.kind !== 'task-list') throw new TypeError('Feishu resource projection kind is invalid')
+  validateFeishuResourceId(probe.resourceId, 'Feishu resource projection id')
+  if (probe.state === 'accessible') return
+  if (probe.state !== 'unavailable') throw new TypeError('Feishu resource projection state is invalid')
+  safeFeishuIssue(probe.issue, 'Feishu resource issue')
+}
+
+function safeFeishuIssue(value: FeishuConnectionIssue, label: string): FeishuConnectionIssue {
+  if (!FEISHU_ISSUE_CODES.has(value.code) || !FEISHU_RECOVERY_CODES.has(value.recovery)) {
+    throw new TypeError(`${label} vocabulary is unsupported`)
+  }
+  if (!Array.isArray(value.missingScopes) || value.missingScopes.length > 20) {
+    throw new TypeError(`${label} missingScopes must be bounded`)
+  }
+  const missingScopes = value.missingScopes.map((scope) => {
+    if (typeof scope !== 'string' || !FEISHU_SCOPE_PATTERN.test(scope)) {
+      throw new TypeError(`${label} contains an invalid scope`)
+    }
+    return scope
+  })
+  if (new Set(missingScopes).size !== missingScopes.length) {
+    throw new TypeError(`${label} contains duplicate scopes`)
+  }
+  if (value.grantPlane !== null
+    && value.grantPlane !== 'application'
+    && value.grantPlane !== 'user-consent') {
+    throw new TypeError(`${label} grant plane is unsupported`)
+  }
+  if (value.retryAt !== null) canonicalInstant(value.retryAt, `${label} retryAt`)
+  return Object.freeze({
+    code: value.code,
+    recovery: value.recovery,
+    missingScopes: Object.freeze([...missingScopes]),
+    grantPlane: value.grantPlane,
+    retryAt: value.retryAt,
+  })
+}
+
+function decodeFeishuIssue(value: string): FeishuConnectionIssue {
+  const parsed = parseCanonicalJson(value, 'Feishu issue')
+  const record = exactStoredObject(parsed, 'Feishu issue', [
+    'code', 'recovery', 'missingScopes', 'grantPlane', 'retryAt',
+  ])
+  return safeFeishuIssue(record as unknown as FeishuConnectionIssue, 'Feishu issue')
+}
+
+function decodeFeishuScopes(value: string): readonly FeishuScopeObservation[] {
+  const parsed = parseCanonicalJson(value, 'Feishu scopes')
+  if (!Array.isArray(parsed) || parsed.length > 100) {
+    throw new Error('Workbench database contains invalid Feishu scopes')
+  }
+  return Object.freeze(parsed.map((candidate, index) => {
+    const record = exactStoredObject(candidate, `Feishu scope ${String(index)}`, [
+      'scope', 'tokenType', 'state',
+    ]) as unknown as FeishuScopeObservation
+    validateFeishuScope(record)
+    return Object.freeze({ ...record })
+  }))
+}
+
+function decodeFeishuResourceProbe(value: string): FeishuResourceProbeProjection {
+  const parsed = parseCanonicalJson(value, 'Feishu resource probe')
+  const basic = objectValue(parsed, 'Feishu resource probe')
+  let projection: FeishuResourceProbeProjection
+  if (basic.state === 'not-tested') {
+    assertExactStoredKeys(basic, 'Feishu resource probe', ['state'])
+    projection = Object.freeze({ state: 'not-tested' })
+  } else if (basic.state === 'accessible') {
+    assertExactStoredKeys(basic, 'Feishu resource probe', ['state', 'kind', 'resourceId'])
+    projection = Object.freeze({
+      state: 'accessible',
+      kind: basic.kind as 'task-list',
+      resourceId: basic.resourceId as string,
+    })
+  } else if (basic.state === 'unavailable') {
+    assertExactStoredKeys(basic, 'Feishu resource probe', [
+      'state', 'kind', 'resourceId', 'issue',
+    ])
+    const issueRecord = exactStoredObject(basic.issue, 'Feishu resource issue', [
+      'code', 'recovery', 'missingScopes', 'grantPlane', 'retryAt',
+    ])
+    projection = Object.freeze({
+      state: 'unavailable',
+      kind: basic.kind as 'task-list',
+      resourceId: basic.resourceId as string,
+      issue: safeFeishuIssue(
+        issueRecord as unknown as FeishuConnectionIssue,
+        'Feishu resource issue',
+      ),
+    })
+  } else {
+    throw new Error('Workbench database contains unsupported Feishu resource probe state')
+  }
+  validateFeishuResourceProjection(projection)
+  return projection
+}
+
+function decodeFeishuRequestedResourceProbe(
+  value: string,
+): WorkbenchFeishuVerificationMutation['resourceProbe'] {
+  const parsed = parseCanonicalJson(value, 'Feishu requested resource probe')
+  if (parsed === null) return null
+  const record = exactStoredObject(parsed, 'Feishu requested resource probe', [
+    'kind', 'resourceId',
+  ])
+  if (record.kind !== 'task-list' || typeof record.resourceId !== 'string') {
+    throw new Error('Workbench database contains an unsupported Feishu requested resource probe')
+  }
+  validateFeishuResourceId(record.resourceId, 'Feishu requested resource id')
+  return Object.freeze({ kind: 'task-list', resourceId: record.resourceId })
+}
+
+function parseCanonicalJson(value: string, label: string): unknown {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error(`Workbench database contains invalid ${label} JSON`)
+  }
+  if (canonicalizeJson(parsed) !== value) {
+    throw new Error(`Workbench database contains non-canonical ${label} JSON`)
+  }
+  return parsed
+}
+
+function decodeFeishuReceipt(
+  value: string,
+  stored: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): { readonly value: Record<string, unknown>; readonly receipt: {
+  readonly commandId: string
+  readonly auditEventId: string
+  readonly outboxId: string
+} } {
+  const root = exactStoredObject(parseCanonicalJson(value, 'Feishu receipt'), 'Feishu receipt', [
+    'ok', 'value', 'receipt',
+  ])
+  if (root.ok !== true) throw new Error('Workbench Feishu receipt is not committed')
+  const result = objectValue(root.value, 'Feishu receipt value')
+  const receiptRecord = exactStoredObject(root.receipt, 'Feishu receipt identities', [
+    'commandId', 'auditEventId', 'outboxId',
+  ])
+  const receipt = Object.freeze({
+    commandId: boundedReference(receiptRecord.commandId, 'Feishu receipt command id'),
+    auditEventId: boundedReference(receiptRecord.auditEventId, 'Feishu receipt audit id'),
+    outboxId: boundedReference(receiptRecord.outboxId, 'Feishu receipt Outbox id'),
+  })
+  if (receipt.commandId !== stored.command_id
+    || receipt.auditEventId !== stored.audit_event_id
+    || receipt.outboxId !== stored.outbox_id) {
+    throw new Error('Workbench Feishu receipt identities do not match durable references')
+  }
+  return Object.freeze({ value: result, receipt })
+}
+
+function decodeFeishuRouteResult(
+  value: string,
+  stored: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): Extract<ConfigureFeishuIdentityRouteResult, { readonly ok: true }> {
+  const decoded = decodeFeishuReceipt(value, stored)
+  assertExactStoredKeys(decoded.value, 'Feishu route acknowledgement', [
+    'connectionId', 'connectionRevision', 'kind', 'routeGeneration', 'state',
+  ])
+  const kind = feishuIdentityKind(decoded.value.kind)
+  const state = decoded.value.state === 'configured'
+    ? 'configured' as const
+    : decoded.value.state === 'disabled' ? 'disabled' as const : null
+  if (decoded.value.connectionId !== FEISHU_CONNECTION_ID_VALUE || state === null) {
+    throw new Error('Workbench Feishu route receipt contains unsupported values')
+  }
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      connectionId: FEISHU_CONNECTION_ID_VALUE,
+      connectionRevision: positiveInteger(
+        decoded.value.connectionRevision,
+        'Feishu receipt connection revision',
+      ),
+      kind,
+      routeGeneration: positiveInteger(
+        decoded.value.routeGeneration,
+        'Feishu receipt route generation',
+      ),
+      state,
+    }),
+    receipt: decoded.receipt,
+  })
+}
+
+function decodeFeishuVerificationResult(
+  value: string,
+  stored: Pick<ReceiptRow, 'command_id' | 'audit_event_id' | 'outbox_id'>,
+): Extract<VerifyFeishuIdentityRouteResult, { readonly ok: true }> {
+  const decoded = decodeFeishuReceipt(value, stored)
+  assertExactStoredKeys(decoded.value, 'Feishu verification acknowledgement', [
+    'connectionId', 'connectionRevision', 'kind', 'routeGeneration',
+    'verificationSequence', 'result',
+  ])
+  if (decoded.value.connectionId !== FEISHU_CONNECTION_ID_VALUE) {
+    throw new Error('Workbench Feishu verification receipt has an invalid connection id')
+  }
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      connectionId: FEISHU_CONNECTION_ID_VALUE,
+      connectionRevision: positiveInteger(
+        decoded.value.connectionRevision,
+        'Feishu receipt connection revision',
+      ),
+      kind: feishuIdentityKind(decoded.value.kind),
+      routeGeneration: positiveInteger(
+        decoded.value.routeGeneration,
+        'Feishu receipt route generation',
+      ),
+      verificationSequence: positiveInteger(
+        decoded.value.verificationSequence,
+        'Feishu receipt verification sequence',
+      ),
+      result: feishuVerificationResult(decoded.value.result),
+    }),
+    receipt: decoded.receipt,
+  })
+}
+
+function feishuIdentityKind(value: unknown): FeishuIdentityKind {
+  if (value !== 'bot' && value !== 'user') {
+    throw new Error('Workbench database contains an invalid Feishu route kind')
+  }
+  return value
+}
+
+function feishuVerificationResult(
+  value: unknown,
+): WorkbenchFeishuVerificationObservation['result'] {
+  if (value !== 'healthy' && value !== 'attention' && value !== 'failed') {
+    throw new Error('Workbench database contains an invalid Feishu verification result')
+  }
+  return value
+}
+
+function validateCredentialRef(value: string, label: string): void {
+  if (!FEISHU_CREDENTIAL_REF_PATTERN.test(value)
+    || value.length > MAX_FEISHU_CREDENTIAL_REF_LENGTH) {
+    throw new TypeError(`${label} must be a bounded DSH CredentialRef`)
+  }
+}
+
+function validateFeishuAppId(value: string, label: string): void {
+  validateSafeText(value, label, MAX_FEISHU_APP_ID_LENGTH)
+  if (!SAFE_REFERENCE.test(value)) throw new TypeError(`${label} must be wire-safe`)
+}
+
+function validateFeishuResourceId(value: string, label: string): void {
+  validateSafeText(value, label, MAX_FEISHU_RESOURCE_ID_LENGTH)
+  if (!SAFE_REFERENCE.test(value)) throw new TypeError(`${label} must be wire-safe`)
+}
+
+function validateSafeText(value: string, label: string, maximum: number): void {
+  if (typeof value !== 'string' || value.length < 1 || value.length > maximum
+    || !value.isWellFormed() || ASCII_CONTROL.test(value)) {
+    throw new TypeError(`${label} is not bounded safe text`)
+  }
+}
+
+function nonNegativeStoredRevision(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${label} is invalid`)
+}
+
+function nullablePositiveStoredRevision(value: number | null, label: string): void {
+  if (value !== null && (!Number.isSafeInteger(value) || value < 1)) {
+    throw new TypeError(`${label} is invalid`)
+  }
+}
+
+function feishuIdempotencyConflict(): ConfigureFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict',
+      message: 'Workbench idempotency key was already used for different intent',
+    }),
+  })
+}
+
+function feishuVerificationIdempotencyConflict(): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict',
+      message: 'Workbench idempotency key was already used for different intent',
+    }),
+  })
+}
+
+function feishuConnectionRevisionConflict(
+  expected: number,
+  current: number,
+): ConfigureFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'connection-revision-conflict',
+      message: `Workbench Feishu connection revision changed (expected ${String(expected)}, current ${String(current)})`,
+      expectedConnectionRevision: expected,
+      currentConnectionRevision: current,
+    }),
+  })
+}
+
+function feishuVerificationConnectionRevisionConflict(
+  expected: number,
+  current: number,
+): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'connection-revision-conflict',
+      message: `Workbench Feishu connection revision changed (expected ${String(expected)}, current ${String(current)})`,
+      expectedConnectionRevision: expected,
+      currentConnectionRevision: current,
+    }),
+  })
+}
+
+function feishuRouteGenerationConflict(
+  kind: FeishuIdentityKind,
+  expected: number | null,
+  current: number | null,
+): ConfigureFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'route-generation-conflict',
+      message: 'Workbench Feishu route generation changed',
+      kind,
+      expectedRouteGeneration: expected,
+      currentRouteGeneration: current,
+    }),
+  })
+}
+
+function feishuVerificationRouteGenerationConflict(
+  kind: FeishuIdentityKind,
+  expected: number,
+  current: number,
+): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'route-generation-conflict',
+      message: 'Workbench Feishu route generation changed',
+      kind,
+      expectedRouteGeneration: expected,
+      currentRouteGeneration: current,
+    }),
+  })
+}
+
+function feishuRouteStateError(
+  code: 'route-unconfigured' | 'no-op-route-configuration',
+  kind: FeishuIdentityKind,
+): ConfigureFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code,
+      message: code === 'route-unconfigured'
+        ? 'Workbench Feishu route is not configured'
+        : 'Workbench Feishu route configuration would not change',
+      kind,
+    }),
+  })
+}
+
+function feishuVerificationRouteStateError(
+  code: 'route-unconfigured' | 'route-disabled',
+  kind: FeishuIdentityKind,
+): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code,
+      message: code === 'route-disabled'
+        ? 'Workbench Feishu route is disabled'
+        : 'Workbench Feishu route is not configured',
+      kind,
+    }),
+  })
 }
 
 /** Sweep startup leases and validate all related ledger rows under one writer snapshot. */
@@ -2688,6 +4383,148 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     `)
     return
   }
+  if (targetVersion === 6) {
+    database.exec(`
+      CREATE TABLE workbench_feishu_connection (
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        connection_id TEXT NOT NULL CHECK (connection_id = '${FEISHU_CONNECTION_ID_VALUE}'),
+        realm TEXT NOT NULL CHECK (realm = '${FEISHU_REALM}'),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        PRIMARY KEY (organization_id, team_id),
+        UNIQUE (organization_id, team_id, connection_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_route_version (
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        kind TEXT NOT NULL CHECK (kind IN ('bot', 'user')),
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        identity_epoch INTEGER NOT NULL CHECK (identity_epoch > 0),
+        state TEXT NOT NULL CHECK (state IN ('configured', 'disabled')),
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND ${MAX_FEISHU_APP_ID_LENGTH}),
+        credential_ref TEXT NOT NULL CHECK (
+          length(credential_ref) BETWEEN 1 AND ${MAX_FEISHU_CREDENTIAL_REF_LENGTH}
+        ),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        PRIMARY KEY (organization_id, team_id, kind, generation),
+        UNIQUE (organization_id, team_id, kind, generation, app_id),
+        UNIQUE (organization_id, team_id, kind, generation, identity_epoch),
+        UNIQUE (organization_id, team_id, kind, generation, identity_epoch, app_id),
+        FOREIGN KEY (organization_id, team_id)
+          REFERENCES workbench_feishu_connection (organization_id, team_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_identity_binding (
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        kind TEXT NOT NULL CHECK (kind IN ('bot', 'user')),
+        identity_epoch INTEGER NOT NULL CHECK (identity_epoch > 0),
+        route_generation INTEGER NOT NULL CHECK (route_generation > 0),
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND ${MAX_FEISHU_APP_ID_LENGTH}),
+        open_id TEXT NOT NULL CHECK (length(open_id) BETWEEN 1 AND ${MAX_FEISHU_OPEN_ID_LENGTH}),
+        tenant_key TEXT CHECK (tenant_key IS NULL OR length(tenant_key) BETWEEN 1 AND 128),
+        verification_id TEXT NOT NULL UNIQUE
+          REFERENCES workbench_feishu_verification (id) DEFERRABLE INITIALLY DEFERRED,
+        bound_at TEXT NOT NULL CHECK (length(bound_at) > 0),
+        PRIMARY KEY (organization_id, team_id, kind, identity_epoch),
+        FOREIGN KEY (
+          organization_id, team_id, kind, route_generation, identity_epoch, app_id
+        )
+          REFERENCES workbench_feishu_route_version (
+            organization_id, team_id, kind, generation, identity_epoch, app_id
+          )
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_verification (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        route_sequence INTEGER NOT NULL CHECK (route_sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        kind TEXT NOT NULL CHECK (kind IN ('bot', 'user')),
+        route_generation INTEGER NOT NULL CHECK (route_generation > 0),
+        identity_epoch INTEGER NOT NULL CHECK (identity_epoch > 0),
+        connection_revision INTEGER NOT NULL CHECK (connection_revision > 0),
+        result TEXT NOT NULL CHECK (result IN ('healthy', 'attention', 'failed')),
+        identity_state TEXT NOT NULL CHECK (identity_state IN ('verified', 'failed')),
+        identity_issue_json TEXT,
+        actor_app_id TEXT CHECK (
+          actor_app_id IS NULL OR length(actor_app_id) BETWEEN 1 AND ${MAX_FEISHU_APP_ID_LENGTH}
+        ),
+        actor_open_id TEXT CHECK (
+          actor_open_id IS NULL OR length(actor_open_id) BETWEEN 1 AND ${MAX_FEISHU_OPEN_ID_LENGTH}
+        ),
+        actor_tenant_key TEXT CHECK (
+          actor_tenant_key IS NULL OR length(actor_tenant_key) BETWEEN 1 AND 128
+        ),
+        display_label TEXT CHECK (
+          display_label IS NULL OR length(display_label) BETWEEN 1 AND ${MAX_FEISHU_DISPLAY_LABEL_LENGTH}
+        ),
+        scope_state TEXT NOT NULL CHECK (scope_state IN ('observed', 'unavailable', 'not-inspected')),
+        scopes_json TEXT NOT NULL CHECK (length(scopes_json) > 0),
+        scope_issue_json TEXT,
+        requested_resource_probe_json TEXT NOT NULL CHECK (
+          length(requested_resource_probe_json) > 0
+        ),
+        resource_probe_json TEXT NOT NULL CHECK (length(resource_probe_json) > 0),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        checked_at TEXT NOT NULL CHECK (length(checked_at) > 0),
+        CHECK (
+          (identity_state = 'failed' AND actor_app_id IS NULL
+            AND actor_open_id IS NULL AND actor_tenant_key IS NULL)
+          OR (identity_state = 'verified' AND actor_app_id IS NOT NULL AND actor_open_id IS NOT NULL)
+        ),
+        UNIQUE (organization_id, team_id, kind, route_generation, route_sequence),
+        UNIQUE (organization_id, team_id, connection_revision),
+        FOREIGN KEY (organization_id, team_id, kind, route_generation, identity_epoch)
+          REFERENCES workbench_feishu_route_version (
+            organization_id, team_id, kind, generation, identity_epoch
+          )
+      ) STRICT;
+
+      CREATE INDEX workbench_feishu_route_current
+        ON workbench_feishu_route_version (organization_id, team_id, kind, generation DESC);
+      CREATE INDEX workbench_feishu_verification_current
+        ON workbench_feishu_verification (
+          organization_id, team_id, kind, route_generation, route_sequence DESC
+        );
+      CREATE INDEX workbench_feishu_verification_identity_epoch
+        ON workbench_feishu_verification (
+          organization_id, team_id, kind, identity_epoch, sequence
+        );
+
+      CREATE TRIGGER workbench_feishu_connection_scope_no_update BEFORE UPDATE OF
+        organization_id, team_id, connection_id, realm ON workbench_feishu_connection
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu connection scope is immutable'); END;
+      CREATE TRIGGER workbench_feishu_connection_no_delete
+        BEFORE DELETE ON workbench_feishu_connection
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu connections cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_route_no_update
+        BEFORE UPDATE ON workbench_feishu_route_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu route versions are append-only'); END;
+      CREATE TRIGGER workbench_feishu_route_no_delete
+        BEFORE DELETE ON workbench_feishu_route_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu route versions cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_binding_no_update
+        BEFORE UPDATE ON workbench_feishu_identity_binding
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu identity bindings are immutable'); END;
+      CREATE TRIGGER workbench_feishu_binding_no_delete
+        BEFORE DELETE ON workbench_feishu_identity_binding
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu identity bindings cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_verification_no_update
+        BEFORE UPDATE ON workbench_feishu_verification
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu verifications are append-only'); END;
+      CREATE TRIGGER workbench_feishu_verification_no_delete
+        BEFORE DELETE ON workbench_feishu_verification
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu verifications cannot be deleted'); END
+    `)
+    return
+  }
   throw new Error(`missing Workbench migration ${targetVersion}`)
 }
 
@@ -2746,6 +4583,26 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare(`
     SELECT id, suggested_change_id, suggested_change_revision, mode, command_id
     FROM workbench_suggested_change_decision LIMIT 1
+  `)
+  database.prepare(`
+    SELECT organization_id, team_id, connection_id, realm, revision, updated_at
+    FROM workbench_feishu_connection LIMIT 1
+  `)
+  database.prepare(`
+    SELECT organization_id, team_id, kind, generation, identity_epoch, state, app_id,
+      credential_ref, command_id, created_at
+    FROM workbench_feishu_route_version LIMIT 1
+  `)
+  database.prepare(`
+    SELECT organization_id, team_id, kind, identity_epoch, route_generation,
+      app_id, open_id, tenant_key, verification_id, bound_at
+    FROM workbench_feishu_identity_binding LIMIT 1
+  `)
+  database.prepare(`
+    SELECT sequence, route_sequence, id, organization_id, team_id, kind,
+      route_generation, identity_epoch, connection_revision, result,
+      requested_resource_probe_json, checked_at
+    FROM workbench_feishu_verification LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
@@ -5250,6 +7107,35 @@ function auditEventFromRow(row: AuditRow): AuditEvent {
       summary: { code: PROJECT_RESPONSIBILITY_SUMMARY, changedFields: Object.freeze(expectedFields) },
     }
   }
+  const feishuVocabulary = storedFeishuVocabulary(row.command_type, row.summary_code)
+  if (feishuVocabulary !== null) {
+    if (row.action !== feishuVocabulary.auditAction
+      || row.reason_code !== feishuVocabulary.reason
+      || row.object_type !== FEISHU_CONNECTION_OBJECT_TYPE
+      || row.object_id !== FEISHU_CONNECTION_ID_VALUE
+      || row.project_id !== null
+      || row.summary_code !== feishuVocabulary.summaryCode
+      || changedFields.length !== feishuVocabulary.changedFields.length
+      || changedFields.some((field, index) => field !== feishuVocabulary.changedFields[index])) {
+      throw new Error('Workbench database contains unsupported Feishu audit fields')
+    }
+    return {
+      ...common,
+      action: feishuVocabulary.auditAction,
+      scope: { organizationId, teamId, projectId: null },
+      reason: { code: feishuVocabulary.reason },
+      object: {
+        type: FEISHU_CONNECTION_OBJECT_TYPE,
+        id: FEISHU_CONNECTION_ID_VALUE,
+        version: objectVersion,
+      },
+      command: { id: commandId, type: feishuVocabulary.commandType },
+      summary: {
+        code: feishuVocabulary.summaryCode,
+        changedFields: Object.freeze([...feishuVocabulary.changedFields]),
+      },
+    }
+  }
   const suggestedVocabulary = storedSuggestedChangeVocabulary(row.command_type)
   if (suggestedVocabulary !== null) {
     const projectId = nullableString(row.project_id, 'Audit Project id')
@@ -5573,6 +7459,7 @@ function assertValidLedger(database: DatabaseSync): void {
   assertValidProjectDomain(database)
   assertValidAudit(database)
   assertValidSuggestedChanges(database)
+  assertValidFeishuConnections(database)
   const counts = database.prepare(`
     SELECT
       (SELECT COUNT(*) FROM workbench_audit_event) AS audit_count,
@@ -5626,6 +7513,179 @@ function assertValidLedger(database: DatabaseSync): void {
   for (const row of rows) assertValidCommandReceipt(database, row)
 }
 
+function assertValidFeishuConnections(database: DatabaseSync): void {
+  const connections = database.prepare(`
+    SELECT organization_id, team_id, connection_id, realm, revision, updated_at
+    FROM workbench_feishu_connection ORDER BY organization_id, team_id
+  `).all() as unknown as FeishuConnectionRow[]
+  for (const connection of connections) {
+    readFeishuConnectionRow(database, connection.organization_id, connection.team_id)
+    const audits = database.prepare(`
+      SELECT object_version, occurred_at FROM workbench_audit_event
+      WHERE organization_id = ? AND team_id = ? AND object_type = ? AND object_id = ?
+        AND command_type IN (?, ?, ?, ?)
+      ORDER BY object_version
+    `).all(
+      connection.organization_id,
+      connection.team_id,
+      FEISHU_CONNECTION_OBJECT_TYPE,
+      FEISHU_CONNECTION_ID_VALUE,
+      FEISHU_ROUTE_SET_COMMAND_TYPE,
+      FEISHU_ROUTE_RESET_COMMAND_TYPE,
+      FEISHU_ROUTE_DISABLE_COMMAND_TYPE,
+      FEISHU_VERIFY_COMMAND_TYPE,
+    ) as unknown as Array<{ readonly object_version: number; readonly occurred_at: string }>
+    if (audits.length !== connection.revision) {
+      throw new Error('Workbench Feishu connection revision does not match its audit history')
+    }
+    for (let index = 0; index < audits.length; index += 1) {
+      if (audits[index]?.object_version !== index + 1) {
+        throw new Error('Workbench Feishu connection audit revisions are not contiguous')
+      }
+    }
+    if (audits.at(-1)?.occurred_at !== connection.updated_at) {
+      throw new Error('Workbench Feishu connection head does not match its latest command')
+    }
+    for (const kind of ['bot', 'user'] as const) {
+      const routes = database.prepare(`
+        SELECT organization_id, team_id, kind, generation, identity_epoch, state, app_id,
+          credential_ref, command_id, created_at
+        FROM workbench_feishu_route_version
+        WHERE organization_id = ? AND team_id = ? AND kind = ? ORDER BY generation
+      `).all(
+        connection.organization_id,
+        connection.team_id,
+        kind,
+      ) as unknown as FeishuRouteRow[]
+      for (let index = 0; index < routes.length; index += 1) {
+        const route = routes[index]
+        if (route === undefined || route.generation !== index + 1) {
+          throw new Error('Workbench Feishu route generations are not contiguous')
+        }
+        validateFeishuRouteRow(
+          route,
+          connection.organization_id,
+          connection.team_id,
+          kind,
+        )
+        const routeAudit = database.prepare(`
+          SELECT command_type FROM workbench_audit_event WHERE command_id = ?
+        `).get(route.command_id) as { readonly command_type: string } | undefined
+        const previousRoute = routes[index - 1]
+        const isInitialSet = index === 0
+          && routeAudit?.command_type === FEISHU_ROUTE_SET_COMMAND_TYPE
+          && route.identity_epoch === 1
+        const isReset = index > 0
+          && routeAudit?.command_type === FEISHU_ROUTE_RESET_COMMAND_TYPE
+          && previousRoute !== undefined
+          && previousRoute.state === 'configured'
+          && route.state === 'configured'
+          && route.app_id === previousRoute.app_id
+          && route.credential_ref === previousRoute.credential_ref
+          && route.identity_epoch === previousRoute.identity_epoch + 1
+        const preservesIdentity = index > 0
+          && (routeAudit?.command_type === FEISHU_ROUTE_SET_COMMAND_TYPE
+            || routeAudit?.command_type === FEISHU_ROUTE_DISABLE_COMMAND_TYPE)
+          && previousRoute !== undefined
+          && (routeAudit.command_type !== FEISHU_ROUTE_DISABLE_COMMAND_TYPE
+            || (previousRoute.state === 'configured'
+              && route.state === 'disabled'
+              && route.app_id === previousRoute.app_id
+              && route.credential_ref === previousRoute.credential_ref))
+          && (routeAudit.command_type !== FEISHU_ROUTE_SET_COMMAND_TYPE
+            || route.state === 'configured')
+          && route.identity_epoch === previousRoute.identity_epoch
+        if (!isInitialSet && !isReset && !preservesIdentity) {
+          throw new Error('Workbench Feishu route changed identity continuity without reset')
+        }
+        const verifications = database.prepare(`
+          SELECT sequence, route_sequence, id, organization_id, team_id, kind,
+            route_generation, identity_epoch, connection_revision, result, identity_state,
+            identity_issue_json, actor_app_id, actor_open_id, actor_tenant_key,
+            display_label, scope_state, scopes_json, scope_issue_json,
+            requested_resource_probe_json, resource_probe_json, command_id, checked_at
+          FROM workbench_feishu_verification
+          WHERE organization_id = ? AND team_id = ? AND kind = ? AND route_generation = ?
+          ORDER BY route_sequence
+        `).all(
+          connection.organization_id,
+          connection.team_id,
+          kind,
+          route.generation,
+        ) as unknown as FeishuVerificationRow[]
+        const binding = readFeishuIdentityBinding(
+          database,
+          connection.organization_id,
+          connection.team_id,
+          kind,
+          route.identity_epoch,
+        )
+        for (let verificationIndex = 0;
+          verificationIndex < verifications.length;
+          verificationIndex += 1) {
+          const verification = verifications[verificationIndex]
+          if (verification === undefined || verification.route_sequence !== verificationIndex + 1
+            || verification.route_generation !== route.generation
+            || verification.identity_epoch !== route.identity_epoch
+            || verification.organization_id !== connection.organization_id
+            || verification.team_id !== connection.team_id
+            || verification.kind !== kind) {
+            throw new Error('Workbench Feishu verification sequence escaped its route')
+          }
+          feishuVerificationProjectionFromRow(verification)
+          if (verification.identity_state === 'verified') {
+            if (binding === null
+              || binding.app_id !== verification.actor_app_id
+              || binding.open_id !== verification.actor_open_id
+              || binding.tenant_key !== verification.actor_tenant_key) {
+              throw new Error('Workbench Feishu verified actor does not match its binding')
+            }
+          }
+        }
+      }
+      const identityEpochs = [...new Set(routes.map(route => route.identity_epoch))]
+      for (const identityEpoch of identityEpochs) {
+        const binding = readFeishuIdentityBinding(
+          database,
+          connection.organization_id,
+          connection.team_id,
+          kind,
+          identityEpoch,
+        )
+        if (binding === null) continue
+        const source = readFeishuBindingVerification(database, binding)
+        const firstVerified = database.prepare(`
+          SELECT id FROM workbench_feishu_verification
+          WHERE organization_id = ? AND team_id = ? AND kind = ?
+            AND identity_epoch = ? AND identity_state = 'verified'
+          ORDER BY sequence LIMIT 1
+        `).get(
+          connection.organization_id,
+          connection.team_id,
+          kind,
+          identityEpoch,
+        ) as { readonly id: string } | undefined
+        if (firstVerified?.id !== binding.verification_id
+          || source.checked_at !== binding.bound_at
+          || source.route_generation !== binding.route_generation
+          || source.actor_app_id !== binding.app_id
+          || source.actor_open_id !== binding.open_id
+          || source.actor_tenant_key !== binding.tenant_key) {
+          throw new Error('Workbench Feishu identity binding lacks its first verification fact')
+        }
+      }
+    }
+  }
+  const orphanRoutes = integerField(database.prepare(`
+    SELECT COUNT(*) AS count FROM workbench_feishu_route_version AS route
+    LEFT JOIN workbench_feishu_connection AS connection
+      ON connection.organization_id = route.organization_id
+      AND connection.team_id = route.team_id
+    WHERE connection.organization_id IS NULL
+  `).get(), 'count')
+  if (orphanRoutes !== 0) throw new Error('Workbench Feishu route escaped its connection')
+}
+
 function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrityRow): void {
   positiveInteger(row.audit_sequence, 'Audit sequence')
   if (!SHA256_HEX.test(row.request_hash)
@@ -5660,6 +7720,10 @@ function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrity
   }
   if (row.command_type === PROJECT_RESPONSIBILITY_COMMAND_TYPE) {
     assertValidProjectResponsibilityReceipt(database, row)
+    return
+  }
+  if (storedFeishuVocabulary(row.command_type, row.audit_summary_code) !== null) {
+    assertValidFeishuReceipt(database, row)
     return
   }
   if (storedSuggestedChangeVocabulary(row.command_type) !== null) {
@@ -5990,6 +8054,137 @@ function assertValidProjectResponsibilityReceipt(
   }
 }
 
+function assertValidFeishuReceipt(
+  database: DatabaseSync,
+  row: ReceiptIntegrityRow,
+): void {
+  const vocabulary = storedFeishuVocabulary(row.command_type, row.audit_summary_code)
+  if (vocabulary === null
+    || row.audit_action !== vocabulary.auditAction
+    || row.audit_reason_code !== vocabulary.reason
+    || row.audit_object_type !== FEISHU_CONNECTION_OBJECT_TYPE
+    || row.audit_object_id !== FEISHU_CONNECTION_ID_VALUE
+    || row.audit_project_id !== null
+    || row.outbox_topic !== vocabulary.outboxTopic
+    || row.outbox_project_id !== null
+    || row.outbox_object_type !== FEISHU_CONNECTION_OBJECT_TYPE
+    || row.outbox_object_id !== FEISHU_CONNECTION_ID_VALUE) {
+    throw new Error('Workbench Feishu receipt has mismatched audit or Outbox vocabulary')
+  }
+  let routeKind: FeishuIdentityKind
+  let routeGeneration: number
+  if (row.command_type === FEISHU_VERIFY_COMMAND_TYPE) {
+    const verification = database.prepare(`
+      SELECT sequence, route_sequence, id, organization_id, team_id, kind,
+        route_generation, identity_epoch, connection_revision, result, identity_state,
+        identity_issue_json, actor_app_id, actor_open_id, actor_tenant_key,
+        display_label, scope_state, scopes_json, scope_issue_json,
+        requested_resource_probe_json, resource_probe_json, command_id, checked_at
+      FROM workbench_feishu_verification WHERE command_id = ?
+    `).get(row.command_id) as FeishuVerificationRow | undefined
+    if (verification === undefined) {
+      throw new Error('Workbench Feishu verification receipt lost its observation')
+    }
+    const projection = feishuVerificationProjectionFromRow(verification)
+    const decoded = decodeFeishuVerificationResult(row.result_json, row)
+    routeKind = feishuIdentityKind(verification.kind)
+    routeGeneration = verification.route_generation
+    if (verification.organization_id !== row.audit_organization_id
+      || verification.team_id !== row.audit_team_id
+      || verification.command_id !== row.command_id
+      || verification.connection_revision !== row.audit_object_version
+      || verification.checked_at !== row.audit_occurred_at
+      || decoded.value.connectionRevision !== verification.connection_revision
+      || decoded.value.kind !== routeKind
+      || decoded.value.routeGeneration !== routeGeneration
+      || decoded.value.verificationSequence !== verification.route_sequence
+      || decoded.value.result !== projection.result
+      || vocabulary.summaryCode !== feishuVerificationSummary(projection.result)) {
+      throw new Error('Workbench Feishu verification receipt does not match its observation')
+    }
+    const resource = decodeFeishuRequestedResourceProbe(
+      verification.requested_resource_probe_json,
+    )
+    const expectedRequestHash = digest(canonicalizeJson({
+      commandType: FEISHU_VERIFY_COMMAND_TYPE,
+      target: FEISHU_CONNECTION_OBJECT_TYPE,
+      scope: {
+        organizationId: row.audit_organization_id,
+        teamId: row.audit_team_id,
+      },
+      kind: routeKind,
+      expectedConnectionRevision: verification.connection_revision - 1,
+      expectedRouteGeneration: routeGeneration,
+      resourceProbe: resource,
+      reason: FEISHU_VERIFY_REASON,
+      causationId: row.audit_causation_id,
+    }))
+    if (row.request_hash !== expectedRequestHash) {
+      throw new Error('Workbench Feishu verification receipt has an invalid request hash')
+    }
+  } else {
+    const route = database.prepare(`
+      SELECT organization_id, team_id, kind, generation, identity_epoch, state, app_id,
+        credential_ref, command_id, created_at
+      FROM workbench_feishu_route_version WHERE command_id = ?
+    `).get(row.command_id) as FeishuRouteRow | undefined
+    if (route === undefined) throw new Error('Workbench Feishu route receipt lost its version')
+    routeKind = feishuIdentityKind(route.kind)
+    routeGeneration = route.generation
+    validateFeishuRouteRow(
+      route,
+      row.audit_organization_id,
+      row.audit_team_id,
+      routeKind,
+    )
+    const decoded = decodeFeishuRouteResult(row.result_json, row)
+    const mode = row.command_type === FEISHU_ROUTE_SET_COMMAND_TYPE
+      ? 'set' as const
+      : row.command_type === FEISHU_ROUTE_RESET_COMMAND_TYPE
+        ? 'reset' as const
+        : 'disable' as const
+    if (decoded.value.connectionRevision !== row.audit_object_version
+      || decoded.value.kind !== routeKind
+      || decoded.value.routeGeneration !== routeGeneration
+      || decoded.value.state !== route.state
+      || route.command_id !== row.command_id
+      || route.created_at !== row.audit_occurred_at) {
+      throw new Error('Workbench Feishu route receipt does not match its version')
+    }
+    const expectedRequestHash = digest(canonicalizeJson({
+      commandType: row.command_type,
+      target: FEISHU_CONNECTION_OBJECT_TYPE,
+      scope: {
+        organizationId: row.audit_organization_id,
+        teamId: row.audit_team_id,
+      },
+      kind: routeKind,
+      mode,
+      ...(mode === 'set' ? { appId: route.app_id, credentialRef: route.credential_ref } : {}),
+      expectedConnectionRevision: decoded.value.connectionRevision - 1,
+      expectedRouteGeneration: routeGeneration === 1 ? null : routeGeneration - 1,
+      reason: vocabulary.reason,
+      causationId: row.audit_causation_id,
+    }))
+    if (row.request_hash !== expectedRequestHash) {
+      throw new Error('Workbench Feishu route receipt has an invalid request hash')
+    }
+  }
+  const expectedPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    requestHash: row.request_hash,
+    connectionRevision: row.audit_object_version,
+    routeKind,
+    routeGeneration,
+    causationId: row.audit_causation_id,
+  })
+  if (row.outbox_payload_json !== expectedPayload) {
+    throw new Error('Workbench Feishu receipt has an invalid redacted Outbox intent')
+  }
+}
+
 function assertValidSuggestedChangeReceipt(
   database: DatabaseSync,
   row: ReceiptIntegrityRow,
@@ -6303,6 +8498,23 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
       objectType: PROJECT_RESPONSIBILITY_OBJECT_TYPE,
     }
   } else {
+    const feishuVocabulary = storedFeishuVocabulary(row.command_type, row.summary_code)
+    if (feishuVocabulary !== null) {
+      if (row.action !== feishuVocabulary.auditAction
+        || row.reason_code !== feishuVocabulary.reason
+        || row.object_type !== FEISHU_CONNECTION_OBJECT_TYPE
+        || row.object_id !== FEISHU_CONNECTION_ID_VALUE
+        || row.summary_code !== feishuVocabulary.summaryCode
+        || projectId !== null) {
+        throw new Error('Workbench database contains an unsupported Feishu Activity row')
+      }
+      vocabulary = {
+        action: feishuVocabulary.auditAction,
+        reason: feishuVocabulary.reason,
+        summaryCode: feishuVocabulary.summaryCode,
+        objectType: FEISHU_CONNECTION_OBJECT_TYPE,
+      }
+    } else {
     const suggestedVocabulary = storedSuggestedChangeVocabulary(row.command_type)
     if (suggestedVocabulary === null
       || row.action !== suggestedVocabulary.auditAction
@@ -6317,6 +8529,7 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
       reason: suggestedVocabulary.reason,
       summaryCode: suggestedVocabulary.summaryCode,
       objectType: SUGGESTED_CHANGE_OBJECT_TYPE,
+    }
     }
   }
   return Object.freeze({
@@ -6915,6 +9128,66 @@ function suggestedChangeDecisionVocabulary(
       reason: SUGGESTED_CHANGE_DEFER_REASON,
       summaryCode: SUGGESTED_CHANGE_DEFER_SUMMARY,
     }
+  }
+}
+
+interface StoredFeishuVocabulary {
+  readonly commandType: AuditEvent['command']['type']
+  readonly auditAction: WorkbenchAuditAction
+  readonly reason: WorkbenchCommandMetadata['reason']
+  readonly summaryCode: WorkbenchActivitySummaryCode
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+}
+
+function storedFeishuVocabulary(
+  commandType: string,
+  summaryCode: string,
+): StoredFeishuVocabulary | null {
+  if (commandType === FEISHU_ROUTE_SET_COMMAND_TYPE) {
+    return {
+      commandType: FEISHU_ROUTE_SET_COMMAND_TYPE,
+      auditAction: FEISHU_ROUTE_SET_AUDIT_ACTION,
+      reason: FEISHU_ROUTE_SET_REASON,
+      summaryCode: FEISHU_ROUTE_SET_SUMMARY,
+      changedFields: ['route', 'credentialRef'],
+      outboxTopic: FEISHU_ROUTE_OUTBOX_TOPIC,
+    }
+  }
+  if (commandType === FEISHU_ROUTE_RESET_COMMAND_TYPE) {
+    return {
+      commandType: FEISHU_ROUTE_RESET_COMMAND_TYPE,
+      auditAction: FEISHU_ROUTE_RESET_AUDIT_ACTION,
+      reason: FEISHU_ROUTE_RESET_REASON,
+      summaryCode: FEISHU_ROUTE_RESET_SUMMARY,
+      changedFields: ['route', 'identityBinding'],
+      outboxTopic: FEISHU_ROUTE_OUTBOX_TOPIC,
+    }
+  }
+  if (commandType === FEISHU_ROUTE_DISABLE_COMMAND_TYPE) {
+    return {
+      commandType: FEISHU_ROUTE_DISABLE_COMMAND_TYPE,
+      auditAction: FEISHU_ROUTE_DISABLE_AUDIT_ACTION,
+      reason: FEISHU_ROUTE_DISABLE_REASON,
+      summaryCode: FEISHU_ROUTE_DISABLE_SUMMARY,
+      changedFields: ['route', 'state'],
+      outboxTopic: FEISHU_ROUTE_OUTBOX_TOPIC,
+    }
+  }
+  if (commandType !== FEISHU_VERIFY_COMMAND_TYPE) return null
+  const verificationSummary = summaryCode === FEISHU_VERIFY_HEALTHY_SUMMARY
+    || summaryCode === FEISHU_VERIFY_ATTENTION_SUMMARY
+    || summaryCode === FEISHU_VERIFY_FAILED_SUMMARY
+    ? summaryCode
+    : null
+  if (verificationSummary === null) return null
+  return {
+    commandType: FEISHU_VERIFY_COMMAND_TYPE,
+    auditAction: FEISHU_VERIFY_AUDIT_ACTION,
+    reason: FEISHU_VERIFY_REASON,
+    summaryCode: verificationSummary,
+    changedFields: ['verification'],
+    outboxTopic: FEISHU_VERIFY_OUTBOX_TOPIC,
   }
 }
 

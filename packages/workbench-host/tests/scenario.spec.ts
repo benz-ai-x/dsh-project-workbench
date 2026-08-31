@@ -3,10 +3,14 @@ import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  ConfigureFeishuIdentityRouteRequest,
+  ConfigureFeishuIdentityRouteResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  FeishuCredentialProjection,
+  FeishuIdentityKind,
   ProjectDetailProjection,
   ProjectMemberProjection,
   ProjectResponsibilityProjection,
@@ -25,6 +29,15 @@ import type {
   WorkbenchActivityProjection,
   WorkbenchActivityQuery,
   WorkbenchAuditIntegrityProjection,
+  WorkbenchFeishuConnectionQuery,
+  WorkbenchFeishuExternalAdapter,
+  WorkbenchFeishuIdentityVerificationInput,
+  WorkbenchFeishuIdentityVerificationResult,
+  WorkbenchFeishuResourceVerificationObservation,
+  WorkbenchFeishuRouteMutation,
+  WorkbenchFeishuVerificationMutation,
+  WorkbenchFeishuVerificationObservation,
+  WorkbenchFeishuVerificationReplayQuery,
   WorkbenchOutboxClaim,
   WorkbenchOutboxClaimRequest,
   WorkbenchOutboxSettlement,
@@ -41,6 +54,9 @@ import type {
   WorkbenchStatusSnapshot,
   WorkbenchSuggestedChangeDecisionMutation,
   WorkbenchSuggestedChangeProposalMutation,
+  WorkbenchStoredFeishuConnectionProjection,
+  VerifyFeishuIdentityRouteRequest,
+  VerifyFeishuIdentityRouteResult,
 } from '../src/index.ts'
 
 const TEST_AUDIT_GENESIS = `sha256:${'0'.repeat(64)}`
@@ -83,12 +99,25 @@ class MemoryRepository implements WorkbenchRepository {
   reviewCenterReadCalls = 0
   suggestedChangeProposalWriteCalls = 0
   suggestedChangeDecisionWriteCalls = 0
+  feishuConnectionReadCalls = 0
+  feishuRouteWriteCalls = 0
+  feishuVerificationReplayCalls = 0
+  feishuVerificationWriteCalls = 0
   catalogRevision = 0
   readonly projects = new Map<string, ProjectDetailProjection>()
   readonly members = new Map<string, ProjectMemberProjection>()
   readonly responsibilities = new Map<string, ProjectResponsibilityProjection>()
   readonly teamRevisions = new Map<string, number>()
   readonly suggestedChanges = new Map<string, SuggestedChangeProjection>()
+  feishuConnection: WorkbenchStoredFeishuConnectionProjection = emptyFeishuConnection()
+  readonly feishuRouteReceipts = new Map<string, {
+    readonly fingerprint: string
+    readonly result: ConfigureFeishuIdentityRouteResult
+  }>()
+  readonly feishuVerificationReceipts = new Map<string, {
+    readonly fingerprint: string
+    readonly result: VerifyFeishuIdentityRouteResult
+  }>()
   suggestedChangeSequence = 0
   onSnapshot: ((signal: AbortSignal) => Promise<void>) | undefined
   onSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
@@ -98,6 +127,14 @@ class MemoryRepository implements WorkbenchRepository {
   onReviewCenter: ((signal: AbortSignal) => Promise<void>) | undefined
   onSuggestedChangeProposal: ((signal: AbortSignal) => Promise<void>) | undefined
   onSuggestedChangeDecision: ((signal: AbortSignal) => Promise<void>) | undefined
+  onReadFeishuConnection: ((signal: AbortSignal) => Promise<void>) | undefined
+  onCommitFeishuRoute: ((signal: AbortSignal) => Promise<void>) | undefined
+  onReplayFeishuVerification: ((signal: AbortSignal) => Promise<void>) | undefined
+  onCommitFeishuVerification: ((signal: AbortSignal) => Promise<void>) | undefined
+  lastFeishuConnectionQuery: WorkbenchFeishuConnectionQuery | null = null
+  lastFeishuRouteMutation: WorkbenchFeishuRouteMutation | null = null
+  lastFeishuVerificationReplayQuery: WorkbenchFeishuVerificationReplayQuery | null = null
+  lastFeishuVerificationMutation: WorkbenchFeishuVerificationMutation | null = null
 
   async open(): Promise<void> {
     this.openCalls += 1
@@ -305,11 +342,12 @@ class MemoryRepository implements WorkbenchRepository {
     if (projectMembers.length >= 100) {
       return { ok: false, error: { code: 'member-limit-reached', message: 'fixture limit', limit: 100 } }
     }
-    if (mutation.member.kind === 'human' && mutation.member.identity.type === 'feishu'
+    const candidateIdentity = mutation.member.kind === 'human' ? mutation.member.identity : null
+    if (candidateIdentity?.type === 'feishu'
       && projectMembers.some(member => member.kind === 'human'
         && member.identity.type === 'feishu'
-        && member.identity.appId === mutation.member.identity.appId
-        && member.identity.openId === mutation.member.identity.openId)) {
+        && member.identity.appId === candidateIdentity.appId
+        && member.identity.openId === candidateIdentity.openId)) {
       return { ok: false, error: { code: 'duplicate-feishu-identity', message: 'fixture duplicate' } }
     }
     const nextTeamRevision = teamRevision + 1
@@ -604,6 +642,8 @@ class MemoryRepository implements WorkbenchRepository {
             displayName: member.displayName,
             kind: member.kind,
             status: member.status,
+            requiresHumanSponsor: member.kind === 'agent'
+              || (member.kind === 'human' && member.identity.type === 'external'),
             canBeHumanSponsor: member.kind === 'human',
           })),
         evidenceOptions: [reviewEvidence('audit-evidence-001', projectId)],
@@ -860,6 +900,265 @@ class MemoryRepository implements WorkbenchRepository {
     }
   }
 
+  async readFeishuConnection(
+    query: WorkbenchFeishuConnectionQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchStoredFeishuConnectionProjection> {
+    this.feishuConnectionReadCalls += 1
+    this.lastFeishuConnectionQuery = structuredClone(query)
+    await this.onReadFeishuConnection?.(signal)
+    throwFixtureCancelled(signal)
+    return structuredClone(this.feishuConnection)
+  }
+
+  async commitFeishuRoute(
+    mutation: WorkbenchFeishuRouteMutation,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuIdentityRouteResult> {
+    this.feishuRouteWriteCalls += 1
+    this.lastFeishuRouteMutation = structuredClone(mutation)
+    await this.onCommitFeishuRoute?.(signal)
+    throwFixtureCancelled(signal)
+
+    const receiptKey = feishuReceiptKey(
+      mutation.command.actor.organizationId,
+      mutation.command.actor.id,
+      mutation.command.idempotencyKey,
+    )
+    const fingerprint = feishuRouteFingerprint(mutation)
+    const prior = this.feishuRouteReceipts.get(receiptKey)
+    if (prior !== undefined) {
+      return prior.fingerprint === fingerprint
+        ? structuredClone(prior.result)
+        : feishuIdempotencyConflict()
+    }
+    if (this.feishuVerificationReceipts.has(receiptKey)) return feishuIdempotencyConflict()
+
+    if (this.feishuConnection.revision !== mutation.expectedConnectionRevision) {
+      return {
+        ok: false,
+        error: {
+          code: 'connection-revision-conflict',
+          message: 'fixture Feishu connection conflict',
+          expectedConnectionRevision: mutation.expectedConnectionRevision,
+          currentConnectionRevision: this.feishuConnection.revision,
+        },
+      }
+    }
+    const current = mutation.kind === 'bot'
+      ? this.feishuConnection.bot
+      : this.feishuConnection.user
+    if (current.generation !== mutation.expectedRouteGeneration) {
+      return {
+        ok: false,
+        error: {
+          code: 'route-generation-conflict',
+          message: 'fixture Feishu route conflict',
+          kind: mutation.kind,
+          expectedRouteGeneration: mutation.expectedRouteGeneration,
+          currentRouteGeneration: current.generation,
+        },
+      }
+    }
+    if (mutation.mode !== 'set' && current.state !== 'configured') {
+      return {
+        ok: false,
+        error: {
+          code: 'route-unconfigured',
+          message: 'fixture Feishu route is not configured',
+          kind: mutation.kind,
+        },
+      }
+    }
+    if (mutation.mode === 'set' && current.state === 'configured'
+      && current.appId === mutation.appId
+      && current.credentialRef === mutation.credentialRef) {
+      return {
+        ok: false,
+        error: {
+          code: 'no-op-route-configuration',
+          message: 'fixture Feishu route already has this configuration',
+          kind: mutation.kind,
+        },
+      }
+    }
+
+    const nextRevision = this.feishuConnection.revision + 1
+    const nextGeneration = (current.generation ?? 0) + 1
+    const nextRoute = {
+      kind: mutation.kind,
+      state: mutation.mode === 'disable' ? 'disabled' as const : 'configured' as const,
+      generation: nextGeneration,
+      appId: mutation.mode === 'set' ? mutation.appId : current.appId,
+      credentialRef: mutation.mode === 'set' ? mutation.credentialRef : current.credentialRef,
+      actor: null,
+      displayLabel: null,
+      lastVerification: null,
+    }
+    this.feishuConnection = {
+      ...this.feishuConnection,
+      revision: nextRevision,
+      [mutation.kind]: nextRoute,
+      updatedAt: mutation.updatedAt,
+    }
+    const result: ConfigureFeishuIdentityRouteResult = {
+      ok: true,
+      value: {
+        connectionId: 'feishu-primary',
+        connectionRevision: nextRevision,
+        kind: mutation.kind,
+        routeGeneration: nextGeneration,
+        state: nextRoute.state,
+      },
+      receipt: receipt(mutation),
+    }
+    this.feishuRouteReceipts.set(receiptKey, { fingerprint, result: structuredClone(result) })
+    return result
+  }
+
+  async replayFeishuVerification(
+    query: WorkbenchFeishuVerificationReplayQuery,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult | null> {
+    this.feishuVerificationReplayCalls += 1
+    this.lastFeishuVerificationReplayQuery = structuredClone(query)
+    await this.onReplayFeishuVerification?.(signal)
+    throwFixtureCancelled(signal)
+    const receiptKey = feishuReceiptKey(query.organizationId, query.actorId, query.idempotencyKey)
+    if (this.feishuRouteReceipts.has(receiptKey)) return feishuIdempotencyConflict()
+    const prior = this.feishuVerificationReceipts.get(receiptKey)
+    if (prior === undefined) return null
+    return prior.fingerprint === feishuVerificationFingerprint(query)
+      ? structuredClone(prior.result)
+      : feishuIdempotencyConflict()
+  }
+
+  async commitFeishuVerification(
+    mutation: WorkbenchFeishuVerificationMutation,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult> {
+    this.feishuVerificationWriteCalls += 1
+    this.lastFeishuVerificationMutation = structuredClone(mutation)
+    await this.onCommitFeishuVerification?.(signal)
+    throwFixtureCancelled(signal)
+
+    const receiptKey = feishuReceiptKey(
+      mutation.command.actor.organizationId,
+      mutation.command.actor.id,
+      mutation.command.idempotencyKey,
+    )
+    const fingerprint = feishuVerificationFingerprint(mutation)
+    if (this.feishuRouteReceipts.has(receiptKey)) return feishuIdempotencyConflict()
+    const prior = this.feishuVerificationReceipts.get(receiptKey)
+    if (prior !== undefined) {
+      return prior.fingerprint === fingerprint
+        ? structuredClone(prior.result)
+        : feishuIdempotencyConflict()
+    }
+
+    if (this.feishuConnection.revision !== mutation.expectedConnectionRevision) {
+      return {
+        ok: false,
+        error: {
+          code: 'connection-revision-conflict',
+          message: 'fixture Feishu connection conflict',
+          expectedConnectionRevision: mutation.expectedConnectionRevision,
+          currentConnectionRevision: this.feishuConnection.revision,
+        },
+      }
+    }
+    const current = mutation.kind === 'bot'
+      ? this.feishuConnection.bot
+      : this.feishuConnection.user
+    if (current.generation === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'route-unconfigured',
+          message: 'fixture Feishu route is not configured',
+          kind: mutation.kind,
+        },
+      }
+    }
+    if (current.generation !== mutation.expectedRouteGeneration) {
+      return {
+        ok: false,
+        error: {
+          code: 'route-generation-conflict',
+          message: 'fixture Feishu route conflict',
+          kind: mutation.kind,
+          expectedRouteGeneration: mutation.expectedRouteGeneration,
+          currentRouteGeneration: current.generation,
+        },
+      }
+    }
+    if (current.state === 'disabled') {
+      return {
+        ok: false,
+        error: {
+          code: 'route-disabled',
+          message: 'fixture Feishu route is disabled',
+          kind: mutation.kind,
+        },
+      }
+    }
+
+    const effective = enforceFixtureFeishuIdentityContinuity(mutation.observation, current)
+    const nextRevision = this.feishuConnection.revision + 1
+    const verificationSequence = (current.lastVerification?.sequence ?? 0) + 1
+    const newlyBoundActor = current.actor === null
+      && effective.identity.state === 'verified'
+      && effective.actor !== null
+      ? {
+        connectionId: 'feishu-primary' as const,
+        realm: effective.actor.realm,
+        appId: effective.actor.appId,
+        kind: effective.actor.kind,
+        routeGeneration: current.generation,
+        openId: effective.actor.openId,
+        tenantKey: effective.actor.tenantKey,
+      }
+      : null
+    const nextRoute = {
+      ...current,
+      actor: current.actor ?? newlyBoundActor,
+      displayLabel: effective.displayLabel,
+      lastVerification: {
+        verificationId: mutation.verificationId,
+        sequence: verificationSequence,
+        routeGeneration: current.generation,
+        checkedAt: mutation.checkedAt,
+        result: effective.result,
+        identity: structuredClone(effective.identity),
+        scopeInspection: structuredClone(effective.scopeInspection),
+        resourceProbe: structuredClone(effective.resourceProbe),
+      },
+    }
+    this.feishuConnection = {
+      ...this.feishuConnection,
+      revision: nextRevision,
+      [mutation.kind]: nextRoute,
+      updatedAt: mutation.checkedAt,
+    }
+    const result: VerifyFeishuIdentityRouteResult = {
+      ok: true,
+      value: {
+        connectionId: 'feishu-primary',
+        connectionRevision: nextRevision,
+        kind: mutation.kind,
+        routeGeneration: current.generation,
+        verificationSequence,
+        result: effective.result,
+      },
+      receipt: receipt(mutation),
+    }
+    this.feishuVerificationReceipts.set(receiptKey, {
+      fingerprint,
+      result: structuredClone(result),
+    })
+    return result
+  }
+
   lastActivityQuery: WorkbenchActivityQuery | null = null
 
   async readActivity(query: WorkbenchActivityQuery): Promise<WorkbenchActivityProjection> {
@@ -897,6 +1196,120 @@ class MemoryRepository implements WorkbenchRepository {
 
   async close(): Promise<void> {
     this.closeCalls += 1
+  }
+}
+
+function emptyFeishuConnection(): WorkbenchStoredFeishuConnectionProjection {
+  const route = (kind: FeishuIdentityKind) => ({
+    kind,
+    state: 'unconfigured' as const,
+    generation: null,
+    appId: null,
+    credentialRef: null,
+    actor: null,
+    displayLabel: null,
+    lastVerification: null,
+  })
+  return {
+    connectionId: 'feishu-primary',
+    realm: 'feishu-cn',
+    revision: 0,
+    bot: route('bot'),
+    user: route('user'),
+    updatedAt: null,
+  }
+}
+
+function feishuReceiptKey(
+  organizationId: string,
+  actorId: string,
+  idempotencyKey: string,
+): string {
+  return JSON.stringify([organizationId, actorId, idempotencyKey])
+}
+
+function feishuRouteFingerprint(mutation: WorkbenchFeishuRouteMutation): string {
+  return JSON.stringify({
+    kind: mutation.kind,
+    mode: mutation.mode,
+    appId: mutation.appId,
+    credentialRef: mutation.credentialRef,
+    expectedConnectionRevision: mutation.expectedConnectionRevision,
+    expectedRouteGeneration: mutation.expectedRouteGeneration,
+    causationId: mutation.command.causationId,
+    reason: mutation.command.reason,
+  })
+}
+
+function feishuVerificationFingerprint(
+  value: WorkbenchFeishuVerificationReplayQuery | WorkbenchFeishuVerificationMutation,
+): string {
+  const command = 'command' in value ? value.command : value
+  return JSON.stringify({
+    kind: value.kind,
+    expectedConnectionRevision: value.expectedConnectionRevision,
+    expectedRouteGeneration: value.expectedRouteGeneration,
+    resourceProbe: value.resourceProbe,
+    causationId: command.causationId,
+    reason: command.reason,
+  })
+}
+
+function feishuIdempotencyConflict(): {
+  readonly ok: false
+  readonly error: { readonly code: 'idempotency-conflict'; readonly message: string }
+} {
+  return {
+    ok: false,
+    error: {
+      code: 'idempotency-conflict',
+      message: 'fixture idempotency key was already used for different intent',
+    },
+  }
+}
+
+function throwFixtureCancelled(signal: AbortSignal): void {
+  if (signal.aborted) throw signal.reason ?? new Error('fixture operation cancelled')
+}
+
+function enforceFixtureFeishuIdentityContinuity(
+  observation: WorkbenchFeishuVerificationObservation,
+  route: WorkbenchStoredFeishuConnectionProjection['bot'],
+): WorkbenchFeishuVerificationObservation {
+  if (observation.identity.state !== 'verified' || observation.actor === null) return observation
+  if (observation.actor.realm !== 'feishu-cn'
+    || observation.actor.kind !== route.kind
+    || observation.actor.appId !== route.appId) {
+    return failedFixtureFeishuObservation('provider-response-invalid', 'inspect-provider')
+  }
+  if (route.actor === null) return observation
+  if (route.actor.appId !== observation.actor.appId
+    || route.actor.openId !== observation.actor.openId) {
+    return failedFixtureFeishuObservation(
+      'identity-continuity-mismatch',
+      'reset-identity-binding',
+    )
+  }
+  if (route.actor.tenantKey !== observation.actor.tenantKey) {
+    return failedFixtureFeishuObservation('tenant-mismatch', 'reset-identity-binding')
+  }
+  return observation
+}
+
+function failedFixtureFeishuObservation(
+  code: 'provider-response-invalid' | 'identity-continuity-mismatch' | 'tenant-mismatch',
+  recovery: 'inspect-provider' | 'reset-identity-binding',
+): WorkbenchFeishuVerificationObservation {
+  return {
+    result: 'failed',
+    identity: {
+      state: 'failed',
+      issue: { code, recovery, missingScopes: [], grantPlane: null, retryAt: null },
+    },
+    actor: null,
+    displayLabel: null,
+    scopeInspection: { state: 'not-inspected', scopes: [], issue: null },
+    resourceProbe: { state: 'not-tested' },
   }
 }
 
@@ -1026,12 +1439,126 @@ function reviewCardAtTeamRevision(
   }
 }
 
+type FixtureFeishuIdentityInput = WorkbenchFeishuIdentityVerificationInput
+type FixtureFeishuIdentity = Pick<
+  Extract<WorkbenchFeishuIdentityVerificationResult, { readonly state: 'verified' }>['session'],
+  'actor' | 'displayLabel'
+>
+
+class FixtureFeishuAdapter implements WorkbenchFeishuExternalAdapter {
+  readonly adapterId = 'fixture-feishu'
+  readonly describeCalls: string[] = []
+  readonly identityCalls: FixtureFeishuIdentityInput[] = []
+  readonly identitySignals: AbortSignal[] = []
+  readonly finishCalls: Array<{
+    readonly input: FixtureFeishuIdentityInput
+    readonly resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | null
+  }> = []
+  readonly resourceProbeCalls: Array<{
+    readonly input: FixtureFeishuIdentityInput
+    readonly resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string }
+  }> = []
+  readonly finishSignals: AbortSignal[] = []
+  disposeCalls = 0
+  readonly descriptions = new Map<string, FeishuCredentialProjection>()
+  identityHandler: (
+    input: FixtureFeishuIdentityInput,
+    signal: AbortSignal,
+  ) => Promise<FixtureFeishuIdentity> = async input => healthyFixtureFeishuIdentity(input)
+  resourceHandler: (
+    input: FixtureFeishuIdentityInput,
+    resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | null,
+    signal: AbortSignal,
+  ) => Promise<WorkbenchFeishuResourceVerificationObservation> = async (input, resourceProbe) =>
+    healthyFixtureFeishuCapability(input, resourceProbe)
+
+  async describeCredential(ref: string): Promise<FeishuCredentialProjection> {
+    this.describeCalls.push(ref)
+    return structuredClone(this.descriptions.get(ref) ?? {
+      ref,
+      configured: true,
+      source: 'project-env',
+      writable: false,
+    })
+  }
+
+  async startIdentityVerification(
+    input: FixtureFeishuIdentityInput,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuIdentityVerificationResult> {
+    this.identityCalls.push(structuredClone(input))
+    this.identitySignals.push(signal)
+    const identity = await this.identityHandler(input, signal)
+    let disposed = false
+    let finished = false
+    return {
+      state: 'verified',
+      session: {
+        actor: identity.actor,
+        displayLabel: identity.displayLabel,
+        finishVerification: async (resourceProbe, finishSignal) => {
+          if (disposed || finished) throw new Error('fixture Feishu session is closed')
+          finished = true
+          this.finishCalls.push(structuredClone({ input, resourceProbe }))
+          if (resourceProbe !== null) {
+            this.resourceProbeCalls.push(structuredClone({ input, resourceProbe }))
+          }
+          this.finishSignals.push(finishSignal)
+          return this.resourceHandler(input, resourceProbe, finishSignal)
+        },
+        dispose: () => {
+          disposed = true
+          this.disposeCalls += 1
+        },
+      },
+    }
+  }
+}
+
+function healthyFixtureFeishuIdentity(
+  input: FixtureFeishuIdentityInput,
+): FixtureFeishuIdentity {
+  return {
+    actor: {
+      realm: 'feishu-cn',
+      appId: input.appId,
+      kind: input.kind,
+      openId: input.kind === 'bot' ? 'ou_fixture_bot' : 'ou_fixture_user',
+      tenantKey: 'tenant-fixture',
+    },
+    displayLabel: input.kind === 'bot' ? 'Fixture Bot' : 'Fixture User',
+  }
+}
+
+function healthyFixtureFeishuCapability(
+  input: FixtureFeishuIdentityInput,
+  resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | null,
+): WorkbenchFeishuResourceVerificationObservation {
+  return {
+    result: 'healthy',
+    scopeInspection: {
+      state: 'observed',
+      scopes: [{
+        scope: 'task:tasklist:read',
+        tokenType: input.kind === 'bot' ? 'tenant' : 'user',
+        state: 'verified',
+      }],
+      issue: null,
+    },
+    resourceProbe: resourceProbe === null
+      ? { state: 'not-tested' }
+      : { state: 'accessible', ...resourceProbe },
+  }
+}
+
 function createScenario(
   repository = new MemoryRepository(),
   access: WorkbenchAuthorization = authorization,
+  feishu = new FixtureFeishuAdapter(),
 ): {
   readonly repository: MemoryRepository
   readonly scenario: WorkbenchScenario
+  readonly feishu: FixtureFeishuAdapter
 } {
   const instants = [
     new Date('2026-08-31T01:02:03.000Z'),
@@ -1046,14 +1573,21 @@ function createScenario(
     'suggested-change-003',
   ]
   const suggestedChangeDecisionIds = ['decision-001', 'decision-002', 'decision-003']
+  const feishuVerificationIds = [
+    'feishu-verification-001',
+    'feishu-verification-002',
+    'feishu-verification-003',
+    'feishu-verification-004',
+  ]
   const goalIds = ['goal-001', 'goal-002']
   const outcomeIds = ['outcome-001', 'outcome-002', 'outcome-003']
   const commandIds = Array.from({ length: 12 }, (_, index) => `command-${String(index + 1).padStart(3, '0')}`)
   const auditIds = Array.from({ length: 12 }, (_, index) => `audit-${String(index + 1).padStart(3, '0')}`)
   const outboxIds = Array.from({ length: 12 }, (_, index) => `outbox-${String(index + 1).padStart(3, '0')}`)
-  const adapters = { feishu: { adapterId: 'fixture-feishu' } } as const
+  const adapters = { feishu } as const
   return {
     repository,
+    feishu,
     scenario: new WorkbenchScenario({
       repository,
       clock: { now: () => instants.shift() ?? new Date('2026-08-31T03:04:05.000Z') },
@@ -1065,6 +1599,8 @@ function createScenario(
           suggestedChangeIds.shift() ?? 'suggested-change-fallback',
         nextSuggestedChangeDecisionId: () =>
           suggestedChangeDecisionIds.shift() ?? 'decision-fallback',
+        nextFeishuVerificationId: () =>
+          feishuVerificationIds.shift() ?? 'feishu-verification-fallback',
         nextGoalId: () => goalIds.shift() ?? 'goal-fallback',
         nextOutcomeId: () => outcomeIds.shift() ?? 'outcome-fallback',
         nextCommandId: () => commandIds.shift() ?? 'command-fallback',
@@ -1089,6 +1625,45 @@ function statusRequest(message: string, expectedRevision: number | null) {
     idempotencyKey: 'idempotency-key-001',
     causationId: 'causation-id-000001',
     reason: 'owner-status-edit' as const,
+  }
+}
+
+function configureFeishuRouteRequest(
+  kind: FeishuIdentityKind,
+  expectedConnectionRevision: number,
+  expectedRouteGeneration: number | null,
+  suffix: string = kind,
+): Extract<ConfigureFeishuIdentityRouteRequest, { readonly mode: 'set' }> {
+  return {
+    kind,
+    mode: 'set',
+    appId: kind === 'bot' ? 'cli_fixture_bot' : 'cli_fixture_user',
+    credentialRef: kind === 'bot' ? 'FEISHU_BOT_SECRET' : 'FEISHU_USER_TOKEN',
+    expectedConnectionRevision,
+    expectedRouteGeneration,
+    idempotencyKey: `feishu-configure-${suffix}`,
+    causationId: `feishu-configure-cause-${suffix}`,
+    reason: 'owner-feishu-route-configure',
+  }
+}
+
+function verifyFeishuRouteRequest(
+  kind: FeishuIdentityKind,
+  expectedConnectionRevision: number,
+  expectedRouteGeneration: number,
+  suffix: string = kind,
+  resourceId?: string,
+): VerifyFeishuIdentityRouteRequest {
+  return {
+    kind,
+    expectedConnectionRevision,
+    expectedRouteGeneration,
+    idempotencyKey: `feishu-verify-${suffix}`,
+    causationId: `feishu-verify-cause-${suffix}`,
+    ...(resourceId === undefined
+      ? {}
+      : { resourceProbe: { kind: 'task-list' as const, resourceId } }),
+    reason: 'owner-feishu-route-verify',
   }
 }
 
@@ -1277,6 +1852,432 @@ async function seedReviewProject(scenario: WorkbenchScenario): Promise<void> {
   }), signal)
 }
 
+describe('T07 Feishu Connection Center scenario contracts', () => {
+  it('uses the three Feishu capabilities and fails closed before persistence when configure is denied', async () => {
+    const required: WorkbenchAction[] = []
+    const filtered: WorkbenchAction[] = []
+    const access: WorkbenchAuthorization = {
+      require: async (action) => {
+        required.push(action)
+        return {
+          ownerId: 'owner-feishu',
+          organizationId: 'organization-feishu',
+          teamId: 'team-feishu',
+        }
+      },
+      filterProjection: async <T>(action: WorkbenchAction, projection: T): Promise<T> => {
+        filtered.push(action)
+        return projection
+      },
+    }
+    const { scenario, repository } = createScenario(new MemoryRepository(), access)
+    await scenario.open()
+
+    await scenario.feishuConnectionCenter(new AbortController().signal)
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('bot', 0, null),
+      new AbortController().signal,
+    )
+    await scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('bot', 1, 1),
+      new AbortController().signal,
+    )
+
+    expect(required).toEqual([
+      'workbench.integration.feishu.read',
+      'workbench.integration.feishu.configure',
+      'workbench.integration.feishu.verify',
+    ])
+    expect(filtered).toEqual(['workbench.integration.feishu.read'])
+    expect(repository.lastFeishuConnectionQuery).toEqual({
+      organizationId: 'organization-feishu',
+      teamId: 'team-feishu',
+    })
+    expect(repository.lastFeishuRouteMutation?.command.actor).toEqual({
+      kind: 'owner',
+      id: 'owner-feishu',
+      organizationId: 'organization-feishu',
+      teamId: 'team-feishu',
+    })
+    await scenario.close()
+
+    const deniedRepository = new MemoryRepository()
+    const deniedAccess: WorkbenchAuthorization = {
+      require: async (action) => {
+        if (action === 'workbench.integration.feishu.configure') {
+          throw new TypertRemoteFailure({
+            code: 'forbidden',
+            message: 'fixture denied Feishu configuration',
+            details: {},
+          })
+        }
+        return {
+          ownerId: 'owner-feishu',
+          organizationId: 'organization-feishu',
+          teamId: 'team-feishu',
+        }
+      },
+      filterProjection: <T>(_action: WorkbenchAction, projection: T): Promise<T> =>
+        Promise.resolve(projection),
+    }
+    const denied = createScenario(deniedRepository, deniedAccess).scenario
+    await denied.open()
+    const deniedError = await denied.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('bot', 0, null, 'denied'),
+      new AbortController().signal,
+    ).catch((error: unknown) => error)
+    expect(failureCode(deniedError)).toBe('forbidden')
+    expect(deniedRepository.feishuRouteWriteCalls).toBe(0)
+    await denied.close()
+  })
+
+  it('replays route configuration receipts and keeps connection/route CAS conflicts typed', async () => {
+    const { scenario, repository } = createScenario()
+    await scenario.open()
+    const request = configureFeishuRouteRequest('bot', 0, null)
+
+    const committed = await scenario.configureFeishuIdentityRoute(
+      request,
+      new AbortController().signal,
+    )
+    const replayed = await scenario.configureFeishuIdentityRoute(
+      request,
+      new AbortController().signal,
+    )
+    expect(replayed).toEqual(committed)
+    expect(repository.feishuConnection.revision).toBe(1)
+    expect(repository.feishuConnection.bot).toMatchObject({
+      state: 'configured',
+      generation: 1,
+      appId: 'cli_fixture_bot',
+      credentialRef: 'FEISHU_BOT_SECRET',
+    })
+
+    const reusedForDifferentIntent = await scenario.configureFeishuIdentityRoute(
+      { ...request, appId: 'cli_fixture_other' },
+      new AbortController().signal,
+    )
+    expect(reusedForDifferentIntent).toMatchObject({
+      ok: false,
+      error: { code: 'idempotency-conflict' },
+    })
+    const staleConnection = await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('user', 0, null, 'stale-connection'),
+      new AbortController().signal,
+    )
+    expect(staleConnection).toMatchObject({
+      ok: false,
+      error: {
+        code: 'connection-revision-conflict',
+        expectedConnectionRevision: 0,
+        currentConnectionRevision: 1,
+      },
+    })
+    const staleGeneration = await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('bot', 1, null, 'stale-generation'),
+      new AbortController().signal,
+    )
+    expect(staleGeneration).toMatchObject({
+      ok: false,
+      error: {
+        code: 'route-generation-conflict',
+        kind: 'bot',
+        expectedRouteGeneration: null,
+        currentRouteGeneration: 1,
+      },
+    })
+    expect(repository.feishuConnection.revision).toBe(1)
+    await scenario.close()
+  })
+
+  it('preflights verification receipts, invokes only the exact Bot/User route, and retains identity continuity', async () => {
+    const { scenario, repository, feishu } = createScenario()
+    await scenario.open()
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('bot', 0, null),
+      new AbortController().signal,
+    )
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('user', 1, null),
+      new AbortController().signal,
+    )
+
+    const order: string[] = []
+    repository.onReplayFeishuVerification = async () => { order.push('receipt-preflight') }
+    repository.onReadFeishuConnection = async () => { order.push('connection-read') }
+    feishu.identityHandler = async input => {
+      order.push(`adapter-identity:${input.kind}`)
+      return healthyFixtureFeishuIdentity(input)
+    }
+    feishu.resourceHandler = async (input, resourceProbe) => {
+      order.push(`adapter-resource:${input.kind}`)
+      return healthyFixtureFeishuCapability(input, resourceProbe)
+    }
+    const botRequest = verifyFeishuRouteRequest('bot', 2, 1, 'bot-exact', 'task-list-bot')
+    const first = await scenario.verifyFeishuIdentityRoute(
+      botRequest,
+      new AbortController().signal,
+    )
+    expect(order).toEqual([
+      'receipt-preflight',
+      'connection-read',
+      'adapter-identity:bot',
+      'adapter-resource:bot',
+    ])
+    const readsAfterFirst = repository.feishuConnectionReadCalls
+    const replay = await scenario.verifyFeishuIdentityRoute(
+      botRequest,
+      new AbortController().signal,
+    )
+    expect(replay).toEqual(first)
+    expect(order).toEqual([
+      'receipt-preflight',
+      'connection-read',
+      'adapter-identity:bot',
+      'adapter-resource:bot',
+      'receipt-preflight',
+    ])
+    expect(repository.feishuConnectionReadCalls).toBe(readsAfterFirst)
+    expect(repository.feishuVerificationWriteCalls).toBe(1)
+
+    await scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('user', 3, 1, 'user-exact', 'task-list-user'),
+      new AbortController().signal,
+    )
+    expect(feishu.identityCalls).toEqual([
+      {
+        kind: 'bot',
+        appId: 'cli_fixture_bot',
+        credentialRef: 'FEISHU_BOT_SECRET',
+      },
+      {
+        kind: 'user',
+        appId: 'cli_fixture_user',
+        credentialRef: 'FEISHU_USER_TOKEN',
+      },
+    ])
+    expect(feishu.resourceProbeCalls).toEqual([
+      {
+        input: {
+          kind: 'bot',
+          appId: 'cli_fixture_bot',
+          credentialRef: 'FEISHU_BOT_SECRET',
+        },
+        resourceProbe: { kind: 'task-list', resourceId: 'task-list-bot' },
+      },
+      {
+        input: {
+          kind: 'user',
+          appId: 'cli_fixture_user',
+          credentialRef: 'FEISHU_USER_TOKEN',
+        },
+        resourceProbe: { kind: 'task-list', resourceId: 'task-list-user' },
+      },
+    ])
+
+    feishu.identityHandler = async input => {
+      const healthy = healthyFixtureFeishuIdentity(input)
+      return {
+        ...healthy,
+        actor: { ...healthy.actor, openId: 'ou_changed_actor' },
+      }
+    }
+    const drift = await scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('bot', 4, 1, 'bot-drift', 'task-list-must-not-read'),
+      new AbortController().signal,
+    )
+    expect(drift).toMatchObject({ ok: true, value: { result: 'failed' } })
+    expect(feishu.resourceProbeCalls).toHaveLength(2)
+    expect(feishu.resourceProbeCalls.some(call =>
+      call.resourceProbe.resourceId === 'task-list-must-not-read')).toBe(false)
+    expect(feishu.disposeCalls).toBe(3)
+    const projection = await scenario.feishuConnectionCenter(new AbortController().signal)
+    expect(projection.bot.actor).toMatchObject({
+      kind: 'bot',
+      openId: 'ou_fixture_bot',
+      routeGeneration: 1,
+    })
+    expect(projection.bot.lastVerification).toMatchObject({
+      result: 'failed',
+      identity: {
+        state: 'failed',
+        issue: {
+          code: 'identity-continuity-mismatch',
+          recovery: 'reset-identity-binding',
+        },
+      },
+    })
+    expect(projection.user.actor).toMatchObject({ kind: 'user', openId: 'ou_fixture_user' })
+    await scenario.close()
+  })
+
+  it('projects missing scope separately from resource ACL and strips credential values', async () => {
+    const { scenario, feishu } = createScenario()
+    await scenario.open()
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('bot', 0, null),
+      new AbortController().signal,
+    )
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('user', 1, null),
+      new AbortController().signal,
+    )
+
+    const secretSentinel = 'credential-value-MUST-NOT-PROJECT'
+    feishu.descriptions.set('FEISHU_BOT_SECRET', {
+      ref: 'FEISHU_BOT_SECRET',
+      configured: true,
+      source: 'file',
+      writable: true,
+      value: secretSentinel,
+    } as FeishuCredentialProjection)
+    feishu.resourceHandler = async (input, resourceProbe) => {
+      const healthy = healthyFixtureFeishuCapability(input, resourceProbe)
+      if (input.kind === 'bot') {
+        return {
+          ...healthy,
+          result: 'attention',
+          scopeInspection: {
+            state: 'observed',
+            scopes: [{
+              scope: 'task:tasklist:read',
+              tokenType: 'tenant',
+              state: 'missing',
+            }],
+            issue: {
+              code: 'missing-app-scope',
+              recovery: 'grant-app-scope',
+              missingScopes: ['task:tasklist:read'],
+              grantPlane: 'application',
+              retryAt: null,
+            },
+          },
+          resourceProbe: { state: 'not-tested' },
+        }
+      }
+      return {
+        ...healthy,
+        result: 'attention',
+        resourceProbe: {
+          state: 'unavailable',
+          kind: 'task-list',
+          resourceId: resourceProbe?.resourceId ?? 'task-list-private',
+          issue: {
+            code: 'resource-access-unavailable',
+            recovery: 'share-resource',
+            missingScopes: [],
+            grantPlane: null,
+            retryAt: null,
+          },
+        },
+      }
+    }
+    await scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('bot', 2, 1, 'bot-scope'),
+      new AbortController().signal,
+    )
+    await scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('user', 3, 1, 'user-acl', 'task-list-private'),
+      new AbortController().signal,
+    )
+
+    const projection = await scenario.feishuConnectionCenter(new AbortController().signal)
+    expect(projection.bot.lastVerification?.scopeInspection.issue).toEqual({
+      code: 'missing-app-scope',
+      recovery: 'grant-app-scope',
+      missingScopes: ['task:tasklist:read'],
+      grantPlane: 'application',
+      retryAt: null,
+    })
+    expect(projection.user.lastVerification?.resourceProbe).toEqual({
+      state: 'unavailable',
+      kind: 'task-list',
+      resourceId: 'task-list-private',
+      issue: {
+        code: 'resource-access-unavailable',
+        recovery: 'share-resource',
+        missingScopes: [],
+        grantPlane: null,
+        retryAt: null,
+      },
+    })
+    expect(projection.bot.credential).toEqual({
+      ref: 'FEISHU_BOT_SECRET',
+      configured: true,
+      source: 'file',
+      writable: true,
+    })
+    expect(JSON.stringify(projection)).not.toContain(secretSentinel)
+    await scenario.close()
+  })
+
+  it('aborts an exact-route verification, drains it, and closes storage before rejecting new work', async () => {
+    const { scenario, repository, feishu } = createScenario()
+    await scenario.open()
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('bot', 0, null),
+      new AbortController().signal,
+    )
+    let startedResolve: (() => void) | undefined
+    const started = new Promise<void>((resolve) => { startedResolve = resolve })
+    feishu.resourceHandler = (_input, _resourceProbe, signal) => new Promise((_, reject) => {
+      startedResolve?.()
+      const rejectCancelled = () => reject(signal.reason ?? new Error('fixture aborted'))
+      if (signal.aborted) rejectCancelled()
+      else signal.addEventListener('abort', rejectCancelled, { once: true })
+    })
+
+    const pending = scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('bot', 1, 1, 'close-abort', 'task-list-close-abort'),
+      new AbortController().signal,
+    )
+    await started
+    const closing = scenario.close()
+    const error = await pending.catch((reason: unknown) => reason)
+    await closing
+
+    expect(failureCode(error)).toBe('cancelled')
+    expect(feishu.identitySignals).toHaveLength(1)
+    expect(feishu.finishSignals).toHaveLength(1)
+    expect(feishu.finishSignals[0]?.aborted).toBe(true)
+    expect(feishu.disposeCalls).toBe(1)
+    expect(repository.feishuVerificationWriteCalls).toBe(0)
+    expect(repository.closeCalls).toBe(1)
+    expect(scenario.lifecycle).toBe('closed')
+    const unavailable = await scenario.feishuConnectionCenter(new AbortController().signal)
+      .catch((reason: unknown) => reason)
+    expect(failureCode(unavailable)).toBe('unavailable')
+    await scenario.close()
+    expect(repository.closeCalls).toBe(1)
+  })
+
+  it('disposes a verified one-shot session when cancellation wins before the continuity gate', async () => {
+    const { scenario, repository, feishu } = createScenario()
+    await scenario.open()
+    await scenario.configureFeishuIdentityRoute(
+      configureFeishuRouteRequest('user', 0, null),
+      new AbortController().signal,
+    )
+    const caller = new AbortController()
+    feishu.identityHandler = async input => {
+      caller.abort(new Error('caller left after self identity'))
+      return healthyFixtureFeishuIdentity(input)
+    }
+
+    const error = await scenario.verifyFeishuIdentityRoute(
+      verifyFeishuRouteRequest('user', 1, 1, 'cancel-after-identity', 'must-not-probe'),
+      caller.signal,
+    ).catch((reason: unknown) => reason)
+
+    expect(failureCode(error)).toBe('cancelled')
+    expect(feishu.disposeCalls).toBe(1)
+    expect(feishu.finishCalls).toHaveLength(0)
+    expect(feishu.resourceProbeCalls).toHaveLength(0)
+    expect(repository.feishuVerificationWriteCalls).toBe(0)
+    await scenario.close()
+  })
+})
+
 describe('WorkbenchScenario', () => {
   it('drives a deterministic command through the repository into the public projection', async () => {
     const { scenario, repository } = createScenario()
@@ -1322,7 +2323,7 @@ describe('WorkbenchScenario', () => {
       causationId: 'causation-id-000001',
       reason: 'owner-status-edit',
     })
-    expect(scenario.adapters).toEqual({ feishu: { adapterId: 'fixture-feishu' } })
+    expect(scenario.adapters.feishu?.adapterId).toBe('fixture-feishu')
 
     await scenario.close()
   })

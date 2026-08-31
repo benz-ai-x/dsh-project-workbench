@@ -935,6 +935,268 @@ export type DecideSuggestedChangeResult =
     }
   }
 
+/** Closed Feishu deployment realm. International Lark is a later, separately tested realm. */
+export type FeishuRealm = 'feishu-cn'
+
+/** One explicit external actor route. These routes are never fallback candidates for each other. */
+export type FeishuIdentityKind = 'bot' | 'user'
+
+/** Stable singleton connection aggregate owned by one authorized organization/team. */
+export const FEISHU_CONNECTION_ID = 'feishu-primary'
+
+/** Value-free DSH credential-reference status safe for an authorized settings page. */
+export interface FeishuCredentialProjection {
+  readonly ref: string | null
+  readonly configured: boolean
+  readonly source: string | null
+  readonly writable: boolean
+}
+
+/** Immutable subject binding established by the first successful verification of a route generation. */
+export interface FeishuActorBinding {
+  readonly connectionId: typeof FEISHU_CONNECTION_ID
+  readonly realm: FeishuRealm
+  readonly appId: string
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly openId: string
+  readonly tenantKey: string | null
+}
+
+/** Closed recovery action rendered as trusted copy rather than raw provider advice. */
+export type FeishuConnectionRecoveryCode =
+  | 'configure-credential'
+  | 'rotate-credential'
+  | 'enable-app'
+  | 'grant-app-scope'
+  | 'reauthorize-user'
+  | 'expand-app-data-range'
+  | 'share-resource'
+  | 'check-resource-id'
+  | 'reset-identity-binding'
+  | 'retry-later'
+  | 'inspect-provider'
+
+/** Provider-neutral, redacted connection or permission failure. */
+export type FeishuConnectionIssueCode =
+  | 'credential-unconfigured'
+  | 'credential-invalid'
+  | 'credential-expired'
+  | 'user-authorization-revoked'
+  | 'app-disabled'
+  | 'missing-app-scope'
+  | 'missing-user-grant'
+  | 'outside-app-data-range'
+  | 'resource-access-unavailable'
+  | 'resource-not-found'
+  | 'unsupported-actor'
+  | 'identity-continuity-mismatch'
+  | 'tenant-mismatch'
+  | 'rate-limited'
+  | 'provider-unavailable'
+  | 'provider-response-invalid'
+  | 'unknown-provider-error'
+
+export interface FeishuConnectionIssue {
+  readonly code: FeishuConnectionIssueCode
+  readonly recovery: FeishuConnectionRecoveryCode
+  /** Only allowlisted scope names; provider messages and numeric error codes never cross. */
+  readonly missingScopes: readonly string[]
+  readonly grantPlane: 'application' | 'user-consent' | null
+  /** Safe absolute retry instant when the provider supplied bounded rate-limit information. */
+  readonly retryAt: string | null
+}
+
+/** A scope fact must state what was actually observed; configured is not effective or probed. */
+export interface FeishuScopeObservation {
+  readonly scope: string
+  readonly tokenType: 'tenant' | 'user'
+  readonly state: 'configured' | 'verified' | 'missing' | 'unknown'
+}
+
+/** Optional T07 read-only diagnostic target. It is not a Project resource binding. */
+export interface FeishuTaskListProbe {
+  readonly kind: 'task-list'
+  readonly resourceId: string
+}
+
+export type FeishuResourceProbeProjection =
+  | { readonly state: 'not-tested' }
+  | {
+    readonly state: 'accessible'
+    readonly kind: 'task-list'
+    readonly resourceId: string
+  }
+  | {
+    readonly state: 'unavailable'
+    readonly kind: 'task-list'
+    readonly resourceId: string
+    readonly issue: FeishuConnectionIssue
+  }
+
+/** Last append-only verification fact for one exact route generation. */
+export interface FeishuVerificationProjection {
+  readonly verificationId: string
+  readonly sequence: number
+  readonly routeGeneration: number
+  readonly checkedAt: string
+  readonly result: 'healthy' | 'attention' | 'failed'
+  readonly identity: {
+    readonly state: 'verified' | 'failed'
+    readonly issue: FeishuConnectionIssue | null
+  }
+  readonly scopeInspection: {
+    readonly state: 'observed' | 'unavailable' | 'not-inspected'
+    readonly scopes: readonly FeishuScopeObservation[]
+    readonly issue: FeishuConnectionIssue | null
+  }
+  readonly resourceProbe: FeishuResourceProbeProjection
+}
+
+/** One Bot/User card in the Connection Center. */
+export interface FeishuIdentityRouteProjection {
+  readonly kind: FeishuIdentityKind
+  readonly state: 'unconfigured' | 'configured' | 'disabled'
+  readonly generation: number | null
+  readonly appId: string | null
+  readonly credential: FeishuCredentialProjection
+  readonly actor: FeishuActorBinding | null
+  readonly displayLabel: string | null
+  readonly lastVerification: FeishuVerificationProjection | null
+}
+
+/** Authorized singleton settings projection; it contains references, never credential values. */
+export interface FeishuConnectionCenterProjection {
+  readonly connectionId: typeof FEISHU_CONNECTION_ID
+  readonly realm: FeishuRealm
+  readonly revision: number
+  readonly bot: FeishuIdentityRouteProjection
+  readonly user: FeishuIdentityRouteProjection
+  readonly updatedAt: string | null
+}
+
+interface FeishuRouteCommandBase {
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number | null
+  readonly idempotencyKey: string
+  readonly causationId: string
+}
+
+/** Configure, explicitly reset, or disable one route without accepting a credential value. */
+export type ConfigureFeishuIdentityRouteRequest =
+  | FeishuRouteCommandBase & {
+    readonly mode: 'set'
+    readonly appId: string
+    readonly credentialRef: string
+    readonly reason: 'owner-feishu-route-configure'
+  }
+  | FeishuRouteCommandBase & {
+    readonly mode: 'reset'
+    readonly appId?: never
+    readonly credentialRef?: never
+    readonly reason: 'owner-feishu-route-reset'
+  }
+  | FeishuRouteCommandBase & {
+    readonly mode: 'disable'
+    readonly appId?: never
+    readonly credentialRef?: never
+    readonly reason: 'owner-feishu-route-disable'
+  }
+
+export interface ConfigureFeishuIdentityRouteAcknowledgement {
+  readonly connectionId: typeof FEISHU_CONNECTION_ID
+  readonly connectionRevision: number
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly state: 'configured' | 'disabled'
+}
+
+export type ConfigureFeishuIdentityRouteResult =
+  | {
+    readonly ok: true
+    readonly value: ConfigureFeishuIdentityRouteAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'connection-revision-conflict'
+      readonly message: string
+      readonly expectedConnectionRevision: number
+      readonly currentConnectionRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'route-generation-conflict'
+      readonly message: string
+      readonly kind: FeishuIdentityKind
+      readonly expectedRouteGeneration: number | null
+      readonly currentRouteGeneration: number | null
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'route-unconfigured' | 'no-op-route-configuration'
+      readonly message: string
+      readonly kind: FeishuIdentityKind
+    }
+  }
+
+/** Read-only provider verification against one exact current route generation. */
+export interface VerifyFeishuIdentityRouteRequest extends FeishuRouteCommandBase {
+  readonly resourceProbe?: FeishuTaskListProbe
+  readonly reason: 'owner-feishu-route-verify'
+}
+
+export interface VerifyFeishuIdentityRouteAcknowledgement {
+  readonly connectionId: typeof FEISHU_CONNECTION_ID
+  readonly connectionRevision: number
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly verificationSequence: number
+  readonly result: 'healthy' | 'attention' | 'failed'
+}
+
+export type VerifyFeishuIdentityRouteResult =
+  | {
+    readonly ok: true
+    readonly value: VerifyFeishuIdentityRouteAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'connection-revision-conflict'
+      readonly message: string
+      readonly expectedConnectionRevision: number
+      readonly currentConnectionRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'route-generation-conflict'
+      readonly message: string
+      readonly kind: FeishuIdentityKind
+      readonly expectedRouteGeneration: number | null
+      readonly currentRouteGeneration: number | null
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'route-unconfigured' | 'route-disabled'
+      readonly message: string
+      readonly kind: FeishuIdentityKind
+    }
+  }
+
 /** Durable truth about one committed integration intent. */
 export type WorkbenchOutboxState = 'pending' | 'delivered' | 'unknown' | 'failed'
 
@@ -956,11 +1218,17 @@ export type WorkbenchSuggestedChangeReason =
   | 'owner-suggested-change-edit-accept'
   | 'owner-suggested-change-reject'
   | 'owner-suggested-change-defer'
+export type WorkbenchFeishuConnectionReason =
+  | 'owner-feishu-route-configure'
+  | 'owner-feishu-route-reset'
+  | 'owner-feishu-route-disable'
+  | 'owner-feishu-route-verify'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
   | WorkbenchProjectTeamReason
   | WorkbenchSuggestedChangeReason
+  | WorkbenchFeishuConnectionReason
 export type WorkbenchAuditAction =
   | 'workbench.status.updated'
   | 'workbench.project.created'
@@ -972,12 +1240,17 @@ export type WorkbenchAuditAction =
   | 'workbench.suggested-change.edited-accepted'
   | 'workbench.suggested-change.rejected'
   | 'workbench.suggested-change.deferred'
+  | 'workbench.feishu-route.configured'
+  | 'workbench.feishu-route.reset'
+  | 'workbench.feishu-route.disabled'
+  | 'workbench.feishu-route.verification-recorded'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
   | 'project-member'
   | 'project-responsibility'
   | 'suggested-change'
+  | 'feishu-connection'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
@@ -989,6 +1262,12 @@ export type WorkbenchActivitySummaryCode =
   | 'suggested-change-edited-accepted'
   | 'suggested-change-rejected'
   | 'suggested-change-deferred'
+  | 'feishu-route-configured'
+  | 'feishu-route-reset'
+  | 'feishu-route-disabled'
+  | 'feishu-route-verification-healthy'
+  | 'feishu-route-verification-attention'
+  | 'feishu-route-verification-failed'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

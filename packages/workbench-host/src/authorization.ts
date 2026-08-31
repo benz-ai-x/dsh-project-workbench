@@ -17,6 +17,9 @@ export type WorkbenchAction =
   | 'workbench.project.responsibility.write'
   | 'workbench.review.read'
   | 'workbench.review.decide'
+  | 'workbench.integration.feishu.read'
+  | 'workbench.integration.feishu.configure'
+  | 'workbench.integration.feishu.verify'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

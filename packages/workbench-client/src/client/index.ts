@@ -46,6 +46,27 @@ export {
   MAX_REVIEW_FEEDBACK_LENGTH,
   WorkbenchReviewController,
 } from './review-controller.ts'
+export {
+  INITIAL_WORKBENCH_FEISHU_CONNECTION_STATE,
+  MAX_FEISHU_CREDENTIAL_REF_LENGTH,
+  MAX_FEISHU_TASK_LIST_RESOURCE_ID_LENGTH,
+  validTaskListResourceId,
+  WorkbenchFeishuConnectionController,
+} from './feishu-connection-controller.ts'
+export type {
+  WorkbenchFeishuConnectionClientIssue,
+  WorkbenchFeishuConnectionClientIssueCode,
+  WorkbenchFeishuConnectionClientState,
+  WorkbenchFeishuConnectionConflictCode,
+  WorkbenchFeishuConnectionControllerOptions,
+  WorkbenchFeishuConnectionInputIssue,
+  WorkbenchFeishuConnectionOperation,
+  WorkbenchFeishuConnectionPhase,
+  WorkbenchFeishuConnectionRemote,
+  WorkbenchFeishuConnectionTransportCode,
+  WorkbenchFeishuConnectionTransportIssue,
+  WorkbenchFeishuIdentityDraft,
+} from './feishu-connection-controller.ts'
 export type {
   WorkbenchReviewClientState,
   WorkbenchReviewConflictCode,
@@ -125,6 +146,11 @@ export { ProjectTeamPanel } from './ProjectTeamPanel.tsx'
 export type { ProjectTeamPanelProps } from './ProjectTeamPanel.tsx'
 export { ReviewCenterPanel } from './ReviewCenterPanel.tsx'
 export type { ReviewCenterPanelProps } from './ReviewCenterPanel.tsx'
+export { FeishuConnectionPanel } from './FeishuConnectionPanel.tsx'
+export type {
+  FeishuConnectionPanelCopy,
+  FeishuConnectionPanelProps,
+} from './FeishuConnectionPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

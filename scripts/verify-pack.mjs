@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T06 npm archives without touching publication.
+ * Create and inspect the real T07 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -52,6 +52,7 @@ const packageSpecs = [
       'lib/recover-cli.js',
       'lib/types/index.d.ts',
       'lib/types/client.d.ts',
+      'lib/types/feishu-connection-adapter.d.ts',
       'lib/types/owner-auth-service.d.ts',
       'lib/types/recovery.d.ts',
       'lib/typert.host.js',
@@ -65,6 +66,7 @@ const packageSpecs = [
       'lib/types/audit.d.ts',
       'lib/types/authorization.d.ts',
       'lib/types/client.d.ts',
+      'lib/types/feishu-connection-adapter.d.ts',
       'lib/types/http-bridge.d.ts',
       'lib/types/index.d.ts',
       'lib/types/owner-access.d.ts',
@@ -87,6 +89,7 @@ const packageSpecs = [
     requiredFiles: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts'],
     expectedDeclarations: [
       'lib/types/client/ActivityPanel.d.ts',
+      'lib/types/client/FeishuConnectionPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
       'lib/types/client/ProjectsPanel.d.ts',
@@ -95,6 +98,7 @@ const packageSpecs = [
       'lib/types/client/activity-controller.d.ts',
       'lib/types/client/auth-http.d.ts',
       'lib/types/client/controller.d.ts',
+      'lib/types/client/feishu-connection-controller.d.ts',
       'lib/types/client/index.d.ts',
       'lib/types/client/locales.d.ts',
       'lib/types/client/mount.d.ts',
@@ -240,6 +244,7 @@ function packAndInspect(spec) {
     check(manifest.main === 'lib/index.js', 'Host: packed main is lib/index.js')
     check(manifest.types === 'lib/types/index.d.ts', 'Host: packed types are lib/types/index.d.ts')
     check(manifest.bin?.['dsh-workbench'] === './lib/recover-cli.js', 'Host: packed dsh-workbench bin targets built JavaScript')
+    verifyPackedFeishuContract(packedDir)
     const packedCli = resolve(packedDir, 'lib/recover-cli.js')
     if (existsSync(packedCli)) {
       check(readFileSync(packedCli, 'utf8').startsWith('#!/usr/bin/env node'), 'Host: packed recovery CLI preserves its shebang')
@@ -416,6 +421,7 @@ function verifyCleanConsumerInstall() {
   const configPath = resolve(consumerRoot, 'workbench.cordis.yml')
   const databasePath = resolve(consumerRoot, 'runtime/workbench.sqlite')
   const authFixturePath = resolve(consumerRoot, 'packed-auth-fixture.mjs')
+  const credentialsFixturePath = resolve(consumerRoot, 'packed-credentials-fixture.mjs')
   writeFileSync(authFixturePath, `
 import { Service } from '@deepseek-ai/cordis'
 import {
@@ -447,9 +453,58 @@ export default class PackedAuthFixture extends Service {
   }
 }
 `)
+  writeFileSync(credentialsFixturePath, `
+import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+
+export default class PackedCredentialsFixture extends CredentialProvider {
+  static inject = []
+
+  constructor(ctx) {
+    super(ctx)
+    this.describeRefs = []
+    this.resolveRefs = []
+  }
+
+  async describe(ref) {
+    this.describeRefs.push(String(ref))
+    return { configured: false, writable: false }
+  }
+
+  async resolve(ref) {
+    this.resolveRefs.push(String(ref))
+    return undefined
+  }
+
+  async set() {
+    throw new Error('packed credential fixture is read-only')
+  }
+
+  async unset() {
+    throw new Error('packed credential fixture is read-only')
+  }
+
+  async readRecord() {
+    return undefined
+  }
+
+  async describeRecord() {
+    return { configured: false, writable: false }
+  }
+
+  async listRecords() {
+    return []
+  }
+
+  async modifyRecord() {
+    return undefined
+  }
+}
+`)
   writeFileSync(configPath, [
     '- id: packed-workbench-auth-fixture',
     `  name: ${JSON.stringify(authFixturePath)}`,
+    '- id: packed-workbench-credentials-fixture',
+    `  name: ${JSON.stringify(credentialsFixturePath)}`,
     '- id: packed-workbench-host',
     `  name: ${JSON.stringify(hostName)}`,
     '  config:',
@@ -505,6 +560,15 @@ export default class PackedAuthFixture extends Service {
   check(result?.loadedInstanceMatchesPublicImport === true, 'clean consumer: Loader instance comes from the tgz-installed public Host import')
   check(result?.unauthorizedCode === 'unauthorized', 'clean consumer: installed Host direct invocation fails closed without a principal')
   check(result?.initialSnapshot === null, 'clean consumer: installed Host starts with an empty projection')
+  check(
+    result?.initialFeishuConnection?.connectionId === 'feishu-primary'
+      && result?.initialFeishuConnection?.revision === 0
+      && result?.initialFeishuConnection?.bot?.state === 'unconfigured'
+      && result?.initialFeishuConnection?.user?.state === 'unconfigured'
+      && result?.initialFeishuConnection?.bot?.credential?.configured === false
+      && result?.initialFeishuConnection?.user?.credential?.configured === false,
+    'clean consumer: installed Host starts with two explicit unconfigured Feishu routes',
+  )
   check(
     result?.initialProjectStart?.catalogRevision === 0
       && result?.initialProjectStart?.projects?.length === 0
@@ -578,9 +642,43 @@ export default class PackedAuthFixture extends Service {
       && result?.createdProjectActivity?.integrity?.valid === true
       && result?.createdProjectActivity?.integrity?.eventCount === 2
       && result?.finalIntegrity?.valid === true
-      && result?.finalIntegrity?.eventCount === 10
+      && result?.finalIntegrity?.eventCount === 12
       && result?.finalIntegrity?.issue === null,
-    'clean consumer: Project and Review audits extend the verified ledger without business text',
+    'clean consumer: Project, Review, and Feishu audits extend the verified ledger without protected values',
+  )
+  check(
+    result?.configuredFeishuConnection?.revision === 1
+      && result?.configuredFeishuConnection?.bot?.state === 'configured'
+      && result?.configuredFeishuConnection?.bot?.generation === 1
+      && result?.configuredFeishuConnection?.bot?.credential?.configured === false
+      && result?.feishuConfiguration?.connectionRevision === 1
+      && result?.feishuConfiguration?.routeGeneration === 1,
+    'clean consumer: packed Host persists one Bot route using only a DSH credential reference',
+  )
+  check(
+    result?.feishuVerification?.result === 'failed'
+      && result?.feishuVerification?.connectionRevision === 2
+      && result?.verifiedFeishuConnection?.revision === 2
+      && result?.verifiedFeishuConnection?.bot?.lastVerification?.result === 'failed'
+      && result?.verifiedFeishuConnection?.bot?.lastVerification?.identity?.issue?.code
+        === 'credential-unconfigured'
+      && result?.verifiedFeishuConnection?.bot?.lastVerification?.resourceProbe?.state
+        === 'not-tested'
+      && result?.verifiedFeishuConnection?.bot?.actor === null,
+    'clean consumer: packed Host fails identity before the requested resource probe for the exact unconfigured Bot credential',
+  )
+  check(
+    result?.feishuActivity?.items?.length === 2
+      && result?.feishuActivity?.items?.[0]?.action
+        === 'workbench.feishu-route.verification-recorded'
+      && result?.feishuActivity?.items?.[1]?.action
+        === 'workbench.feishu-route.configured'
+      && result?.feishuActivity?.integrity?.eventCount === 12
+      && result?.feishuActivityRedacted === true
+      && result?.credentialResolveWasExact === true
+      && result?.identityFailureSkippedResource === true
+      && result?.networkCalls === 0,
+    'clean consumer: Feishu ledger is redacted, resolves only the configured ref, and never reads the requested resource',
   )
   check(
     JSON.stringify(result?.restartActivity?.items)
@@ -596,8 +694,9 @@ export default class PackedAuthFixture extends Service {
       && JSON.stringify(result?.restartProjectActivity?.integrity)
         === JSON.stringify(result?.finalIntegrity)
       && result?.teamRoundTripVerified === true
-      && result?.reviewRoundTripVerified === true,
-    'clean consumer: installed Host recovers status, Project, Team, Review, Activity, and integrity after restart',
+      && result?.reviewRoundTripVerified === true
+      && result?.feishuRoundTripVerified === true,
+    'clean consumer: installed Host recovers status, Project, Team, Review, Feishu, Activity, and integrity after restart',
   )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
@@ -660,17 +759,24 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
-assert.equal(host.WORKBENCH_SCHEMA_VERSION, 5)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 6)
+assert.equal(typeof host.DshFeishuConnectionAdapter, 'function')
+assert.equal(host.FEISHU_CONNECTION_ADAPTER_ID, 'feishu-open-platform-v1')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.startIdentityVerification, 'function')
+assert.equal(Object.hasOwn(host.DshFeishuConnectionAdapter.prototype, 'verify'), false)
 assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
 assert.ok(!('default' in hostContract))
+assert.equal(hostContract.FEISHU_CONNECTION_ID, 'feishu-primary')
 assert.equal(typeof client.apply, 'function')
 assert.ok(!('default' in client))
 const remoteMethods = [
   'activity',
   'addProjectMember',
   'auditIntegrity',
+  'configureFeishuIdentityRoute',
   'createProject',
   'decideSuggestedChange',
+  'feishuConnectionCenter',
   'project',
   'projectStart',
   'projectTeam',
@@ -680,6 +786,7 @@ const remoteMethods = [
   'setProjectResponsibility',
   'setStatus',
   'snapshot',
+  'verifyFeishuIdentityRoute',
 ]
 assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), remoteMethods)
 assert.deepEqual(remoteTypert.TYPERT_REMOTE.descriptors.map(value => value.method).sort(), remoteMethods)
@@ -691,8 +798,15 @@ const bundlePatch = readFileSync(bundlePatchPath, 'utf8')
 assert.ok(bundlePatch.includes(HOST))
 assert.ok(bundlePatch.includes(CLIENT))
 
+let networkCalls = 0
+globalThis.fetch = async () => {
+  networkCalls += 1
+  throw new Error('packed consumer forbids real network access')
+}
+
 const bareModuleBaseUrl = pathToFileURL(join(CONSUMER_ROOT, 'consumer-anchor.mjs')).href
 let initialSnapshot
+let initialFeishuConnection
 let initialProjectStart
 let initialActivity
 let initialIntegrity
@@ -710,6 +824,14 @@ let teamActivity
 let teamRoundTripVerified = false
 let acceptedReview
 let reviewRoundTripVerified = false
+let feishuConfiguration
+let configuredFeishuConnection
+let feishuVerification
+let verifiedFeishuConnection
+let feishuActivity
+let feishuActivityRedacted = false
+let credentialResolveWasExact = false
+let identityFailureSkippedResource = false
 let finalIntegrity
 let firstContext
 let firstService
@@ -724,8 +846,10 @@ try {
   loaderEntryName = entries[0].options.name
   firstService = firstContext.get('workbench')
   const firstAuth = firstContext.get('workbenchAuth')
+  const firstCredentials = firstContext.get('credentials')
   assert.ok(firstService instanceof host.WorkbenchService)
   assert.equal(typeof firstAuth?.run, 'function')
+  assert.equal(typeof firstCredentials?.resolve, 'function')
   loadedInstanceMatchesPublicImport = true
   await assert.rejects(
     () => firstService.snapshot(new AbortController().signal),
@@ -736,6 +860,20 @@ try {
   )
   initialSnapshot = await firstAuth.run(() => firstService.snapshot(new AbortController().signal))
   assert.equal(initialSnapshot, null)
+  initialFeishuConnection = await firstAuth.run(() => firstService.feishuConnectionCenter(
+    new AbortController().signal,
+  ))
+  assert.equal(initialFeishuConnection.connectionId, 'feishu-primary')
+  assert.equal(initialFeishuConnection.realm, 'feishu-cn')
+  assert.equal(initialFeishuConnection.revision, 0)
+  assert.equal(initialFeishuConnection.bot.state, 'unconfigured')
+  assert.equal(initialFeishuConnection.user.state, 'unconfigured')
+  assert.deepEqual(initialFeishuConnection.bot.credential, {
+    ref: null,
+    configured: false,
+    source: null,
+    writable: false,
+  })
   initialProjectStart = await firstAuth.run(() => firstService.projectStart(
     { limit: 10 },
     new AbortController().signal,
@@ -1202,6 +1340,104 @@ try {
   ))
   assert.deepEqual(finalIntegrity, acceptedReviewActivity.integrity)
   assert.equal(finalIntegrity.eventCount, 10)
+
+  const feishuConfigurationOutcome = await firstAuth.run(() =>
+    firstService.configureFeishuIdentityRoute({
+      kind: 'bot',
+      mode: 'set',
+      appId: 'cli_packed_feishu',
+      credentialRef: 'FEISHU_PACKED_BOT_SECRET',
+      expectedConnectionRevision: 0,
+      expectedRouteGeneration: null,
+      idempotencyKey: 'packed-feishu-config-idempotency-0001',
+      causationId: 'packed-feishu-config-causation-0001',
+      reason: 'owner-feishu-route-configure',
+    }, new AbortController().signal))
+  assert.equal(feishuConfigurationOutcome.ok, true)
+  feishuConfiguration = feishuConfigurationOutcome.value
+  assert.deepEqual(feishuConfiguration, {
+    connectionId: 'feishu-primary',
+    connectionRevision: 1,
+    kind: 'bot',
+    routeGeneration: 1,
+    state: 'configured',
+  })
+  configuredFeishuConnection = await firstAuth.run(() => firstService.feishuConnectionCenter(
+    new AbortController().signal,
+  ))
+  assert.equal(configuredFeishuConnection.revision, 1)
+  assert.equal(configuredFeishuConnection.bot.appId, 'cli_packed_feishu')
+  assert.deepEqual(configuredFeishuConnection.bot.credential, {
+    ref: 'FEISHU_PACKED_BOT_SECRET',
+    configured: false,
+    source: null,
+    writable: false,
+  })
+
+  const feishuVerifyRequest = {
+    kind: 'bot',
+    resourceProbe: {
+      kind: 'task-list',
+      resourceId: 'tasklist_packed_identity_gate',
+    },
+    expectedConnectionRevision: 1,
+    expectedRouteGeneration: 1,
+    idempotencyKey: 'packed-feishu-verify-idempotency-0001',
+    causationId: 'packed-feishu-verify-causation-0001',
+    reason: 'owner-feishu-route-verify',
+  }
+  const feishuVerificationOutcome = await firstAuth.run(() =>
+    firstService.verifyFeishuIdentityRoute(
+      feishuVerifyRequest,
+      new AbortController().signal,
+    ))
+  assert.equal(feishuVerificationOutcome.ok, true)
+  feishuVerification = feishuVerificationOutcome.value
+  assert.equal(feishuVerification.result, 'failed')
+  assert.equal(feishuVerification.connectionRevision, 2)
+  assert.equal(feishuVerification.routeGeneration, 1)
+  assert.deepEqual(
+    await firstAuth.run(() => firstService.verifyFeishuIdentityRoute(
+      feishuVerifyRequest,
+      new AbortController().signal,
+    )),
+    feishuVerificationOutcome,
+  )
+  credentialResolveWasExact = firstCredentials.resolveRefs.length === 1
+    && firstCredentials.resolveRefs[0] === 'FEISHU_PACKED_BOT_SECRET'
+  assert.equal(credentialResolveWasExact, true)
+  verifiedFeishuConnection = await firstAuth.run(() => firstService.feishuConnectionCenter(
+    new AbortController().signal,
+  ))
+  assert.equal(verifiedFeishuConnection.revision, 2)
+  assert.equal(verifiedFeishuConnection.bot.actor, null)
+  assert.equal(verifiedFeishuConnection.bot.lastVerification.result, 'failed')
+  assert.equal(
+    verifiedFeishuConnection.bot.lastVerification.identity.issue.code,
+    'credential-unconfigured',
+  )
+  assert.equal(verifiedFeishuConnection.bot.lastVerification.resourceProbe.state, 'not-tested')
+  identityFailureSkippedResource = networkCalls === 0
+  assert.equal(identityFailureSkippedResource, true)
+  feishuActivity = await firstAuth.run(() => firstService.activity({
+    projectId: null,
+    objectType: 'feishu-connection',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(feishuActivity.items.length, 2)
+  assert.equal(feishuActivity.items[0].action, 'workbench.feishu-route.verification-recorded')
+  assert.equal(feishuActivity.items[1].action, 'workbench.feishu-route.configured')
+  const feishuActivityJson = JSON.stringify(feishuActivity)
+  feishuActivityRedacted = !feishuActivityJson.includes('cli_packed_feishu')
+    && !feishuActivityJson.includes('FEISHU_PACKED_BOT_SECRET')
+    && !feishuActivityJson.includes('tasklist_packed_identity_gate')
+  assert.equal(feishuActivityRedacted, true)
+  assert.equal(networkCalls, 0)
+  finalIntegrity = await firstAuth.run(() => firstService.auditIntegrity(
+    new AbortController().signal,
+  ))
+  assert.deepEqual(finalIntegrity, feishuActivity.integrity)
+  assert.equal(finalIntegrity.eventCount, 12)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -1217,17 +1453,27 @@ let restartProject
 let restartProjectActivity
 let restartTeam
 let restartReview
+let restartFeishuConnection
+let restartFeishuActivity
+let feishuRoundTripVerified = false
 let secondContext
 let secondService
 try {
   secondContext = await boot('packed-consumer-restart', CONFIG_PATH, undefined, undefined, bareModuleBaseUrl)
   secondService = secondContext.get('workbench')
   const secondAuth = secondContext.get('workbenchAuth')
+  const secondCredentials = secondContext.get('credentials')
   assert.ok(secondService instanceof host.WorkbenchService)
   restartSnapshot = await secondAuth.run(() => secondService.snapshot(new AbortController().signal))
   assert.deepEqual(restartSnapshot, committed)
   restartActivity = await secondAuth.run(() => secondService.activity(
-    { projectId: null, limit: 10 },
+    {
+      projectId: null,
+      objectType: 'workbench-status',
+      objectId: committed.id,
+      action: 'workbench.status.updated',
+      limit: 10,
+    },
     new AbortController().signal,
   ))
   restartIntegrity = await secondAuth.run(() => secondService.auditIntegrity(
@@ -1271,6 +1517,21 @@ try {
   }, new AbortController().signal))
   assert.deepEqual(restartReview, acceptedReview)
   reviewRoundTripVerified = true
+  restartFeishuConnection = await secondAuth.run(() => secondService.feishuConnectionCenter(
+    new AbortController().signal,
+  ))
+  assert.deepEqual(restartFeishuConnection, verifiedFeishuConnection)
+  restartFeishuActivity = await secondAuth.run(() => secondService.activity({
+    projectId: null,
+    objectType: 'feishu-connection',
+    limit: 10,
+  }, new AbortController().signal))
+  assert.deepEqual(restartFeishuActivity.items, feishuActivity.items)
+  assert.equal(restartFeishuActivity.nextBeforeSequence, feishuActivity.nextBeforeSequence)
+  assert.deepEqual(restartFeishuActivity.integrity, finalIntegrity)
+  assert.deepEqual(secondCredentials.resolveRefs, [])
+  feishuRoundTripVerified = true
+  assert.equal(networkCalls, 0)
 } finally {
   await secondContext?.fiber.dispose()
 }
@@ -1287,6 +1548,7 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   loadedInstanceMatchesPublicImport,
   unauthorizedCode,
   initialSnapshot,
+  initialFeishuConnection,
   initialProjectStart,
   initialActivity,
   initialIntegrity,
@@ -1302,6 +1564,18 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   teamRoundTripVerified,
   acceptedReview,
   reviewRoundTripVerified,
+  feishuConfiguration,
+  configuredFeishuConnection,
+  feishuVerification,
+  verifiedFeishuConnection,
+  feishuActivity,
+  feishuActivityRedacted,
+  credentialResolveWasExact,
+  identityFailureSkippedResource,
+  feishuRoundTripVerified,
+  restartFeishuConnection,
+  restartFeishuActivity,
+  networkCalls,
   finalIntegrity,
   restartSnapshot,
   restartActivity,
@@ -1382,6 +1656,89 @@ function verifyPackedDeclarationSet(spec, packedDir) {
     return
   }
   check(true, `${spec.role}: archive declaration set exactly matches the expected package surface`)
+}
+
+function verifyPackedFeishuContract(packedDir) {
+  const adapter = readFileSync(resolve(packedDir, 'lib/types/feishu-connection-adapter.d.ts'), 'utf8')
+  const scenario = readFileSync(resolve(packedDir, 'lib/types/scenario.d.ts'), 'utf8')
+  const client = readFileSync(resolve(packedDir, 'lib/types/client.d.ts'), 'utf8')
+  const identityInput = declarationInterfaceBody(
+    scenario,
+    'WorkbenchFeishuIdentityVerificationInput',
+  )
+  const verifiedSession = declarationInterfaceBody(
+    scenario,
+    'WorkbenchFeishuVerifiedIdentitySession',
+  )
+
+  check(
+    /\bstartIdentityVerification\(/u.test(adapter) && !/\n\s+verify\(/u.test(adapter),
+    'Host: packed adapter declaration exposes startIdentityVerification and no legacy one-phase verify',
+  )
+  check(
+    identityInput?.includes('kind: FeishuIdentityKind') === true
+      && identityInput.includes('appId: string')
+      && identityInput.includes('credentialRef: string')
+      && !identityInput.includes('resourceProbe'),
+    'Host: packed identity phase cannot receive a resource identifier',
+  )
+  check(
+    verifiedSession?.includes('finishVerification(') === true
+      && verifiedSession.includes('resourceId: string')
+      && verifiedSession.includes('dispose(): void'),
+    'Host: packed verified identity exposes only an opaque one-shot resource continuation',
+  )
+  check(
+    sameStrings(declarationStringUnion(client, 'FeishuConnectionIssueCode'), [
+      'credential-unconfigured',
+      'credential-invalid',
+      'credential-expired',
+      'user-authorization-revoked',
+      'app-disabled',
+      'missing-app-scope',
+      'missing-user-grant',
+      'outside-app-data-range',
+      'resource-access-unavailable',
+      'resource-not-found',
+      'unsupported-actor',
+      'identity-continuity-mismatch',
+      'tenant-mismatch',
+      'rate-limited',
+      'provider-unavailable',
+      'provider-response-invalid',
+      'unknown-provider-error',
+    ])
+      && sameStrings(declarationStringUnion(client, 'FeishuConnectionRecoveryCode'), [
+        'configure-credential',
+        'rotate-credential',
+        'enable-app',
+        'grant-app-scope',
+        'reauthorize-user',
+        'expand-app-data-range',
+        'share-resource',
+        'check-resource-id',
+        'reset-identity-binding',
+        'retry-later',
+        'inspect-provider',
+      ]),
+    'Host: packed issue and recovery vocabularies are exact closed T07 unions',
+  )
+}
+
+function declarationInterfaceBody(source, name) {
+  return source.match(new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`, 'u'))?.[1]
+}
+
+function declarationStringUnion(source, name) {
+  const body = source.match(new RegExp(`export type ${name} =([\\s\\S]*?);`, 'u'))?.[1]
+  if (body === undefined) return []
+  return [...body.matchAll(/'([^']+)'/gu)].map(match => match[1])
+}
+
+function sameStrings(actual, expected) {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && [...actual].sort().every((value, index) => value === [...expected].sort()[index])
 }
 
 function verifyRuntimeDependencySpecs(spec, manifest) {

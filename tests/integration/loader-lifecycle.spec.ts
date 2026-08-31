@@ -89,6 +89,8 @@ async function fixture(): Promise<{
 
 function config(entry: string, databasePath: string, maxStatusLength = 280): string {
   return [
+    '- id: owner-auth-dependencies-fixture',
+    `  name: ${JSON.stringify(authDependenciesFixtureEntry)}`,
     '- id: workbench-auth-fixture',
     `  name: ${JSON.stringify(authFixtureEntry)}`,
     '- id: workbench-host',

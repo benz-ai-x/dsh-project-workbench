@@ -5,10 +5,19 @@ import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  ConfigureFeishuIdentityRouteRequest,
+  ConfigureFeishuIdentityRouteResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  FeishuActorBinding,
+  FeishuConnectionIssue,
+  FeishuConnectionCenterProjection,
+  FeishuCredentialProjection,
+  FeishuIdentityKind,
+  FeishuResourceProbeProjection,
+  FeishuScopeObservation,
   OutcomeDraft,
   ProjectDetailProjection,
   ProjectMemberDraft,
@@ -35,6 +44,8 @@ import type {
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
   WorkbenchStatusSnapshot,
+  VerifyFeishuIdentityRouteRequest,
+  VerifyFeishuIdentityRouteResult,
 } from './client.ts'
 import {
   projectDetailProjection,
@@ -48,6 +59,7 @@ import {
   suggestedChangeDecisionResult,
   suggestedChangeProposalResult,
   type WorkbenchProjectMutation,
+  type WorkbenchFeishuVerificationObservation,
   type WorkbenchProjectMemberMutation,
   type WorkbenchProjectMemberStatusMutation,
   type WorkbenchProjectResponsibilityMutation,
@@ -69,6 +81,7 @@ export interface WorkbenchIdGenerator {
   nextProjectMemberId(): string
   nextSuggestedChangeId(): string
   nextSuggestedChangeDecisionId(): string
+  nextFeishuVerificationId(): string
   nextGoalId(): string
   nextOutcomeId(): string
   nextCommandId(): string
@@ -81,12 +94,64 @@ export interface WorkbenchExternalAdapter {
   readonly adapterId: string
 }
 
+/** Credential-safe first phase: no resource identifier is available to this call. */
+export interface WorkbenchFeishuIdentityVerificationInput {
+  readonly kind: FeishuIdentityKind
+  readonly appId: string
+  readonly credentialRef: string
+}
+
+/** Capability facts returned only after the Host approves identity continuity. */
+export interface WorkbenchFeishuResourceVerificationObservation {
+  readonly result: 'healthy' | 'attention'
+  readonly scopeInspection: {
+    readonly state: 'observed' | 'unavailable' | 'not-inspected'
+    readonly scopes: readonly FeishuScopeObservation[]
+    readonly issue: FeishuConnectionIssue | null
+  }
+  readonly resourceProbe: FeishuResourceProbeProjection
+}
+
+/**
+ * Opaque one-shot continuation retaining the resolved token only for this
+ * verification operation. Callers can inspect the safe actor, never the token.
+ */
+export interface WorkbenchFeishuVerifiedIdentitySession {
+  readonly actor: Omit<FeishuActorBinding, 'connectionId' | 'routeGeneration'>
+  readonly displayLabel: string | null
+  finishVerification(
+    resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | null,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuResourceVerificationObservation>
+  dispose(): void
+}
+
+/** A failed identity has no continuation, so it cannot reach a resource read. */
+export type WorkbenchFeishuIdentityVerificationResult =
+  | {
+    readonly state: 'failed'
+    readonly issue: FeishuConnectionIssue
+  }
+  | {
+    readonly state: 'verified'
+    readonly session: WorkbenchFeishuVerifiedIdentitySession
+  }
+
+/** Exact-route Feishu port; one call has no alternate actor or fallback input. */
+export interface WorkbenchFeishuExternalAdapter extends WorkbenchExternalAdapter {
+  describeCredential(ref: string): Promise<FeishuCredentialProjection>
+  startIdentityVerification(
+    input: Readonly<WorkbenchFeishuIdentityVerificationInput>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuIdentityVerificationResult>
+}
+
 /**
  * External ports collected at the scenario boundary. T01 intentionally invokes
  * none of them: a durable local status write has no implied external effect.
  */
 export interface WorkbenchExternalAdapters {
-  readonly feishu?: WorkbenchExternalAdapter
+  readonly feishu?: WorkbenchFeishuExternalAdapter
   readonly files?: WorkbenchExternalAdapter
   readonly modelAndSubagent?: WorkbenchExternalAdapter
   readonly scheduler?: WorkbenchExternalAdapter
@@ -112,6 +177,7 @@ export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextProjectMemberId: () => `member-${randomUUID()}`,
   nextSuggestedChangeId: () => `suggested-change-${randomUUID()}`,
   nextSuggestedChangeDecisionId: () => `decision-${randomUUID()}`,
+  nextFeishuVerificationId: () => `feishu-verification-${randomUUID()}`,
   nextGoalId: () => `goal-${randomUUID()}`,
   nextOutcomeId: () => `outcome-${randomUUID()}`,
   nextCommandId: () => `command-${randomUUID()}`,
@@ -234,6 +300,260 @@ export class WorkbenchScenario {
         projection,
         operationSignal,
       )
+    })
+  }
+
+  /** Read independent Bot/User routes and enrich only credential-reference metadata live. */
+  feishuConnectionCenter(
+    callerSignal: AbortSignal = new AbortController().signal,
+  ): Promise<FeishuConnectionCenterProjection> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(callerSignal instanceof AbortSignal)) {
+        throw badRequest('feishuConnectionCenter requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([callerSignal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.integration.feishu.read',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const stored = await this.options.repository.readFeishuConnection(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      const adapter = this.options.adapters.feishu
+      const describe = async (ref: string | null): Promise<FeishuCredentialProjection> => {
+        if (ref === null) {
+          return Object.freeze({
+            ref: null,
+            configured: false,
+            source: null,
+            writable: false,
+          })
+        }
+        if (adapter === undefined) {
+          throw unavailable('Workbench Feishu adapter is not available')
+        }
+        const value = await adapter.describeCredential(ref)
+        throwIfCancelled(operationSignal)
+        return feishuCredentialProjection(value, ref)
+      }
+      const [botCredential, userCredential] = await Promise.all([
+        describe(stored.bot.credentialRef),
+        describe(stored.user.credentialRef),
+      ])
+      const projection: FeishuConnectionCenterProjection = Object.freeze({
+        connectionId: stored.connectionId,
+        realm: stored.realm,
+        revision: stored.revision,
+        bot: Object.freeze({
+          kind: 'bot',
+          state: stored.bot.state,
+          generation: stored.bot.generation,
+          appId: stored.bot.appId,
+          credential: botCredential,
+          actor: stored.bot.actor,
+          displayLabel: stored.bot.displayLabel,
+          lastVerification: stored.bot.lastVerification,
+        }),
+        user: Object.freeze({
+          kind: 'user',
+          state: stored.user.state,
+          generation: stored.user.generation,
+          appId: stored.user.appId,
+          credential: userCredential,
+          actor: stored.user.actor,
+          displayLabel: stored.user.displayLabel,
+          lastVerification: stored.user.lastVerification,
+        }),
+        updatedAt: stored.updatedAt,
+      })
+      return this.options.authorization.filterProjection(
+        'workbench.integration.feishu.read',
+        projection,
+        operationSignal,
+      )
+    })
+  }
+
+  /** Advance one exact Bot/User route generation without accepting a secret value. */
+  configureFeishuIdentityRoute(
+    request: ConfigureFeishuIdentityRouteRequest,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuIdentityRouteResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('configureFeishuIdentityRoute requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.integration.feishu.configure',
+        operationSignal,
+      )
+      const normalized = validateConfigureFeishuIdentityRouteRequest(request)
+      const occurredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const auditEventId = generatedId(this.options.ids.nextAuditEventId(), 'audit event')
+      const outboxId = generatedId(this.options.ids.nextOutboxId(), 'outbox')
+      try {
+        return await this.options.repository.commitFeishuRoute(Object.freeze({
+          kind: normalized.kind,
+          mode: normalized.mode,
+          appId: normalized.mode === 'set' ? normalized.appId : null,
+          credentialRef: normalized.mode === 'set' ? normalized.credentialRef : null,
+          expectedConnectionRevision: normalized.expectedConnectionRevision,
+          expectedRouteGeneration: normalized.expectedRouteGeneration,
+          updatedAt: occurredAt,
+          command: Object.freeze({
+            commandId,
+            auditEventId,
+            outboxId,
+            idempotencyKey: normalized.idempotencyKey,
+            causationId: normalized.causationId,
+            reason: normalized.reason,
+            actor: Object.freeze({
+              kind: 'owner',
+              id: scope.ownerId,
+              organizationId: scope.organizationId,
+              teamId: scope.teamId,
+            }),
+            occurredAt,
+          }),
+        }), operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+    })
+  }
+
+  /** Verify one exact current route; replay is checked before any provider read. */
+  verifyFeishuIdentityRoute(
+    request: VerifyFeishuIdentityRouteRequest,
+    signal: AbortSignal,
+  ): Promise<VerifyFeishuIdentityRouteResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('verifyFeishuIdentityRoute requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.integration.feishu.verify',
+        operationSignal,
+      )
+      const normalized = validateVerifyFeishuIdentityRouteRequest(request)
+      const resourceProbe = normalized.resourceProbe ?? null
+      const replay = await this.options.repository.replayFeishuVerification(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        kind: normalized.kind,
+        expectedConnectionRevision: normalized.expectedConnectionRevision,
+        expectedRouteGeneration: normalized.expectedRouteGeneration as number,
+        resourceProbe,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+      }), operationSignal)
+      if (replay !== null) return replay
+
+      const stored = await this.options.repository.readFeishuConnection(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+      }), operationSignal)
+      const route = normalized.kind === 'bot' ? stored.bot : stored.user
+      if (stored.revision !== normalized.expectedConnectionRevision) {
+        return feishuVerifyConnectionConflict(
+          normalized.expectedConnectionRevision,
+          stored.revision,
+        )
+      }
+      if (route.generation === null) return feishuVerifyRouteState('route-unconfigured', normalized.kind)
+      if (route.generation !== normalized.expectedRouteGeneration) {
+        return feishuVerifyGenerationConflict(
+          normalized.kind,
+          normalized.expectedRouteGeneration as number,
+          route.generation,
+        )
+      }
+      if (route.state === 'disabled') return feishuVerifyRouteState('route-disabled', normalized.kind)
+      if (route.appId === null || route.credentialRef === null) {
+        throw infrastructure('Workbench Feishu route projection is incomplete')
+      }
+      const adapter = this.options.adapters.feishu
+      if (adapter === undefined) throw unavailable('Workbench Feishu adapter is not available')
+      let observation: WorkbenchFeishuVerificationObservation
+      try {
+        const identity = await adapter.startIdentityVerification(Object.freeze({
+          kind: normalized.kind,
+          appId: route.appId,
+          credentialRef: route.credentialRef,
+        }), operationSignal)
+        if (identity.state === 'failed') {
+          throwIfCancelled(operationSignal)
+          observation = failedFeishuVerificationObservation(identity.issue)
+        } else {
+          const session = identity.session
+          try {
+            throwIfCancelled(operationSignal)
+            const continuityIssue = feishuIdentityContinuityIssue(
+              normalized.kind,
+              route.appId,
+              route.actor,
+              session.actor,
+            )
+            if (continuityIssue !== null) {
+              observation = failedFeishuVerificationObservation(continuityIssue)
+            } else {
+              const capability = await session.finishVerification(resourceProbe, operationSignal)
+              throwIfCancelled(operationSignal)
+              observation = verifiedFeishuVerificationObservation(session, capability)
+            }
+          } finally {
+            session.dispose()
+          }
+        }
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      throwIfCancelled(operationSignal)
+      const checkedAt = commandInstant(this.options.clock)
+      const verificationId = generatedId(
+        this.options.ids.nextFeishuVerificationId(),
+        'Feishu verification',
+      )
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const auditEventId = generatedId(this.options.ids.nextAuditEventId(), 'audit event')
+      const outboxId = generatedId(this.options.ids.nextOutboxId(), 'outbox')
+      return this.options.repository.commitFeishuVerification(Object.freeze({
+        verificationId,
+        kind: normalized.kind,
+        expectedConnectionRevision: normalized.expectedConnectionRevision,
+        expectedRouteGeneration: normalized.expectedRouteGeneration as number,
+        resourceProbe,
+        observation,
+        checkedAt,
+        command: Object.freeze({
+          commandId,
+          auditEventId,
+          outboxId,
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: normalized.reason,
+          actor: Object.freeze({
+            kind: 'owner',
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt: checkedAt,
+        }),
+      }), operationSignal)
     })
   }
 
@@ -934,6 +1254,268 @@ const MAX_SUGGESTED_CHANGE_EVIDENCE_REFS = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
 const TEXT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u
+const CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
+const MAX_FEISHU_RESOURCE_ID_LENGTH = 256
+
+function feishuCredentialProjection(
+  value: FeishuCredentialProjection,
+  expectedRef: string,
+): FeishuCredentialProjection {
+  if (value.ref !== expectedRef || typeof value.configured !== 'boolean'
+    || typeof value.writable !== 'boolean'
+    || (value.source !== null && (typeof value.source !== 'string'
+      || value.source.length < 1 || value.source.length > 64
+      || TEXT_CONTROL_CHARACTER_PATTERN.test(value.source)))) {
+    throw infrastructure('Workbench Feishu credential description is invalid')
+  }
+  return Object.freeze({
+    ref: expectedRef,
+    configured: value.configured,
+    source: value.source,
+    writable: value.writable,
+  })
+}
+
+function validateConfigureFeishuIdentityRouteRequest(
+  value: ConfigureFeishuIdentityRouteRequest,
+): ConfigureFeishuIdentityRouteRequest {
+  const record = exactRecord(value, 'configureFeishuIdentityRoute request', [
+    'kind', 'mode', 'expectedConnectionRevision', 'expectedRouteGeneration',
+    'idempotencyKey', 'causationId', 'reason',
+  ], ['appId', 'credentialRef'])
+  const common = {
+    kind: validateFeishuKind(record.kind, 'kind'),
+    expectedConnectionRevision: nonNegativeRevision(
+      record.expectedConnectionRevision,
+      'expectedConnectionRevision',
+    ),
+    expectedRouteGeneration: nullablePositiveRevision(
+      record.expectedRouteGeneration,
+      'expectedRouteGeneration',
+    ),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+  }
+  if (record.mode === 'set') {
+    if (record.reason !== 'owner-feishu-route-configure') {
+      throw badRequest('reason does not match set mode', { field: 'reason' })
+    }
+    const appId = safeId(record.appId, 'appId')
+    if (typeof record.credentialRef !== 'string'
+      || record.credentialRef.length > 128
+      || !CREDENTIAL_REF_PATTERN.test(record.credentialRef)) {
+      throw badRequest('credentialRef must be a DSH credential reference name', {
+        field: 'credentialRef',
+      })
+    }
+    return Object.freeze({
+      ...common,
+      mode: 'set',
+      appId,
+      credentialRef: record.credentialRef,
+      reason: 'owner-feishu-route-configure',
+    })
+  }
+  if (Object.hasOwn(record, 'appId') || Object.hasOwn(record, 'credentialRef')) {
+    throw badRequest('reset/disable must not carry appId or credentialRef', { field: 'mode' })
+  }
+  if (record.mode === 'reset') {
+    if (record.reason !== 'owner-feishu-route-reset') {
+      throw badRequest('reason does not match reset mode', { field: 'reason' })
+    }
+    return Object.freeze({ ...common, mode: 'reset', reason: 'owner-feishu-route-reset' })
+  }
+  if (record.mode === 'disable') {
+    if (record.reason !== 'owner-feishu-route-disable') {
+      throw badRequest('reason does not match disable mode', { field: 'reason' })
+    }
+    return Object.freeze({ ...common, mode: 'disable', reason: 'owner-feishu-route-disable' })
+  }
+  throw badRequest('mode must be set, reset, or disable', { field: 'mode' })
+}
+
+function validateVerifyFeishuIdentityRouteRequest(
+  value: VerifyFeishuIdentityRouteRequest,
+): VerifyFeishuIdentityRouteRequest {
+  const record = exactRecord(value, 'verifyFeishuIdentityRoute request', [
+    'kind', 'expectedConnectionRevision', 'expectedRouteGeneration',
+    'idempotencyKey', 'causationId', 'reason',
+  ], ['resourceProbe'])
+  if (record.reason !== 'owner-feishu-route-verify') {
+    throw badRequest('reason is not supported for verification', { field: 'reason' })
+  }
+  const expectedRouteGeneration = positiveRevision(
+    record.expectedRouteGeneration,
+    'expectedRouteGeneration',
+  )
+  let resourceProbe: { readonly kind: 'task-list'; readonly resourceId: string } | undefined
+  if (record.resourceProbe !== undefined) {
+    const probe = exactRecord(record.resourceProbe, 'resourceProbe', ['kind', 'resourceId'])
+    if (probe.kind !== 'task-list') {
+      throw badRequest('resourceProbe.kind must be task-list', { field: 'resourceProbe.kind' })
+    }
+    if (typeof probe.resourceId !== 'string'
+      || !SAFE_FEISHU_RESOURCE_ID.test(probe.resourceId)
+      || probe.resourceId.length > MAX_FEISHU_RESOURCE_ID_LENGTH) {
+      throw badRequest('resourceProbe.resourceId must be a safe identifier', {
+        field: 'resourceProbe.resourceId',
+      })
+    }
+    resourceProbe = Object.freeze({ kind: 'task-list', resourceId: probe.resourceId })
+  }
+  return Object.freeze({
+    kind: validateFeishuKind(record.kind, 'kind'),
+    expectedConnectionRevision: nonNegativeRevision(
+      record.expectedConnectionRevision,
+      'expectedConnectionRevision',
+    ),
+    expectedRouteGeneration,
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    ...(resourceProbe === undefined ? {} : { resourceProbe }),
+    reason: 'owner-feishu-route-verify',
+  })
+}
+
+function validateFeishuKind(value: unknown, field: string): FeishuIdentityKind {
+  if (value !== 'bot' && value !== 'user') {
+    throw badRequest(`${field} must be bot or user`, { field })
+  }
+  return value
+}
+
+function nullablePositiveRevision(value: unknown, field: string): number | null {
+  if (value === null) return null
+  return positiveRevision(value, field)
+}
+
+function feishuIdentityContinuityIssue(
+  kind: FeishuIdentityKind,
+  appId: string,
+  binding: FeishuActorBinding | null,
+  actor: Omit<FeishuActorBinding, 'connectionId' | 'routeGeneration'>,
+): FeishuConnectionIssue | null {
+  if (actor.realm !== 'feishu-cn'
+    || actor.kind !== kind
+    || actor.appId !== appId
+    || typeof actor.openId !== 'string'
+    || !SAFE_FILTER_ID.test(actor.openId)
+    || (actor.tenantKey !== null
+      && (typeof actor.tenantKey !== 'string' || !SAFE_FILTER_ID.test(actor.tenantKey)))) {
+    return feishuConnectionIssue('provider-response-invalid', 'inspect-provider')
+  }
+  if (binding === null) return null
+  if (binding.appId !== actor.appId || binding.openId !== actor.openId) {
+    return feishuConnectionIssue(
+      'identity-continuity-mismatch',
+      'reset-identity-binding',
+    )
+  }
+  if (binding.tenantKey !== actor.tenantKey) {
+    return feishuConnectionIssue('tenant-mismatch', 'reset-identity-binding')
+  }
+  return null
+}
+
+function feishuConnectionIssue(
+  code: FeishuConnectionIssue['code'],
+  recovery: FeishuConnectionIssue['recovery'],
+): FeishuConnectionIssue {
+  return Object.freeze({
+    code,
+    recovery,
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+}
+
+function failedFeishuVerificationObservation(
+  issue: FeishuConnectionIssue,
+): WorkbenchFeishuVerificationObservation {
+  return Object.freeze({
+    result: 'failed',
+    identity: Object.freeze({ state: 'failed', issue }),
+    actor: null,
+    displayLabel: null,
+    scopeInspection: Object.freeze({
+      state: 'not-inspected',
+      scopes: Object.freeze([]),
+      issue: null,
+    }),
+    resourceProbe: Object.freeze({ state: 'not-tested' }),
+  })
+}
+
+function verifiedFeishuVerificationObservation(
+  session: WorkbenchFeishuVerifiedIdentitySession,
+  capability: WorkbenchFeishuResourceVerificationObservation,
+): WorkbenchFeishuVerificationObservation {
+  return Object.freeze({
+    result: capability.result,
+    identity: Object.freeze({ state: 'verified', issue: null }),
+    actor: Object.freeze({
+      realm: session.actor.realm,
+      appId: session.actor.appId,
+      kind: session.actor.kind,
+      openId: session.actor.openId,
+      tenantKey: session.actor.tenantKey,
+    }),
+    displayLabel: session.displayLabel,
+    scopeInspection: capability.scopeInspection,
+    resourceProbe: capability.resourceProbe,
+  })
+}
+
+function feishuVerifyConnectionConflict(
+  expected: number,
+  current: number,
+): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'connection-revision-conflict',
+      message: 'Workbench Feishu connection revision changed',
+      expectedConnectionRevision: expected,
+      currentConnectionRevision: current,
+    }),
+  })
+}
+
+function feishuVerifyGenerationConflict(
+  kind: FeishuIdentityKind,
+  expected: number,
+  current: number,
+): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'route-generation-conflict',
+      message: 'Workbench Feishu route generation changed',
+      kind,
+      expectedRouteGeneration: expected,
+      currentRouteGeneration: current,
+    }),
+  })
+}
+
+function feishuVerifyRouteState(
+  code: 'route-unconfigured' | 'route-disabled',
+  kind: FeishuIdentityKind,
+): VerifyFeishuIdentityRouteResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code,
+      message: code === 'route-disabled'
+        ? 'Workbench Feishu route is disabled'
+        : 'Workbench Feishu route is not configured',
+      kind,
+    }),
+  })
+}
+
+const SAFE_FEISHU_RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u
 
 function validateProjectStartFilter(value: ProjectStartFilter): ProjectStartFilter {
   const record = exactRecord(value, 'projectStart filter', [], ['beforeSequence', 'limit'])
@@ -1667,7 +2249,8 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && objectType !== 'project'
     && objectType !== 'project-member'
     && objectType !== 'project-responsibility'
-    && objectType !== 'suggested-change') {
+    && objectType !== 'suggested-change'
+    && objectType !== 'feishu-connection') {
     throw badRequest('objectType is not supported', { field: 'objectType' })
   }
   const objectId: unknown = record.objectId
@@ -1686,7 +2269,11 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && action !== 'workbench.suggested-change.accepted'
     && action !== 'workbench.suggested-change.edited-accepted'
     && action !== 'workbench.suggested-change.rejected'
-    && action !== 'workbench.suggested-change.deferred') {
+    && action !== 'workbench.suggested-change.deferred'
+    && action !== 'workbench.feishu-route.configured'
+    && action !== 'workbench.feishu-route.reset'
+    && action !== 'workbench.feishu-route.disabled'
+    && action !== 'workbench.feishu-route.verification-recorded') {
     throw badRequest('action is not supported', { field: 'action' })
   }
   const beforeSequence: unknown = record.beforeSequence

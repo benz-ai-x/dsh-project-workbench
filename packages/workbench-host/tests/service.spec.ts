@@ -50,6 +50,10 @@ describe('WorkbenchService', () => {
     roots.push(root)
     const ctx = new Context()
     contexts.push(ctx)
+    ctx.provide('credentials', Object.freeze({
+      describe: async () => ({ configured: false, writable: true }),
+      resolve: async () => undefined,
+    }) as never)
     await ctx.plugin(TestWorkbenchAuthService)
     const fiber = ctx.plugin(WorkbenchService, {
       databasePath: join(root, 'workbench.sqlite'),
@@ -68,6 +72,9 @@ describe('WorkbenchService', () => {
       { method: 'setStatus', invocation: { kind: 'direct' } },
       { method: 'activity', invocation: { kind: 'direct' } },
       { method: 'auditIntegrity', invocation: { kind: 'direct' } },
+      { method: 'feishuConnectionCenter', invocation: { kind: 'direct' } },
+      { method: 'configureFeishuIdentityRoute', invocation: { kind: 'direct' } },
+      { method: 'verifyFeishuIdentityRoute', invocation: { kind: 'direct' } },
       { method: 'projectStart', invocation: { kind: 'direct' } },
       { method: 'createProject', invocation: { kind: 'direct' } },
       { method: 'project', invocation: { kind: 'direct' } },
@@ -88,6 +95,9 @@ describe('WorkbenchService', () => {
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(ctx.workbench.auditIntegrity(
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.feishuConnectionCenter(
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(ctx.workbench.projectStart(
@@ -390,7 +400,7 @@ describe('WorkbenchService', () => {
   })
 
   it('exports one same-named type/runtime Config with validated defaults', async () => {
-    expect(WorkbenchService.inject).toEqual(['workbenchAuth'])
+    expect(WorkbenchService.inject).toEqual(['workbenchAuth', 'credentials'])
     expect(WorkbenchService.Config).toBe(Config)
     expect(Config({})).toEqual({
       databasePath: DEFAULT_WORKBENCH_DATABASE_PATH,
