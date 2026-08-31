@@ -151,3 +151,27 @@ _Avoid_: Rejected change, scheduled job
 **Stale SuggestedChange**:
 An unresolved SuggestedChange whose Review Target has advanced beyond its immutable base version. Stale is Host-derived, cannot be accepted or deferred, and requires a new proposal rather than force or rebase.
 _Avoid_: Transport stale, rejected change
+
+**Project Calendar Binding**:
+The immutable association between one Project and one writable Feishu Calendar v4 resource through one exact verified Feishu Identity Route generation. It establishes where that Project's formal time commitments live; it is not a copy of the calendar or permission to switch actors.
+_Avoid_: Calendar preference, fallback calendar
+
+**Milestone**:
+A Workbench-owned Project checkpoint with stable business identity, name, and description whose formal date is supplied by exactly one bound Feishu calendar event.
+_Avoid_: Calendar event, task due date, Deliverable
+
+**Milestone Event Binding**:
+The immutable association between one Milestone and one non-recurring Feishu event in the Project Calendar Binding. The provider event ID and app link remain external identities, while the Milestone remains the Workbench business object.
+_Avoid_: Copied event, recurring meeting
+
+**Authoritative Schedule**:
+The normalized all-day or timed start/end value most recently observed from the bound Feishu event. A submitted Workbench date is intent until Feishu returns or reconciliation observes it.
+_Avoid_: Local due date, optimistic calendar value
+
+**Remote Observation Version**:
+An opaque, versioned digest of the canonical Feishu event authority tuple used to compare exact observations when the provider exposes no resource revision or conditional update. It is not a Feishu-enforced CAS token.
+_Avoid_: ETag, provider revision, update timestamp
+
+**Project Schedule Change**:
+An append-only, Project-scoped fact emitted in the same transaction as an authoritative Milestone date or remote-status change. Its revisioned feed is the durable dependency-consumer seam for later planning and risk modules.
+_Avoid_: Notification-only event, mutable date history

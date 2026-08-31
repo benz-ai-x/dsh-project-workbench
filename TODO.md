@@ -92,9 +92,20 @@
 - [x] Reserve/claim/settle custom-field writes durably so response loss becomes audited unknown and the same command is never blindly redelivered.
 - [x] Prove Schema v7→v8 restart, exact Task v2 field/value requests, stable create/map/migrate GUIDs, compatibility conflicts, transition matrices, reconciliation, replay/unknown recovery, Client lifecycle, generated Remote, and packed artifacts.
 
+## T10 — Bind a Project calendar and manage Milestones (#11)
+
+- [ ] Bind exactly one existing or newly created writable Feishu Calendar v4 resource to a Project through one explicitly selected verified Bot/User route.
+- [ ] Model Workbench-owned Milestone semantics with one stable non-recurring Feishu event binding, authoritative all-day/timed dates, remote observation version, link, and sync health.
+- [ ] Create Milestone events with Feishu's documented provider idempotency key, or bind an existing event after calendar, organizer, recurrence, and uniqueness validation.
+- [ ] Guard date writes with Project schedule, Milestone, and remote-observation versions; perform GET-before-PATCH, project only Feishu's response, and expose conflicts without claiming provider CAS.
+- [ ] Converge Feishu-originated date/status changes through a deduplicated notification hint and bounded periodic reconciliation, appending one durable Project schedule-change feed for dependency consumers.
+- [ ] Reserve/claim/settle calendar and event writes durably so ambiguous or recovered inflight operations become visible unknown facts and are never blindly redelivered.
+- [ ] Build the localized accessible Project Milestones Client surface with route/calendar/event discovery, create/bind flows, date confirmation, event links, sync status, recent changes, conflict/unknown handling, and lifecycle cleanup.
+- [ ] Prove Schema v8→v9 restart, exact Calendar v4 requests, Bot/User route fencing, date normalization, identity/version/contention matrices, convergence/recovery, Remote/Loader/Client/browser behavior, and built/packed artifacts.
+
 ## Later tickets
 
-- [ ] T10+ Calendar federation, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T09.
+- [ ] T11+ Files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T10.
 
 ## Definition of done
 
