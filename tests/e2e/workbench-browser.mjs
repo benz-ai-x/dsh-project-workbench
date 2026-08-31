@@ -55,6 +55,10 @@ const WORKBENCH_FEISHU_CONNECTION_PATH = '/api/workbench/feishuConnectionCenter'
 const WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH = '/api/workbench/configureFeishuIdentityRoute'
 const WORKBENCH_VERIFY_FEISHU_ROUTE_PATH = '/api/workbench/verifyFeishuIdentityRoute'
 const WORKBENCH_PROJECT_TASKS_PATH = '/api/workbench/projectTasks'
+const WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH
+  = '/api/workbench/discoverFeishuTaskWorkflowFields'
+const WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH = '/api/workbench/previewFeishuTaskWorkflow'
+const WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH = '/api/workbench/configureFeishuTaskWorkflow'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -507,7 +511,12 @@ async function assertRealCarrierForbidden(page, evidence) {
   assert.equal(response.headers['cache-control'], 'no-store')
 }
 
-async function expectCarrierDenied(page, evidence, expectedOwnerCookie) {
+async function expectCarrierDenied(
+  page,
+  evidence,
+  expectedOwnerCookie,
+  path = WORKBENCH_SNAPSHOT_PATH,
+) {
   const marker = `carrier-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   const result = await page.evaluate(async ({ marker, path }) => {
     const response = await fetch(path, {
@@ -521,7 +530,7 @@ async function expectCarrierDenied(page, evidence, expectedOwnerCookie) {
       body: '{}',
     })
     return { body: await response.text(), status: response.status }
-  }, { marker, path: WORKBENCH_SNAPSHOT_PATH })
+  }, { marker, path })
   assert.equal(result.status, 401, 'protected Workbench carrier did not deny the request')
   assert.equal(result.body, 'unauthorized')
   await waitForCondition(
@@ -530,7 +539,7 @@ async function expectCarrierDenied(page, evidence, expectedOwnerCookie) {
     'protected carrier request evidence',
   )
   const request = requestEvidenceByMarker(evidence, marker)
-  assert.equal(new URL(request.url).pathname, WORKBENCH_SNAPSHOT_PATH)
+  assert.equal(new URL(request.url).pathname, path)
   const sentOwnerCookie = headerValue(request.headers, 'cookie')
     ?.includes(`${OWNER_SESSION_COOKIE_NAME}=`) === true
   assert.equal(sentOwnerCookie, expectedOwnerCookie)
@@ -1530,6 +1539,9 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
@@ -1545,6 +1557,24 @@ async function main() {
   })
 
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
+  await expectCarrierDenied(
+    firstJourney.page,
+    firstNetwork,
+    false,
+    WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH,
+  )
+  await expectCarrierDenied(
+    firstJourney.page,
+    firstNetwork,
+    false,
+    WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH,
+  )
+  await expectCarrierDenied(
+    firstJourney.page,
+    firstNetwork,
+    false,
+    WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH,
+  )
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 1)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
@@ -1685,6 +1715,9 @@ async function main() {
     0,
     'Project Tasks queried Host before a Project was selected',
   )
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH), 1)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH), 1)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH), 1)
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
     0,
@@ -1753,6 +1786,9 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
   await assertProjectTasksUnbound(firstJourney.page, projectName)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH) > 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH), 1)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH), 1)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_TASK_WORKFLOW_PATH), 1)
   await assertActivityProjection(
     firstJourney.page,
     2,
@@ -1775,6 +1811,10 @@ async function main() {
   for (const protectedText of [projectName, primaryGoalName, outcomeName, metricName]) {
     assert.equal((await activityPanel.textContent())?.includes(protectedText), false)
   }
+  await activityObjectType.selectOption('feishu-task-workflow')
+  await activityAction.selectOption('workbench.feishu-task-workflow.configured')
+  await activityPanel.getByRole('button', { name: '应用筛选', exact: true }).click()
+  await activityPanel.getByText('没有匹配的活动', { exact: true }).waitFor({ state: 'visible' })
   await activityObjectType.selectOption('')
   await activityAction.selectOption('')
   await activityPanel.getByRole('button', { name: '应用筛选' }).click()
@@ -2782,10 +2822,11 @@ async function main() {
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS T08 real Workbench setup -> Project Team -> low/high SuggestedChange review '
+    'PASS T09 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
       + '-> explicit Feishu Bot configure/verify without actor fallback '
       + '-> Project Tasks selection boundary and verified-route gate '
+      + '-> T09 workflow Remote authorization/selection gate and Activity vocabulary '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',
