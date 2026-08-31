@@ -128,7 +128,7 @@
 
 ## Deferred and later work
 
-- [ ] UI-MANUAL-01 — After all development is complete, manually repeat the zh-CN desktop and 375px visual pass for every new surface in an environment with CJK fonts. Automated Chromium functional, accessibility, keyboard, overflow, and responsive-layout coverage remains required now; this container cannot reliably judge Chinese glyph rendering because it has no CJK font.
+- [ ] UI-MANUAL-01 — Non-blocking follow-up issue: after all development is complete, the user will manually repeat the zh-CN desktop and 375px visual pass for every new surface in an environment with CJK fonts. Automated Chromium functional, accessibility, keyboard, overflow, and responsive-layout coverage remains required now; this container cannot reliably judge Chinese glyph rendering because it has no CJK font.
 - [ ] T13+ File-source integration, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T12 preparation.
 
 ## Definition of done
