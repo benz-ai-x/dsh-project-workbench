@@ -16,6 +16,15 @@ import type {
 } from './client.ts'
 import { FEISHU_CONNECTION_ID } from './client.ts'
 import type {
+  WorkbenchCalendarSchedule,
+  WorkbenchFeishuCalendarExternalAdapter,
+  WorkbenchFeishuCalendarEventWriteResult,
+  WorkbenchFeishuCalendarEventSnapshot,
+  WorkbenchFeishuCalendarRoute,
+  WorkbenchFeishuCalendarSnapshot,
+} from './feishu-calendar-federation.ts'
+import { createWorkbenchFeishuCalendarObservationVersion } from './feishu-calendar-federation.ts'
+import type {
   WorkbenchFeishuReadResult,
   WorkbenchFeishuTaskExternalAdapter,
   WorkbenchFeishuTaskListSnapshot,
@@ -41,7 +50,9 @@ const TASK_LIST_PATH = `${TASK_LIST_COLLECTION_PATH}/`
 const TASK_COLLECTION_PATH = '/open-apis/task/v2/tasks'
 const COMMENT_COLLECTION_PATH = '/open-apis/task/v2/comments'
 const CUSTOM_FIELD_COLLECTION_PATH = '/open-apis/task/v2/custom_fields'
+const CALENDAR_COLLECTION_PATH = '/open-apis/calendar/v4/calendars'
 const SAFE_ROUTE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u
+const SAFE_CALENDAR_RESOURCE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/u
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/u
 const MAX_APP_ID_LENGTH = 128
 const MAX_CREDENTIAL_REF_LENGTH = 128
@@ -63,11 +74,24 @@ const MAX_COMMENTS_PER_TASK = 500
 const MAX_CUSTOM_FIELDS = 100
 const MAX_CUSTOM_FIELD_OPTIONS = 100
 const MAX_CUSTOM_FIELD_NAME_LENGTH = 50
+const MAX_CALENDAR_TEXT_LENGTH = 255
+const MAX_CALENDARS = 1_000
+const MAX_CALENDAR_EVENTS = 1_000
+const MAX_EVENT_SUMMARY_LENGTH = 1_000
+const MAX_EVENT_DESCRIPTION_LENGTH = 40_960
+const MAX_EVENT_RECURRENCE_LENGTH = 2_000
 const PROVIDER_PAGE_SIZE = 50
 const TASK_LIST_READ_SCOPE = 'task:tasklist:read'
 const TASK_LIST_WRITE_SCOPE = 'task:tasklist:write'
 const TASK_READ_SCOPE = 'task:task:read'
 const TASK_WRITE_SCOPE = 'task:task:write'
+const CALENDAR_READ_SCOPE = 'calendar:calendar:readonly'
+const CALENDAR_SCOPES = Object.freeze([
+  'calendar:calendar',
+  'calendar:calendar:read',
+  'calendar:calendar:readonly',
+  'calendar:calendar.event:read',
+])
 
 export const DEFAULT_FEISHU_REQUEST_TIMEOUT_MS = 10_000
 export const DEFAULT_FEISHU_MAX_RESPONSE_BYTES = 256 * 1_024
@@ -81,7 +105,9 @@ export interface FeishuConnectionVerificationInput {
 
 /** Exact-route Host seam. A call contains no alternate identity to fall back to. */
 export interface FeishuConnectionAdapter
-  extends WorkbenchFeishuExternalAdapter, WorkbenchFeishuTaskExternalAdapter {}
+  extends WorkbenchFeishuExternalAdapter,
+  WorkbenchFeishuTaskExternalAdapter,
+  WorkbenchFeishuCalendarExternalAdapter {}
 
 export type FeishuFetch = (
   input: string | URL | Request,
@@ -121,7 +147,7 @@ interface UnavailableHttpResponse {
 }
 
 type HttpResult = HttpJsonResponse | InvalidHttpJsonResponse | UnavailableHttpResponse
-type EndpointKind = 'tenant-token' | 'identity' | 'task-resource'
+type EndpointKind = 'tenant-token' | 'identity' | 'task-resource' | 'calendar-resource'
 
 interface VerifiedIdentity {
   readonly actor: WorkbenchFeishuVerifiedIdentitySession['actor']
@@ -220,6 +246,264 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
       return this.verifyBot(route, credentialValue, signal)
     }
     return this.verifyUser(route, credentialValue, signal)
+  }
+
+  async listCalendars(
+    route: WorkbenchFeishuCalendarRoute,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<readonly WorkbenchFeishuCalendarSnapshot[]>> {
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const listed = await this.readPagedItems(
+      CALENDAR_COLLECTION_PATH,
+      Object.freeze({}),
+      access,
+      MAX_CALENDARS,
+      signal,
+      'calendar_list',
+      'calendar-resource',
+    )
+    if (listed.state === 'rejected') return listed
+    try {
+      const seen = new Set<string>()
+      const calendars = listed.value.map((value) => {
+        const calendar = calendarSnapshot(value)
+        if (seen.has(calendar.calendarId)) throw new TypeError('duplicate calendar id')
+        seen.add(calendar.calendarId)
+        return calendar
+      })
+      return readOk(Object.freeze(calendars))
+    } catch {
+      return readRejected(invalidProviderIssue())
+    }
+  }
+
+  async readCalendar(
+    route: WorkbenchFeishuCalendarRoute,
+    calendarId: string,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<WorkbenchFeishuCalendarSnapshot>> {
+    const checkedCalendarId = checkedCalendarResourceId(calendarId, 'Feishu calendar id')
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const response = await this.readProviderPayload(
+      providerUrl(`${CALENDAR_COLLECTION_PATH}/${encodeURIComponent(checkedCalendarId)}`, {}),
+      access,
+      signal,
+      'calendar-resource',
+    )
+    if (response.state === 'rejected') return response
+    try {
+      const calendar = calendarSnapshot(providerDataObject(response.value))
+      return calendar.calendarId === checkedCalendarId
+        ? readOk(calendar)
+        : readRejected(invalidProviderIssue())
+    } catch {
+      return readRejected(invalidProviderIssue())
+    }
+  }
+
+  async createCalendar(
+    route: WorkbenchFeishuCalendarRoute,
+    input: Readonly<{ readonly summary: string; readonly description: string | null }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuCalendarSnapshot>> {
+    const normalized = checkedCalendarCreation(input)
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const response = await this.fetchJson(
+      providerUrl(CALENDAR_COLLECTION_PATH, {}),
+      jsonBearerRequest(access.token, 'POST', {
+        summary: normalized.summary,
+        ...(normalized.description === null ? {} : { description: normalized.description }),
+      }),
+      signal,
+    )
+    const failure = providerIssue(response, 'calendar-resource', access.kind)
+    if (failure !== null) {
+      return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
+    }
+    try {
+      return writeOk(calendarSnapshot(nestedProviderEntity(response, 'calendar')))
+    } catch {
+      return writeUnknown(invalidProviderIssue())
+    }
+  }
+
+  async listCalendarEvents(
+    route: WorkbenchFeishuCalendarRoute,
+    calendarId: string,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<readonly WorkbenchFeishuCalendarEventSnapshot[]>> {
+    const checkedCalendarId = checkedCalendarResourceId(calendarId, 'Feishu calendar id')
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const listed = await this.readPagedItems(
+      `${CALENDAR_COLLECTION_PATH}/${encodeURIComponent(checkedCalendarId)}/events`,
+      Object.freeze({ user_id_type: 'open_id' }),
+      access,
+      MAX_CALENDAR_EVENTS,
+      signal,
+      'items',
+      'calendar-resource',
+    )
+    if (listed.state === 'rejected') return listed
+    try {
+      const observedAt = currentInstant(this.now())
+      const seen = new Set<string>()
+      const events = listed.value.map((value) => {
+        const event = calendarEventSnapshot(value, checkedCalendarId, observedAt)
+        if (seen.has(event.eventId)) throw new TypeError('duplicate calendar event id')
+        seen.add(event.eventId)
+        return event
+      })
+      return readOk(Object.freeze(events))
+    } catch {
+      return readRejected(invalidProviderIssue())
+    }
+  }
+
+  async readCalendarEvent(
+    route: WorkbenchFeishuCalendarRoute,
+    calendarId: string,
+    eventId: string,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<WorkbenchFeishuCalendarEventSnapshot>> {
+    const checkedCalendarId = checkedCalendarResourceId(calendarId, 'Feishu calendar id')
+    const checkedEventId = checkedCalendarResourceId(eventId, 'Feishu calendar event id')
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const response = await this.readProviderPayload(
+      providerUrl(
+        `${CALENDAR_COLLECTION_PATH}/${encodeURIComponent(checkedCalendarId)}`
+          + `/events/${encodeURIComponent(checkedEventId)}`,
+        { user_id_type: 'open_id' },
+      ),
+      access,
+      signal,
+      'calendar-resource',
+    )
+    if (response.state === 'rejected') return response
+    try {
+      const event = calendarEventSnapshot(
+        nestedProviderEntity(response.value, 'event'),
+        checkedCalendarId,
+        currentInstant(this.now()),
+      )
+      return event.eventId === checkedEventId
+        ? readOk(event)
+        : readRejected(invalidProviderIssue())
+    } catch {
+      return readRejected(invalidProviderIssue())
+    }
+  }
+
+  async createCalendarEvent(
+    route: WorkbenchFeishuCalendarRoute,
+    input: Readonly<{
+      readonly calendarId: string
+      readonly idempotencyKey: string
+      readonly summary: string
+      readonly description: string | null
+      readonly schedule: WorkbenchCalendarSchedule
+    }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuCalendarEventSnapshot>> {
+    const normalized = checkedCalendarEventCreation(input)
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const providerSchedule = providerCalendarScheduleBody(normalized.schedule)
+    const response = await this.fetchJson(
+      providerUrl(
+        `${CALENDAR_COLLECTION_PATH}/${encodeURIComponent(normalized.calendarId)}/events`,
+        {
+          user_id_type: 'open_id',
+          idempotency_key: normalized.idempotencyKey,
+        },
+      ),
+      jsonBearerRequest(access.token, 'POST', {
+        summary: normalized.summary,
+        ...(normalized.description === null ? {} : { description: normalized.description }),
+        ...providerSchedule,
+      }),
+      signal,
+    )
+    const failure = providerIssue(response, 'calendar-resource', access.kind)
+    if (failure !== null) {
+      return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
+    }
+    try {
+      return writeOk(calendarEventSnapshot(
+        nestedProviderEntity(response, 'event'),
+        normalized.calendarId,
+        currentInstant(this.now()),
+      ))
+    } catch {
+      return writeUnknown(invalidProviderIssue())
+    }
+  }
+
+  async updateCalendarEventSchedule(
+    route: WorkbenchFeishuCalendarRoute,
+    input: Readonly<{
+      readonly calendarId: string
+      readonly eventId: string
+      readonly expectedRemoteObservationVersion: string
+      readonly schedule: WorkbenchCalendarSchedule
+    }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuCalendarEventWriteResult> {
+    const normalized = checkedCalendarEventScheduleUpdate(input)
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const url = providerUrl(
+      `${CALENDAR_COLLECTION_PATH}/${encodeURIComponent(normalized.calendarId)}`
+        + `/events/${encodeURIComponent(normalized.eventId)}`,
+      { user_id_type: 'open_id' },
+    )
+    const preflightResponse = await this.readProviderPayload(
+      url,
+      access,
+      signal,
+      'calendar-resource',
+    )
+    if (preflightResponse.state === 'rejected') return preflightResponse
+    let current: WorkbenchFeishuCalendarEventSnapshot
+    try {
+      current = calendarEventSnapshot(
+        nestedProviderEntity(preflightResponse.value, 'event'),
+        normalized.calendarId,
+        currentInstant(this.now()),
+      )
+      if (current.eventId !== normalized.eventId) throw new TypeError('event identity changed')
+    } catch {
+      return writeRejected(invalidProviderIssue())
+    }
+    if (current.remoteObservationVersion !== normalized.expectedRemoteObservationVersion) {
+      return Object.freeze({ state: 'conflict', current })
+    }
+
+    const response = await this.fetchJson(
+      url,
+      jsonBearerRequest(access.token, 'PATCH', providerCalendarScheduleBody(normalized.schedule)),
+      signal,
+    )
+    const failure = providerIssue(response, 'calendar-resource', access.kind)
+    if (failure !== null) {
+      return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
+    }
+    try {
+      const updated = calendarEventSnapshot(
+        nestedProviderEntity(response, 'event'),
+        normalized.calendarId,
+        currentInstant(this.now()),
+      )
+      return updated.eventId === normalized.eventId
+        ? writeOk(updated)
+        : writeUnknown(invalidProviderIssue())
+    } catch {
+      return writeUnknown(invalidProviderIssue())
+    }
   }
 
   async listTaskLists(
@@ -695,9 +979,10 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
     url: string,
     access: TaskAccess,
     signal: AbortSignal,
+    endpoint: 'task-resource' | 'calendar-resource' = 'task-resource',
   ): Promise<WorkbenchFeishuReadResult<unknown>> {
     const response = await this.fetchJson(url, bearerRequest(access.token), signal)
-    const failure = providerIssue(response, 'task-resource', access.kind)
+    const failure = providerIssue(response, endpoint, access.kind)
     if (failure !== null) return readRejected(failure)
     return response.state === 'response'
       ? readOk(response.payload)
@@ -710,6 +995,8 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
     access: TaskAccess,
     maximum: number,
     signal: AbortSignal,
+    itemsKey: 'items' | 'calendar_list' = 'items',
+    endpoint: 'task-resource' | 'calendar-resource' = 'task-resource',
   ): Promise<WorkbenchFeishuReadResult<readonly unknown[]>> {
     const items: unknown[] = []
     const tokens = new Set<string>()
@@ -720,7 +1007,12 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
         ...fixedQuery,
       }
       if (pageToken !== null) query.page_token = pageToken
-      const response = await this.readProviderPayload(providerUrl(path, query), access, signal)
+      const response = await this.readProviderPayload(
+        providerUrl(path, query),
+        access,
+        signal,
+        endpoint,
+      )
       if (response.state === 'rejected') return response
       let pageData: Readonly<{
         readonly items: readonly unknown[]
@@ -728,7 +1020,7 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
         readonly nextToken: string | null
       }>
       try {
-        pageData = providerPage(response.value)
+        pageData = providerPage(response.value, itemsKey, endpoint === 'calendar-resource')
       } catch {
         return readRejected(invalidProviderIssue())
       }
@@ -1058,6 +1350,11 @@ function invalidProviderIssue(): FeishuConnectionIssue {
 function writeOutcomeMayBeUnknown(response: HttpResult): boolean {
   if (response.state === 'unavailable') return true
   if (response.status === 408 || response.status >= 500) return true
+  if (response.state === 'response') {
+    return response.status >= 200
+      && response.status < 300
+      && providerCode(response.payload) === null
+  }
   return response.state === 'invalid-response'
     && response.status >= 200
     && response.status < 300
@@ -1076,16 +1373,28 @@ function nestedProviderEntity(
   return Object.freeze({ ...recordRequired(data[key]) })
 }
 
-function providerPage(value: unknown): Readonly<{
+function providerDataObject(value: unknown): Readonly<Record<string, unknown>> {
+  return Object.freeze({ ...recordRequired(recordRequired(value).data) })
+}
+
+function providerPage(
+  value: unknown,
+  itemsKey: 'items' | 'calendar_list' = 'items',
+  requireItems = false,
+): Readonly<{
   readonly items: readonly unknown[]
   readonly hasMore: boolean
   readonly nextToken: string | null
 }> {
   const envelope = recordRequired(value)
   const data = recordRequired(envelope.data)
-  const items = data.items === undefined || data.items === null
+  const rawItems = data[itemsKey]
+  if (requireItems && !Array.isArray(rawItems)) {
+    throw new TypeError('provider page items are missing')
+  }
+  const items = rawItems === undefined || rawItems === null
     ? []
-    : data.items
+    : rawItems
   if (!Array.isArray(items) || items.length > PROVIDER_PAGE_SIZE) {
     throw new TypeError('provider page items are invalid')
   }
@@ -1102,6 +1411,198 @@ function providerPage(value: unknown): Readonly<{
     hasMore: data.has_more,
     nextToken,
   })
+}
+
+function calendarSnapshot(value: unknown): WorkbenchFeishuCalendarSnapshot {
+  const calendar = recordRequired(value)
+  const type = providerRequiredText(calendar.type, 64, 'calendar type')
+  const role = providerRequiredText(calendar.role, 64, 'calendar role')
+  if (typeof calendar.is_deleted !== 'boolean' || typeof calendar.is_third_party !== 'boolean') {
+    throw new TypeError('provider calendar flags are invalid')
+  }
+  return Object.freeze({
+    calendarId: providerCalendarResourceId(calendar.calendar_id, 'calendar id'),
+    summary: providerText(calendar.summary, MAX_CALENDAR_TEXT_LENGTH, 'calendar summary'),
+    description: calendar.description === undefined || calendar.description === null
+      ? null
+      : providerText(calendar.description, MAX_CALENDAR_TEXT_LENGTH, 'calendar description'),
+    calendarType: type === 'primary' || type === 'shared' || type === 'resource'
+      ? type
+      : 'unknown',
+    role: role === 'free_busy_reader' || role === 'reader' || role === 'writer' || role === 'owner'
+      ? role
+      : 'unknown',
+    deleted: calendar.is_deleted,
+    thirdParty: calendar.is_third_party,
+  })
+}
+
+function calendarEventSnapshot(
+  value: unknown,
+  calendarId: string,
+  observedAt: string,
+): WorkbenchFeishuCalendarEventSnapshot {
+  const event = recordRequired(value)
+  const eventId = providerCalendarResourceId(event.event_id, 'calendar event id')
+  const organizerCalendarId = providerCalendarResourceId(
+    event.organizer_calendar_id,
+    'event organizer calendar id',
+  )
+  const schedule = providerCalendarSchedule(event.start_time, event.end_time)
+  const providerStatus = providerRequiredText(event.status, 64, 'calendar event status')
+  let recurrence: string | null = null
+  if (event.recurrence !== undefined && event.recurrence !== null && event.recurrence !== '') {
+    recurrence = providerRequiredText(
+      event.recurrence,
+      MAX_EVENT_RECURRENCE_LENGTH,
+      'calendar event recurrence',
+    )
+  }
+  if (typeof event.is_exception !== 'boolean') {
+    throw new TypeError('provider calendar event exception flag is invalid')
+  }
+  const authority = Object.freeze({
+    calendarId,
+    eventId,
+    organizerCalendarId,
+    status: providerStatus,
+    recurrence,
+    schedule,
+  })
+  return Object.freeze({
+    calendarId,
+    eventId,
+    organizerCalendarId,
+    summary: providerText(event.summary, MAX_EVENT_SUMMARY_LENGTH, 'calendar event summary'),
+    description: event.description === undefined || event.description === null
+      ? null
+      : providerText(
+        event.description,
+        MAX_EVENT_DESCRIPTION_LENGTH,
+        'calendar event description',
+      ),
+    schedule,
+    status: providerStatus === 'confirmed' || providerStatus === 'cancelled'
+      ? providerStatus
+      : 'unknown',
+    recurring: recurrence !== null,
+    exception: event.is_exception,
+    appLink: providerCanonicalUrl(event.app_link, 'calendar event app link'),
+    remoteObservationVersion: createWorkbenchFeishuCalendarObservationVersion(authority),
+    observedAt,
+  })
+}
+
+function providerCalendarSchedule(startValue: unknown, endValue: unknown): WorkbenchCalendarSchedule {
+  const start = providerTimeInfo(startValue, 'start')
+  const end = providerTimeInfo(endValue, 'end')
+  if (start.kind !== end.kind) throw new TypeError('provider calendar event schedule is mixed')
+  if (start.kind === 'all-day' && end.kind === 'all-day') {
+    if (start.date >= end.date) throw new TypeError('provider all-day calendar range is invalid')
+    return Object.freeze({ kind: 'all-day', startDate: start.date, endDate: end.date })
+  }
+  if (start.kind !== 'timed' || end.kind !== 'timed' || start.timeZone !== end.timeZone
+    || Date.parse(start.instant) >= Date.parse(end.instant)) {
+    throw new TypeError('provider timed calendar range is invalid')
+  }
+  return Object.freeze({
+    kind: 'timed',
+    startAt: start.instant,
+    endAt: end.instant,
+    timeZone: start.timeZone,
+  })
+}
+
+type ProviderTimeInfo =
+  | { readonly kind: 'all-day'; readonly date: string }
+  | { readonly kind: 'timed'; readonly instant: string; readonly timeZone: string }
+
+function providerTimeInfo(value: unknown, label: 'start' | 'end'): ProviderTimeInfo {
+  const time = recordRequired(value)
+  const hasDate = time.date !== undefined && time.date !== null && time.date !== ''
+  const hasDateTime = time.date_time !== undefined && time.date_time !== null && time.date_time !== ''
+  const hasTimestamp = time.timestamp !== undefined && time.timestamp !== null && time.timestamp !== ''
+  if (Number(hasDate) + Number(hasDateTime) + Number(hasTimestamp) !== 1) {
+    throw new TypeError(`provider calendar ${label} time is invalid`)
+  }
+  if (hasDate) {
+    const date = strictIsoCalendarDate(time.date, `Provider calendar ${label} date`)
+    if (time.timezone !== undefined && time.timezone !== null && time.timezone !== '') {
+      if (checkedIanaTimeZone(time.timezone, `Provider calendar ${label} timezone`) !== 'UTC') {
+        throw new TypeError(`provider all-day calendar ${label} timezone is invalid`)
+      }
+    }
+    return Object.freeze({ kind: 'all-day', date })
+  }
+  const timeZone = checkedIanaTimeZone(time.timezone, `Provider calendar ${label} timezone`)
+  const instant = hasDateTime
+    ? strictRfc3339Instant(time.date_time, `Provider calendar ${label} date-time`)
+    : providerUnixSecondsInstant(time.timestamp, `calendar ${label} timestamp`)
+  return Object.freeze({ kind: 'timed', instant, timeZone })
+}
+
+function strictIsoCalendarDate(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    throw new TypeError(`${label} is invalid`)
+  }
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new TypeError(`${label} is invalid`)
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    throw new TypeError(`${label} is invalid`)
+  }
+  return value
+}
+
+function strictRfc3339Instant(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new TypeError(`${label} is invalid`)
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/u.exec(value)
+  if (match === null) throw new TypeError(`${label} is invalid`)
+  const [, calendarDate, hourText, minuteText, secondText, offset] = match
+  if (calendarDate === undefined || hourText === undefined || minuteText === undefined
+    || secondText === undefined || offset === undefined) throw new TypeError(`${label} is invalid`)
+  strictIsoCalendarDate(calendarDate, label)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  if (hour > 23 || minute > 59 || second > 59 || offset === '-00:00') {
+    throw new TypeError(`${label} is invalid`)
+  }
+  if (offset !== 'Z') {
+    const offsetHour = Number(offset.slice(1, 3))
+    const offsetMinute = Number(offset.slice(4, 6))
+    if (offsetHour > 23 || offsetMinute > 59) throw new TypeError(`${label} is invalid`)
+  }
+  const milliseconds = Date.parse(value)
+  if (!Number.isFinite(milliseconds)) throw new TypeError(`${label} is invalid`)
+  return new Date(milliseconds).toISOString()
+}
+
+function providerUnixSecondsInstant(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^\d{1,16}$/u.test(value)) {
+    throw new TypeError(`Provider ${label} is invalid`)
+  }
+  const seconds = Number(value)
+  if (!Number.isSafeInteger(seconds)) throw new TypeError(`Provider ${label} is invalid`)
+  const date = new Date(seconds * 1_000)
+  if (!Number.isFinite(date.getTime())) throw new TypeError(`Provider ${label} is invalid`)
+  return date.toISOString()
+}
+
+function checkedIanaTimeZone(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 128
+    || !value.isWellFormed() || ASCII_CONTROL.test(value)) {
+    throw new TypeError(`${label} is invalid`)
+  }
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions().timeZone
+  } catch {
+    throw new TypeError(`${label} is invalid`)
+  }
 }
 
 function taskListCandidate(value: unknown): FeishuTaskListCandidateProjection {
@@ -1307,6 +1808,109 @@ function checkedTaskListCreation(
   })
 }
 
+function checkedCalendarCreation(input: Readonly<{
+  readonly summary: string
+  readonly description: string | null
+}>): Readonly<{ readonly summary: string; readonly description: string | null }> {
+  if (record(input) === null) throw new TypeError('Feishu calendar input is invalid')
+  return Object.freeze({
+    summary: checkedRequiredText(input.summary, MAX_CALENDAR_TEXT_LENGTH, 'Feishu calendar summary'),
+    description: input.description === null
+      ? null
+      : checkedText(input.description, MAX_CALENDAR_TEXT_LENGTH, 'Feishu calendar description'),
+  })
+}
+
+function checkedCalendarEventCreation(input: Readonly<{
+  readonly calendarId: string
+  readonly idempotencyKey: string
+  readonly summary: string
+  readonly description: string | null
+  readonly schedule: WorkbenchCalendarSchedule
+}>): Readonly<{
+  readonly calendarId: string
+  readonly idempotencyKey: string
+  readonly summary: string
+  readonly description: string | null
+  readonly schedule: WorkbenchCalendarSchedule
+}> {
+  if (record(input) === null) throw new TypeError('Feishu calendar event input is invalid')
+  return Object.freeze({
+    calendarId: checkedCalendarResourceId(input.calendarId, 'Feishu calendar id'),
+    idempotencyKey: checkedCalendarEventIdempotencyKey(input.idempotencyKey),
+    summary: checkedRequiredText(input.summary, MAX_EVENT_SUMMARY_LENGTH, 'Feishu event summary'),
+    description: input.description === null
+      ? null
+      : checkedText(input.description, MAX_EVENT_DESCRIPTION_LENGTH, 'Feishu event description'),
+    schedule: checkedCalendarSchedule(input.schedule),
+  })
+}
+
+function checkedCalendarEventScheduleUpdate(input: Readonly<{
+  readonly calendarId: string
+  readonly eventId: string
+  readonly expectedRemoteObservationVersion: string
+  readonly schedule: WorkbenchCalendarSchedule
+}>): Readonly<{
+  readonly calendarId: string
+  readonly eventId: string
+  readonly expectedRemoteObservationVersion: string
+  readonly schedule: WorkbenchCalendarSchedule
+}> {
+  if (record(input) === null) throw new TypeError('Feishu calendar event update is invalid')
+  if (typeof input.expectedRemoteObservationVersion !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/u.test(input.expectedRemoteObservationVersion)) {
+    throw new TypeError('Feishu calendar observation version is invalid')
+  }
+  return Object.freeze({
+    calendarId: checkedCalendarResourceId(input.calendarId, 'Feishu calendar id'),
+    eventId: checkedCalendarResourceId(input.eventId, 'Feishu calendar event id'),
+    expectedRemoteObservationVersion: input.expectedRemoteObservationVersion,
+    schedule: checkedCalendarSchedule(input.schedule),
+  })
+}
+
+function checkedCalendarSchedule(value: unknown): WorkbenchCalendarSchedule {
+  const schedule = recordRequired(value)
+  if (schedule.kind === 'all-day') {
+    const startDate = strictIsoCalendarDate(schedule.startDate, 'Feishu all-day start date')
+    const endDate = strictIsoCalendarDate(schedule.endDate, 'Feishu all-day end date')
+    if (startDate >= endDate) throw new TypeError('Feishu all-day range is invalid')
+    return Object.freeze({ kind: 'all-day', startDate, endDate })
+  }
+  if (schedule.kind === 'timed') {
+    const startAt = strictRfc3339Instant(schedule.startAt, 'Feishu timed start instant')
+    const endAt = strictRfc3339Instant(schedule.endAt, 'Feishu timed end instant')
+    const timeZone = checkedIanaTimeZone(schedule.timeZone, 'Feishu timed timezone')
+    const startSeconds = Math.floor(Date.parse(startAt) / 1_000)
+    const endSeconds = Math.floor(Date.parse(endAt) / 1_000)
+    if (startSeconds >= endSeconds) throw new TypeError('Feishu timed range is invalid')
+    return Object.freeze({ kind: 'timed', startAt, endAt, timeZone })
+  }
+  throw new TypeError('Feishu calendar schedule is invalid')
+}
+
+function providerCalendarScheduleBody(
+  schedule: WorkbenchCalendarSchedule,
+): Readonly<{ readonly start_time: object; readonly end_time: object }> {
+  if (schedule.kind === 'all-day') {
+    return Object.freeze({
+      start_time: Object.freeze({ date: schedule.startDate, timezone: 'UTC' }),
+      end_time: Object.freeze({ date: schedule.endDate, timezone: 'UTC' }),
+    })
+  }
+  return Object.freeze({
+    start_time: Object.freeze({
+      timestamp: String(Math.floor(Date.parse(schedule.startAt) / 1_000)),
+      timezone: schedule.timeZone,
+    }),
+    end_time: Object.freeze({
+      timestamp: String(Math.floor(Date.parse(schedule.endAt) / 1_000)),
+      timezone: schedule.timeZone,
+    }),
+  })
+}
+
 function checkedWorkflowFieldCreate(input: Readonly<{
   readonly taskListGuid: string
   readonly name: string
@@ -1495,14 +2099,36 @@ function checkedCommandKey(value: unknown): string {
   return value
 }
 
+function checkedCalendarEventIdempotencyKey(value: unknown): string {
+  if (typeof value !== 'string' || value.length < 32 || value.length > MAX_IDEMPOTENCY_KEY_LENGTH
+    || !SAFE_ROUTE_VALUE.test(value)) {
+    throw new TypeError('Feishu calendar event idempotency key is invalid')
+  }
+  return value
+}
+
 function checkedResourceId(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length > MAX_RESOURCE_ID_LENGTH
     || !SAFE_ROUTE_VALUE.test(value)) throw new TypeError(`${label} is invalid`)
   return value
 }
 
+function checkedCalendarResourceId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length > MAX_RESOURCE_ID_LENGTH
+    || !SAFE_CALENDAR_RESOURCE_VALUE.test(value)) throw new TypeError(`${label} is invalid`)
+  return value
+}
+
 function providerResourceId(value: unknown, label: string): string {
   return checkedResourceId(value, `Provider ${label}`)
+}
+
+function providerCalendarResourceId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length > MAX_RESOURCE_ID_LENGTH
+    || !SAFE_CALENDAR_RESOURCE_VALUE.test(value)) {
+    throw new TypeError(`Provider ${label} is invalid`)
+  }
+  return value
 }
 
 function providerNullableResourceId(value: unknown, label: string): string | null {
@@ -1602,11 +2228,45 @@ function providerIssue(
     const scopes = missingTaskScopes(response.payload)
     return issue('missing-user-grant', 'reauthorize-user', scopes, 'user-consent')
   }
+  if (endpoint === 'calendar-resource' && code === 99991672) {
+    const scopes = missingCalendarScopes(response.payload)
+    return issue('missing-app-scope', 'grant-app-scope', scopes, 'application')
+  }
+  if (endpoint === 'calendar-resource' && actor === 'user' && code === 99991679) {
+    const scopes = missingCalendarScopes(response.payload)
+    return issue('missing-user-grant', 'reauthorize-user', scopes, 'user-consent')
+  }
   if (endpoint === 'task-resource' && code === 1470403) {
     return issue('resource-access-unavailable', 'share-resource')
   }
   if (endpoint === 'task-resource' && code === 1470404) {
     return issue('resource-not-found', 'check-resource-id')
+  }
+  if (endpoint === 'calendar-resource'
+    && (code === 191000 || code === 191001 || code === 193000
+      || code === 193001 || code === 193003)) {
+    return issue('resource-not-found', 'check-resource-id')
+  }
+  if (endpoint === 'calendar-resource'
+    && (code === 191002 || code === 191003 || code === 191004 || code === 193002)) {
+    return issue('resource-access-unavailable', 'share-resource')
+  }
+  if (endpoint === 'calendar-resource' && code === 190007) {
+    return actor === 'bot'
+      ? issue('app-disabled', 'enable-app')
+      : issue('unknown-provider-error', 'inspect-provider')
+  }
+  if (endpoint === 'calendar-resource' && code === 195100) {
+    return actor === 'user'
+      ? issue('user-authorization-revoked', 'reauthorize-user')
+      : issue('unsupported-actor', 'inspect-provider')
+  }
+  if (endpoint === 'calendar-resource' && code === 190003) {
+    return issue('provider-unavailable', 'retry-later')
+  }
+  if (endpoint === 'calendar-resource'
+    && (code === 190004 || code === 190005 || code === 190010)) {
+    return issue('rate-limited', 'retry-later', [], null, response.retryAt)
   }
   if (code === 99991668) {
     return actor === 'user'
@@ -1771,6 +2431,25 @@ function missingTaskScopes(payload: unknown): readonly string[] {
     }
   }
   if (candidates.size === 0) candidates.add(TASK_LIST_READ_SCOPE)
+  return Object.freeze([...candidates].sort())
+}
+
+function missingCalendarScopes(payload: unknown): readonly string[] {
+  const candidates = new Set<string>()
+  const envelope = record(payload)
+  const error = envelope === null ? null : record(envelope.error)
+  const violations = error === null || !Array.isArray(error.permission_violations)
+    ? []
+    : error.permission_violations
+  for (const candidate of violations) {
+    const violation = record(candidate)
+    if (violation === null) continue
+    for (const key of ['scope', 'name', 'subject'] as const) {
+      const value = violation[key]
+      if (typeof value === 'string' && CALENDAR_SCOPES.includes(value)) candidates.add(value)
+    }
+  }
+  if (candidates.size === 0) candidates.add(CALENDAR_READ_SCOPE)
   return Object.freeze([...candidates].sort())
 }
 

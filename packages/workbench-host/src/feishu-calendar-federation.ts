@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { canonicalizeJson } from './audit.ts'
 import type {
   FeishuConnectionIssue,
   ProjectCalendarSchedule,
@@ -51,6 +53,35 @@ export interface WorkbenchFeishuCalendarEventSnapshot {
   /** Versioned digest of the canonical provider authority tuple, not provider CAS. */
   readonly remoteObservationVersion: string
   readonly observedAt: string
+}
+
+/** Exact normalized authority fields covered by the opaque observation digest. */
+export interface WorkbenchFeishuCalendarObservationAuthority {
+  readonly calendarId: string
+  readonly eventId: string
+  readonly organizerCalendarId: string
+  readonly status: string
+  readonly recurrence: string | null
+  readonly schedule: WorkbenchCalendarSchedule
+}
+
+/**
+ * Stable v1 comparison token for one complete Feishu authority observation.
+ * The version lives inside the hashed envelope; the token is not provider CAS.
+ */
+export function createWorkbenchFeishuCalendarObservationVersion(
+  authority: WorkbenchFeishuCalendarObservationAuthority,
+): `sha256:${string}` {
+  const canonical = canonicalizeJson({
+    version: 1,
+    calendarId: authority.calendarId,
+    eventId: authority.eventId,
+    organizerCalendarId: authority.organizerCalendarId,
+    status: authority.status,
+    recurrence: authority.recurrence,
+    schedule: authority.schedule,
+  })
+  return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`
 }
 
 export interface WorkbenchFeishuCalendarChangeNotification {
