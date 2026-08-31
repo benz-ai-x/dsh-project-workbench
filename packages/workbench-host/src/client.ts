@@ -2109,6 +2109,10 @@ export type WorkbenchFeishuTaskReason =
   | 'owner-feishu-task-reference'
   | 'owner-feishu-task-update'
   | 'owner-feishu-task-workflow-configure'
+export type WorkbenchProjectCalendarReason =
+  | 'owner-project-calendar-bind'
+  | 'owner-project-milestone-create'
+  | 'owner-project-milestone-date-update'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
@@ -2116,6 +2120,7 @@ export type WorkbenchCommandReason =
   | WorkbenchSuggestedChangeReason
   | WorkbenchFeishuConnectionReason
   | WorkbenchFeishuTaskReason
+  | WorkbenchProjectCalendarReason
 export type WorkbenchAuditAction =
   | 'workbench.status.updated'
   | 'workbench.project.created'
@@ -2135,6 +2140,9 @@ export type WorkbenchAuditAction =
   | 'workbench.feishu-task.referenced'
   | 'workbench.feishu-task.update-requested'
   | 'workbench.feishu-task-workflow.configured'
+  | 'workbench.project-calendar.bound'
+  | 'workbench.project-milestone.created'
+  | 'workbench.project-milestone.date-update-requested'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
@@ -2145,6 +2153,8 @@ export type WorkbenchAuditObjectType =
   | 'feishu-task-list-binding'
   | 'feishu-task'
   | 'feishu-task-workflow'
+  | 'project-calendar-binding'
+  | 'project-milestone'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
@@ -2166,6 +2176,9 @@ export type WorkbenchActivitySummaryCode =
   | 'feishu-task-referenced'
   | 'feishu-task-update-requested'
   | 'feishu-task-workflow-configured'
+  | 'project-calendar-bound'
+  | 'project-milestone-created'
+  | 'project-milestone-date-update-requested'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {
