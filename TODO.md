@@ -81,9 +81,19 @@
 - [x] Build an accessible localized Project Tasks browser surface with exact identity discovery, hierarchy, roles, comments, canonical links, reconciliation, reference, edit, unknown, reconnect, and cleanup states.
 - [x] Complete Schema v6→v7 migration, production adapter fixtures, Scenario/SQLite/controller/component/lifecycle coverage, generated twenty-three-method Typert artifacts, and built/packed verification.
 
+## T09 — Map template workflow to a Feishu custom field (#10)
+
+- [ ] Define a bounded multi-state workflow with stable logical IDs, initial state, allowed transitions, and terminal states.
+- [ ] Create or map one Feishu single-select field on the Project's primary task list and persist stable field/option GUIDs.
+- [ ] Preview create/existing/migrate compatibility and block missing, hidden, duplicate, unmapped, or in-use destructive changes before provider mutation.
+- [ ] Converge both Workbench-originated and Feishu-originated state changes to Feishu-authoritative custom-field values under Project, task, remote-version, and workflow CAS.
+- [ ] Derive a terminal-state completion suggestion without automatically completing the Feishu task.
+- [ ] Reserve/claim/settle custom-field writes durably so response loss becomes audited unknown and the same command is never blindly redelivered.
+- [ ] Prove Schema v7→v8 restart, exact Task v2 field/value requests, stable create/map/migrate GUIDs, compatibility conflicts, transition matrices, reconciliation, replay/unknown recovery, Client lifecycle, generated Remote, and packed artifacts.
+
 ## Later tickets
 
-- [ ] T09+ Calendar federation, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T08.
+- [ ] T10+ Calendar federation, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T09.
 
 ## Definition of done
 
