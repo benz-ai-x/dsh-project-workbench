@@ -11,7 +11,7 @@ Last updated: 2026-09-01 CST (Asia/Shanghai)
 - Completed delivery ticket: [#12 — T11: Deliverable from plan to acceptance](https://github.com/benz-ai-x/dsh-project-workbench/issues/12).
 - Prepared next ticket: [#13 — T12: Independent Risk register and mitigation tasks](https://github.com/benz-ai-x/dsh-project-workbench/issues/13).
 
-T11 is implemented and verified. Its completion checklist is recorded in `TODO.md`; the current handoff commit closes Issue #12 when published on the default branch. T12 has been selected and its public acceptance boundary is transcribed into `TODO.md`, but no T12 implementation contract has been frozen and no T12 code has begun.
+T11 is implemented and verified. Its completion checklist is recorded in `TODO.md`; handoff commit `37643f4` closed Issue #12 on the default branch. T12 has been selected and its public acceptance boundary is transcribed into `TODO.md`, but no T12 implementation contract has been frozen and no T12 code has begun.
 
 ## T11 delivered surface
 
@@ -51,7 +51,7 @@ The authoritative verification command now runs under the workspace-default Node
 DSH_PLAYWRIGHT_EXECUTABLE_PATH=/root/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell pnpm verify
 ```
 
-Final results at `db57c5e` plus the T11 implementation commits:
+Final results at the T11 implementation checkpoint `db57c5e`:
 
 - Strict pinned context: 207/207 checks.
 - Host and Client build: passed.
