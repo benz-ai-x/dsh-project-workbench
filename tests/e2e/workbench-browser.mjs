@@ -44,6 +44,10 @@ const WORKBENCH_AUDIT_INTEGRITY_PATH = '/api/workbench/auditIntegrity'
 const WORKBENCH_PROJECT_START_PATH = '/api/workbench/projectStart'
 const WORKBENCH_CREATE_PROJECT_PATH = '/api/workbench/createProject'
 const WORKBENCH_PROJECT_PATH = '/api/workbench/project'
+const WORKBENCH_PROJECT_TEAM_PATH = '/api/workbench/projectTeam'
+const WORKBENCH_ADD_PROJECT_MEMBER_PATH = '/api/workbench/addProjectMember'
+const WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH = '/api/workbench/setProjectMemberStatus'
+const WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH = '/api/workbench/setProjectResponsibility'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -567,6 +571,18 @@ async function assertActivityProjection(page, eventCount, ...protectedBusinessTe
       await panel.getByRole('heading', { name: '已从 Template 创建 Project' })
         .waitFor({ state: 'visible' })
     }
+    if (eventCount >= 6) {
+      await panel.getByRole('heading', { name: '已添加 ProjectMember' }).first()
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 7) {
+      await panel.getByRole('heading', { name: '已更新 ProjectMember 状态' })
+        .waitFor({ state: 'visible' })
+    }
+    if (eventCount >= 8) {
+      await panel.getByRole('heading', { name: '已替换 Project Responsibility' })
+        .waitFor({ state: 'visible' })
+    }
     const pendingOutbox = panel.getByText('待投递', { exact: true })
     await pendingOutbox.first().waitFor({ state: 'visible' })
     assert.equal(
@@ -631,6 +647,77 @@ async function reopenProject(page, expected) {
     ...expected,
     definitionDigest: catalog.definitionDigest,
   })
+}
+
+function projectTeamPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-project-team-title"]')
+}
+
+async function assertProjectTeam(page, expected) {
+  const panel = projectTeamPanel(page)
+  await panel.getByRole('heading', { name: 'Project Team', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByText('Project Team 已同步', { exact: true }).waitFor({ state: 'visible' })
+  for (const member of expected.members ?? []) {
+    const card = panel.locator('article').filter({ hasText: member.name }).first()
+    await card.getByRole('heading', { name: member.name, exact: true })
+      .waitFor({ state: 'visible' })
+    await card.getByText(member.status === 'inactive' ? / · 已停用$/u : / · 活跃$/u)
+      .waitFor({ state: 'visible' })
+    if (member.identityText !== undefined) {
+      await card.getByText(member.identityText, { exact: true }).waitFor({ state: 'visible' })
+    }
+    if (member.eligibilityText !== undefined) {
+      await card.getByText(member.eligibilityText, { exact: true })
+        .waitFor({ state: 'visible' })
+    }
+  }
+  if ((expected.members ?? []).length === 0) {
+    await panel.getByText('这个 Project 还没有成员。', { exact: true })
+      .waitFor({ state: 'visible' })
+  }
+  if (expected.responsibility === undefined) {
+    await panel.getByText('尚未配置 Project Responsibility。', { exact: true })
+      .waitFor({ state: 'visible' })
+  } else {
+    const current = panel.locator('section[aria-label="当前 Host 责任"]')
+    await current.waitFor({ state: 'visible' })
+    for (const name of [
+      expected.responsibility.accountable,
+      ...expected.responsibility.contributors,
+      expected.responsibility.sponsor,
+    ]) await current.getByText(name, { exact: true }).waitFor({ state: 'visible' })
+  }
+  return panel
+}
+
+async function addProjectMemberViaUi(page, member) {
+  const panel = projectTeamPanel(page)
+  const disclosure = panel.locator('details').filter({ hasText: '添加 ProjectMember' })
+  if (!(await disclosure.evaluate(element => element.open))) {
+    await disclosure.locator('summary').click()
+  }
+  if (member.kind === 'agent') {
+    await disclosure.getByLabel('Agent', { exact: true }).check()
+  } else {
+    await disclosure.getByLabel('人类', { exact: true }).check()
+  }
+  await disclosure.getByLabel('显示名称', { exact: true }).fill(member.name)
+  if (member.kind === 'human' && member.identity === 'feishu') {
+    await disclosure.getByLabel('声明的飞书身份', { exact: true }).check()
+    await disclosure.getByLabel('飞书 App ID', { exact: true }).fill(member.appId)
+    await disclosure.getByLabel('飞书 open_id', { exact: true }).fill(member.openId)
+  } else if (member.kind === 'human') {
+    await disclosure.getByLabel('外部联系人', { exact: true }).check()
+    await disclosure.getByRole('combobox', { name: '联系方式', exact: true })
+      .selectOption(member.method)
+    await disclosure.getByLabel('联系值', { exact: true }).fill(member.value)
+  }
+  const add = disclosure.getByRole('button', { name: '添加成员', exact: true })
+  assert.equal(await add.isEnabled(), true, `${member.name}: add member action stayed disabled`)
+  await add.click()
+  await panel.getByRole('heading', { name: member.name, exact: true })
+    .waitFor({ state: 'visible' })
 }
 
 async function assertWithinViewport(locator, page, label) {
@@ -818,7 +905,7 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const initialStyleCount = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).count()
-  assert.equal(initialStyleCount, 4, 'Workbench Client did not own exactly four CSS Module resources')
+  assert.equal(initialStyleCount, 5, 'Workbench Client did not own exactly five CSS Module resources')
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -950,15 +1037,23 @@ async function main() {
     ],
   })
 
-  const initialPassword = `T04 Owner initial ${new Date().toISOString()}!`
-  const wrongPassword = 'T04 deliberately wrong password!'
-  const firstRecoveredPassword = `T04 Owner recovered once ${new Date().toISOString()}!`
-  const finalRecoveredPassword = `T04 Owner recovered twice ${new Date().toISOString()}!`
-  const message = `T04 audited browser restart proof ${new Date().toISOString()}`
-  const projectName = `T04 browser Project ${new Date().toISOString()}`
+  const initialPassword = `T05 Owner initial ${new Date().toISOString()}!`
+  const wrongPassword = 'T05 deliberately wrong password!'
+  const firstRecoveredPassword = `T05 Owner recovered once ${new Date().toISOString()}!`
+  const finalRecoveredPassword = `T05 Owner recovered twice ${new Date().toISOString()}!`
+  const message = `T05 audited browser restart proof ${new Date().toISOString()}`
+  const projectName = `T05 browser Project ${new Date().toISOString()}`
   const primaryGoalName = '缩短 Workbench 浏览器反馈周期'
   const outcomeName = '将浏览器验证反馈周期降至三天'
   const metricName = '浏览器验证反馈周期'
+  const feishuSponsorName = '浏览器飞书 Sponsor'
+  const feishuAppId = 'cli.browser:001'
+  const feishuOpenId = 'ou-browser_sponsor'
+  const externalContributorName = '浏览器外部 Contributor'
+  const externalContact = 'browser.external@example.invalid'
+  const agentAccountableName = '浏览器研究 Agent'
+  const inactiveHistorianName = '浏览器历史成员'
+  const inactiveHistorianContact = 'browser-historian-reference'
   const expectedHttpError = /(?:401|Unauthorized)/u
 
   // Fresh browser: setup is visible, but the protected projection is neither
@@ -977,8 +1072,13 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TEAM_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
   await captureVisual(firstJourney.page, '01-setup-desktop')
@@ -993,6 +1093,7 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SNAPSHOT_PATH), 1)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
 
   // Hold the real initialize request briefly so the actual disabled/pending
@@ -1096,11 +1197,22 @@ async function main() {
   await initialProjectCatalog.panel.getByText('还没有 Project。完成上面的表单即可创建第一个。', {
     exact: true,
   }).waitFor({ state: 'visible' })
+  const unselectedTeam = projectTeamPanel(firstJourney.page)
+  await unselectedTeam.getByRole('heading', { name: 'Project Team', exact: true })
+    .waitFor({ state: 'visible' })
+  await unselectedTeam.getByText(
+    '打开一个 Project 后，可在该项目的详情下管理成员与责任。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TEAM_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH), 0)
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
     0,
@@ -1201,6 +1313,141 @@ async function main() {
     outcomeName,
     metricName,
   )
+
+  const emptyTeam = await assertProjectTeam(firstJourney.page, { members: [] })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TEAM_PATH) > 0)
+  await emptyTeam.locator('details').filter({ hasText: '添加 ProjectMember' })
+    .locator('summary').click()
+  await emptyTeam.getByText(
+    'open_id 只在该 App 范围内有意义。T05 只记录声明值，不会调用飞书验证。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  await addProjectMemberViaUi(firstJourney.page, {
+    kind: 'human',
+    identity: 'feishu',
+    name: feishuSponsorName,
+    appId: feishuAppId,
+    openId: feishuOpenId,
+  })
+  await addProjectMemberViaUi(firstJourney.page, {
+    kind: 'human',
+    identity: 'external',
+    name: externalContributorName,
+    method: 'email',
+    value: externalContact,
+  })
+  await addProjectMemberViaUi(firstJourney.page, {
+    kind: 'agent',
+    name: agentAccountableName,
+  })
+  await addProjectMemberViaUi(firstJourney.page, {
+    kind: 'human',
+    identity: 'external',
+    name: inactiveHistorianName,
+    method: 'other',
+    value: inactiveHistorianContact,
+  })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH) >= 4)
+
+  let teamPanel = projectTeamPanel(firstJourney.page)
+  const historianCard = teamPanel.locator('article').filter({ hasText: inactiveHistorianName }).first()
+  await historianCard.getByRole('button', { name: '停用成员', exact: true }).click()
+  await historianCard.getByText(/ · 已停用$/u).waitFor({ state: 'visible' })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH) > 0)
+
+  const accountableSelect = teamPanel.getByRole('combobox', {
+    name: 'Accountable',
+    exact: true,
+  })
+  await accountableSelect.selectOption({ label: `${agentAccountableName} · Agent 成员` })
+  await teamPanel.getByText(
+    '当前 Accountable 是 Agent 或外部联系人；必须选择一位不同的活跃人类 Sponsor。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  const saveResponsibility = teamPanel.getByRole('button', {
+    name: '保存 Project Responsibility',
+    exact: true,
+  })
+  assert.equal(await saveResponsibility.isDisabled(), true)
+  await teamPanel.getByRole('group', { name: 'Contributors', exact: true })
+    .getByRole('checkbox', { name: externalContributorName, exact: true })
+    .check()
+  assert.equal(await saveResponsibility.isDisabled(), true)
+  await teamPanel.getByRole('combobox', { name: 'Human Sponsor', exact: true })
+    .selectOption({ label: feishuSponsorName })
+  assert.equal(await saveResponsibility.isEnabled(), true)
+  await saveResponsibility.click()
+
+  const expectedTeam = {
+    members: [
+      {
+        name: feishuSponsorName,
+        status: 'active',
+        identityText: '仅声明，未验证',
+        eligibilityText: '已有 App 范围 open_id；仍需后续连接器验证',
+      },
+      {
+        name: externalContributorName,
+        status: 'active',
+        identityText: `email: ${externalContact}`,
+        eligibilityText: '不可用：外部联系值不是飞书 assignee ID',
+      },
+      {
+        name: agentAccountableName,
+        status: 'active',
+        identityText: 'Workbench Agent 描述身份',
+        eligibilityText: '不可用：T05 Agent 不是飞书成员',
+      },
+      {
+        name: inactiveHistorianName,
+        status: 'inactive',
+        identityText: `other: ${inactiveHistorianContact}`,
+        eligibilityText: '不可用：成员已停用',
+      },
+    ],
+    responsibility: {
+      accountable: agentAccountableName,
+      contributors: [externalContributorName],
+      sponsor: feishuSponsorName,
+    },
+  }
+  const teamPrivateValues = [
+    feishuSponsorName,
+    feishuAppId,
+    feishuOpenId,
+    externalContributorName,
+    externalContact,
+    agentAccountableName,
+    inactiveHistorianName,
+    inactiveHistorianContact,
+  ]
+  teamPanel = await assertProjectTeam(firstJourney.page, expectedTeam)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH) > 0)
+  const accountableCard = teamPanel.locator('article')
+    .filter({ hasText: agentAccountableName }).first()
+  await accountableCard.getByText('Accountable', { exact: true }).waitFor({ state: 'visible' })
+  assert.equal(
+    await accountableCard.getByRole('button', { name: '停用成员', exact: true }).isDisabled(),
+    true,
+  )
+  await accountableCard.getByText(
+    '该成员仍持有当前责任；请先重新分配责任，再停用。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  await teamPanel.locator('article').filter({ hasText: externalContributorName }).first()
+    .getByText('Contributors', { exact: true }).waitFor({ state: 'visible' })
+  await teamPanel.locator('article').filter({ hasText: feishuSponsorName }).first()
+    .getByText('Human Sponsor', { exact: true }).waitFor({ state: 'visible' })
+  await assertActivityProjection(
+    firstJourney.page,
+    8,
+    message,
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+    ...teamPrivateValues,
+  )
   await exerciseClientHmr(
     firstJourney,
     join(repositoryRoot, 'packages/workbench-client/lib/client.js'),
@@ -1212,15 +1459,17 @@ async function main() {
     outcomeName,
     metricName,
   })
+  await assertProjectTeam(firstJourney.page, expectedTeam)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH) > 0)
   await assertActivityProjection(
     firstJourney.page,
-    2,
+    8,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    ...teamPrivateValues,
   )
   const sessionBar = firstJourney.page.locator('header').filter({
     has: firstJourney.page.getByRole('button', { name: '退出登录' }),
@@ -1230,12 +1479,37 @@ async function main() {
   await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
     await sessionBar.waitFor({ state: 'visible' })
     await firstJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
+    await reopenProject(firstJourney.page, {
+      projectName,
+      primaryGoalName,
+      outcomeName,
+      metricName,
+    })
+    const mobileTeam = await assertProjectTeam(firstJourney.page, expectedTeam)
+    const mobileAddDisclosure = mobileTeam.locator('details').filter({
+      hasText: '添加 ProjectMember',
+    })
+    await mobileAddDisclosure.locator('summary').click()
     await assertWithinViewport(sessionBar, firstJourney.page, 'mobile Owner session bar')
     await assertWithinViewport(firstJourney.page.locator('#workbench-status-editor'), firstJourney.page, 'mobile status editor')
     await assertWithinViewport(
       firstJourney.page.getByLabel('Project 名称', { exact: true }),
       firstJourney.page,
       'mobile Project name editor',
+    )
+    await assertWithinViewport(
+      mobileAddDisclosure.getByLabel('显示名称', { exact: true }),
+      firstJourney.page,
+      'mobile Project member name editor',
+    )
+    await assertWithinViewport(
+      mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
+      firstJourney.page,
+      'mobile Accountable selector',
+    )
+    await assertVisibleKeyboardFocus(
+      mobileTeam.getByRole('combobox', { name: 'Accountable', exact: true }),
+      'mobile Accountable selector',
     )
     const layout = await firstJourney.page.evaluate(() => {
       const session = document.querySelector('header[aria-label]')
@@ -1256,6 +1530,7 @@ async function main() {
   await firstJourney.page.locator('#workbench-login-password').waitFor({ state: 'visible' })
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await expectCarrierDenied(firstJourney.page, firstNetwork, false)
   const postLogoutCookies = await firstNetwork.cdp.send('Network.getAllCookies')
@@ -1279,11 +1554,16 @@ async function main() {
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROJECT_START_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_CREATE_PROJECT_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROJECT_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROJECT_TEAM_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_ADD_PROJECT_MEMBER_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SET_PROJECT_MEMBER_STATUS_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_SET_PROJECT_RESPONSIBILITY_PATH), 0)
   await separateLogin.fill(wrongPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('#workbench-auth-issue').waitFor({ state: 'visible' })
   assert.equal(await separateJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await separateJourney.page.locator('#workbench-projects-title').count(), 0)
+  assert.equal(await separateJourney.page.locator('#workbench-project-team-title').count(), 0)
   await separateLogin.fill(initialPassword)
   await separateJourney.page.locator('form button[type="submit"]').click()
   await separateJourney.page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
@@ -1298,14 +1578,16 @@ async function main() {
     outcomeName,
     metricName,
   })
+  await assertProjectTeam(separateJourney.page, expectedTeam)
   await assertActivityProjection(
     separateJourney.page,
-    2,
+    8,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    ...teamPrivateValues,
   )
   await assertNoBrowserErrors(separateJourney, [expectedHttpError])
   await separateJourney.context.close()
@@ -1339,14 +1621,16 @@ async function main() {
     outcomeName,
     metricName,
   })
+  await assertProjectTeam(secondJourney.page, expectedTeam)
   await assertActivityProjection(
     secondJourney.page,
-    2,
+    8,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    ...teamPrivateValues,
   )
   await ownerCookieFromChrome(secondNetwork)
   await assertNoBrowserErrors(secondJourney)
@@ -1454,14 +1738,16 @@ async function main() {
     outcomeName,
     metricName,
   })
+  await assertProjectTeam(postRecoveryJourney.page, expectedTeam)
   await assertActivityProjection(
     postRecoveryJourney.page,
-    2,
+    8,
     message,
     projectName,
     primaryGoalName,
     outcomeName,
     metricName,
+    ...teamPrivateValues,
   )
   await assertNoBrowserErrors(postRecoveryJourney, [expectedHttpError])
   await postRecoveryJourney.context.close()
@@ -1469,8 +1755,9 @@ async function main() {
 
   process.stdout.write(
     'PASS real Workbench setup -> audited status -> immutable Project snapshot '
-      + '-> redacted Activity -> Client HMR -> logout -> restart '
-      + '-> Project reopen -> one-time offline recovery -> session revocation\n',
+      + '-> Project Team roster/responsibility -> redacted Activity -> Client HMR '
+      + '-> logout -> restart -> Team reopen -> one-time offline recovery '
+      + '-> session revocation\n',
   )
 }
 

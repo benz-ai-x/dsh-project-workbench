@@ -4,12 +4,20 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  AddProjectMemberRequest,
+  AddProjectMemberResult,
   CreateProjectRequest,
   CreateProjectResult,
   ProjectDetailProjection,
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
+  ProjectTeamProjection,
+  ProjectTeamQuery,
+  SetProjectMemberStatusRequest,
+  SetProjectMemberStatusResult,
+  SetProjectResponsibilityRequest,
+  SetProjectResponsibilityResult,
   SetStatusRequest,
   SetStatusResult,
   WorkbenchActivityFilter,
@@ -273,6 +281,42 @@ export class WorkbenchService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<ProjectDetailProjection | null> {
     return this.scenario.project(query, signal)
+  }
+
+  /** Read one authorized Project Team with its current responsibility. */
+  @Remote
+  projectTeam(
+    query: ProjectTeamQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTeamProjection | null> {
+    return this.scenario.projectTeam(query, signal)
+  }
+
+  /** Add one Project-scoped human or descriptive Agent member. */
+  @Remote
+  addProjectMember(
+    request: AddProjectMemberRequest,
+    signal: AbortSignal,
+  ): Promise<AddProjectMemberResult> {
+    return this.scenario.addProjectMember(request, signal)
+  }
+
+  /** Activate or deactivate one retained Project member. */
+  @Remote
+  setProjectMemberStatus(
+    request: SetProjectMemberStatusRequest,
+    signal: AbortSignal,
+  ): Promise<SetProjectMemberStatusResult> {
+    return this.scenario.setProjectMemberStatus(request, signal)
+  }
+
+  /** Atomically replace the complete Project Responsibility tuple. */
+  @Remote
+  setProjectResponsibility(
+    request: SetProjectResponsibilityRequest,
+    signal: AbortSignal,
+  ): Promise<SetProjectResponsibilityResult> {
+    return this.scenario.setProjectResponsibility(request, signal)
   }
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T04 actually loads.
+ * Verify the executable artifacts that T05 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -241,34 +241,50 @@ function verifyTypertFace(face, packageName, label) {
   const methods = invocations.map(invocation => invocation?.method).sort()
   const expectedMethods = [
     'activity',
+    'addProjectMember',
     'auditIntegrity',
     'createProject',
     'project',
     'projectStart',
+    'projectTeam',
+    'setProjectMemberStatus',
+    'setProjectResponsibility',
     'setStatus',
     'snapshot',
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the seven T04 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the eleven T05 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
     check(invocation?.service === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench service`)
   }
   const activity = invocations.find(invocation => invocation?.method === 'activity')
+  const addProjectMember = invocations.find(invocation => invocation?.method === 'addProjectMember')
   const auditIntegrity = invocations.find(invocation => invocation?.method === 'auditIntegrity')
   const createProject = invocations.find(invocation => invocation?.method === 'createProject')
   const project = invocations.find(invocation => invocation?.method === 'project')
   const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
+  const projectTeam = invocations.find(invocation => invocation?.method === 'projectTeam')
+  const setProjectMemberStatus = invocations.find(
+    invocation => invocation?.method === 'setProjectMemberStatus',
+  )
+  const setProjectResponsibility = invocations.find(
+    invocation => invocation?.method === 'setProjectResponsibility',
+  )
   const setStatus = invocations.find(invocation => invocation?.method === 'setStatus')
   const snapshot = invocations.find(invocation => invocation?.method === 'snapshot')
   for (const invocation of [
     activity,
+    addProjectMember,
     auditIntegrity,
     createProject,
     project,
     projectStart,
+    projectTeam,
+    setProjectMemberStatus,
+    setProjectResponsibility,
     setStatus,
     snapshot,
   ]) {
@@ -433,6 +449,313 @@ function verifyTypertFace(face, packageName, label) {
     `${packageName}: ${label} Project detail carries an independent versioned Template Snapshot`,
   )
 
+  const teamQuery = projectTeam?.parameters?.find(parameter => parameter?.name === 'query')
+  const teamQueryShape = unwrapSchema(teamQuery?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(teamQuery?.codec?.schema), [
+      'actor',
+      'organizationId',
+      'projectId',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(teamQueryShape?.[key])),
+    `${packageName}: ${label} Project Team lookup exposes Project identity and rejects caller authority`,
+  )
+  check(
+    schemaRejects(teamQuery?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      actor: 'caller-forged-owner',
+    }),
+    `${packageName}: ${label} Project Team carrier rejects rather than strips caller authority`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(
+      unionOptions(projectTeam?.result?.schema)
+        .find(option => schemaObjectKeys(option).includes('teamRevision'))
+        ?? projectTeam?.result?.schema,
+    ), [
+      'members',
+      'projectId',
+      'responsibility',
+      'teamRevision',
+    ]),
+    `${packageName}: ${label} Project Team returns roster, responsibility, and one Team CAS`,
+  )
+
+  const addMemberRequest = addProjectMember?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const addMemberShape = unwrapSchema(addMemberRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(addMemberRequest?.codec?.schema), [
+      'actor',
+      'causationId',
+      'expectedRevision',
+      'expectedTeamRevision',
+      'idempotencyKey',
+      'member',
+      'memberId',
+      'organizationId',
+      'projectId',
+      'reason',
+      'teamId',
+    ]),
+    `${packageName}: ${label} AddProjectMemberRequest contains caller fields plus explicit authority fences`,
+  )
+  check(
+    ['actor', 'memberId', 'organizationId', 'teamId']
+      .every(key => isOptionalNever(addMemberShape?.[key])),
+    `${packageName}: ${label} member addition rejects caller-derived actor, scope, and identity`,
+  )
+  const memberOptions = unionOptions(addMemberShape?.member)
+  const humanMember = memberOptions.find(option => schemaLiteralValues(
+    unwrapSchema(option)?.def?.shape?.kind,
+  ).includes('human'))
+  const agentMember = memberOptions.find(option => schemaLiteralValues(
+    unwrapSchema(option)?.def?.shape?.kind,
+  ).includes('agent'))
+  const humanMemberShape = unwrapSchema(humanMember)?.def?.shape
+  const agentMemberShape = unwrapSchema(agentMember)?.def?.shape
+  check(
+    memberOptions.length === 2
+      && sameStrings(schemaObjectKeys(humanMember), [
+        'agentProfileId',
+        'agentProfileVersionId',
+        'displayName',
+        'identity',
+        'kind',
+      ])
+      && sameStrings(schemaObjectKeys(agentMember), [
+        'agentProfileId',
+        'agentProfileVersionId',
+        'displayName',
+        'identity',
+        'kind',
+      ])
+      && ['agentProfileId', 'agentProfileVersionId']
+        .every(key => isOptionalNever(humanMemberShape?.[key]))
+      && ['agentProfileId', 'agentProfileVersionId', 'identity']
+        .every(key => isOptionalNever(agentMemberShape?.[key])),
+    `${packageName}: ${label} member creation requires one-identity humans and forbids Agent profiles`,
+  )
+  const humanIdentity = humanMemberShape?.identity
+  const identityOptions = unionOptions(humanIdentity)
+  const feishuIdentity = identityOptions.find(option => schemaLiteralValues(
+    unwrapSchema(option)?.def?.shape?.type,
+  ).includes('feishu'))
+  const externalIdentity = identityOptions.find(option => schemaLiteralValues(
+    unwrapSchema(option)?.def?.shape?.type,
+  ).includes('external'))
+  const feishuIdentityShape = unwrapSchema(feishuIdentity)?.def?.shape
+  const externalIdentityShape = unwrapSchema(externalIdentity)?.def?.shape
+  check(
+    identityOptions.length === 2
+      && sameStrings(schemaObjectKeys(feishuIdentity), [
+        'appId', 'method', 'openId', 'state', 'type', 'value',
+      ])
+      && sameStrings(schemaObjectKeys(externalIdentity), [
+        'appId', 'method', 'openId', 'state', 'type', 'value',
+      ])
+      && ['method', 'state', 'value']
+        .every(key => isOptionalNever(feishuIdentityShape?.[key]))
+      && ['appId', 'openId', 'state']
+        .every(key => isOptionalNever(externalIdentityShape?.[key])),
+    `${packageName}: ${label} human creation rejects mixed identity fields and caller state`,
+  )
+  const addMemberBase = {
+    projectId: 'project-built-artifact',
+    expectedTeamRevision: 0,
+    expectedRevision: null,
+    idempotencyKey: 'built-member-idempotency-0001',
+    causationId: 'built-member-causation-0001',
+    reason: 'owner-project-member-add',
+  }
+  check(
+    schemaAccepts(addMemberRequest?.codec?.schema, {
+      ...addMemberBase,
+      member: {
+        kind: 'human',
+        displayName: 'Built Feishu human',
+        identity: { type: 'feishu', appId: 'cli.built:001', openId: 'ou-built_001' },
+      },
+    })
+      && schemaAccepts(addMemberRequest?.codec?.schema, {
+        ...addMemberBase,
+        member: {
+          kind: 'human',
+          displayName: 'Built external human',
+          identity: { type: 'external', method: 'email', value: 'built@example.invalid' },
+        },
+      })
+      && schemaAccepts(addMemberRequest?.codec?.schema, {
+        ...addMemberBase,
+        member: { kind: 'agent', displayName: 'Built Agent' },
+      }),
+    `${packageName}: ${label} member carrier accepts exactly the three T05 identity variants`,
+  )
+  check(
+    schemaRejects(addMemberRequest?.codec?.schema, {
+      ...addMemberBase,
+      member: {
+        kind: 'human',
+        displayName: 'Forged declaration state',
+        identity: {
+          type: 'feishu', appId: 'cli.built:001', openId: 'ou-built_001', state: 'declared',
+        },
+      },
+    })
+      && schemaRejects(addMemberRequest?.codec?.schema, {
+        ...addMemberBase,
+        member: {
+          kind: 'human',
+          displayName: 'Mixed identity',
+          identity: {
+            type: 'feishu', appId: 'cli.built:001', openId: 'ou-built_001',
+            method: 'email', value: 'mixed@example.invalid',
+          },
+        },
+      })
+      && schemaRejects(addMemberRequest?.codec?.schema, {
+        ...addMemberBase,
+        member: {
+          kind: 'agent', displayName: 'Forged Agent', identity: { type: 'external' },
+        },
+      })
+      && schemaRejects(addMemberRequest?.codec?.schema, {
+        ...addMemberBase,
+        member: {
+          kind: 'agent', displayName: 'Profiled Agent', agentProfileVersionId: 'profile-v1',
+        },
+      })
+      && schemaRejects(addMemberRequest?.codec?.schema, {
+        ...addMemberBase,
+        member: { kind: 'agent', displayName: 'Caller-scoped Agent' },
+        memberId: 'member-caller-forged',
+      }),
+    `${packageName}: ${label} member carrier rejects declaration, mixed, profile, and authority forgery`,
+  )
+
+  const memberStatusRequest = setProjectMemberStatus?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const memberStatusShape = unwrapSchema(memberStatusRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(memberStatusRequest?.codec?.schema), [
+      'actor',
+      'causationId',
+      'displayName',
+      'expectedMemberRevision',
+      'expectedTeamRevision',
+      'idempotencyKey',
+      'identity',
+      'memberId',
+      'organizationId',
+      'projectId',
+      'reason',
+      'status',
+      'teamId',
+    ]),
+    `${packageName}: ${label} member lifecycle uses both Team and member compare-and-swap revisions`,
+  )
+  check(
+    ['actor', 'displayName', 'identity', 'organizationId', 'teamId']
+      .every(key => isOptionalNever(memberStatusShape?.[key])),
+    `${packageName}: ${label} member lifecycle rejects caller scope and identity rewrites`,
+  )
+  const memberStatusBase = {
+    projectId: 'project-built-artifact',
+    memberId: 'member-built-artifact',
+    status: 'inactive',
+    expectedTeamRevision: 3,
+    expectedMemberRevision: 1,
+    idempotencyKey: 'built-status-idempotency-0001',
+    causationId: 'built-status-causation-0001',
+    reason: 'owner-project-member-status-change',
+  }
+  check(
+    schemaAccepts(memberStatusRequest?.codec?.schema, memberStatusBase)
+      && schemaRejects(memberStatusRequest?.codec?.schema, {
+        ...memberStatusBase,
+        identity: { type: 'external', method: 'email', value: 'rewrite@example.invalid' },
+      }),
+    `${packageName}: ${label} lifecycle carrier accepts status only and rejects identity rewrites`,
+  )
+
+  const responsibilityRequest = setProjectResponsibility?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const responsibilityShape = unwrapSchema(responsibilityRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(responsibilityRequest?.codec?.schema), [
+      'accountableMemberId',
+      'actor',
+      'causationId',
+      'contributorMemberIds',
+      'expectedResponsibilityRevision',
+      'expectedTeamRevision',
+      'humanSponsorMemberId',
+      'idempotencyKey',
+      'organizationId',
+      'projectId',
+      'reason',
+      'responsibilityRevision',
+      'teamId',
+    ]),
+    `${packageName}: ${label} responsibility replaces one complete role tuple atomically`,
+  )
+  check(
+    ['actor', 'organizationId', 'responsibilityRevision', 'teamId']
+      .every(key => isOptionalNever(responsibilityShape?.[key])),
+    `${packageName}: ${label} responsibility rejects caller scope and committed revision`,
+  )
+  const responsibilityBase = {
+    projectId: 'project-built-artifact',
+    accountableMemberId: 'member-built-agent',
+    contributorMemberIds: ['member-built-contributor'],
+    humanSponsorMemberId: 'member-built-sponsor',
+    expectedTeamRevision: 3,
+    expectedResponsibilityRevision: null,
+    idempotencyKey: 'built-responsibility-idempotency-0001',
+    causationId: 'built-responsibility-causation-0001',
+    reason: 'owner-project-responsibility-set',
+  }
+  check(
+    schemaAccepts(responsibilityRequest?.codec?.schema, responsibilityBase)
+      && schemaRejects(responsibilityRequest?.codec?.schema, {
+        ...responsibilityBase,
+        responsibilityRevision: 1,
+      }),
+    `${packageName}: ${label} responsibility carrier rejects caller committed revision`,
+  )
+
+  for (const [invocation, expectedValueKeys, commandLabel] of [
+    [
+      addProjectMember,
+      ['kind', 'memberId', 'memberRevision', 'projectId', 'status', 'teamRevision'],
+      'member addition',
+    ],
+    [
+      setProjectMemberStatus,
+      ['kind', 'memberId', 'memberRevision', 'projectId', 'status', 'teamRevision'],
+      'member lifecycle',
+    ],
+    [
+      setProjectResponsibility,
+      ['projectId', 'responsibilityRevision', 'teamRevision'],
+      'responsibility assignment',
+    ],
+  ]) {
+    const success = unionOptions(invocation?.result?.schema)
+      .find(option => schemaObjectKeys(option).includes('receipt'))
+    const successShape = unwrapSchema(success)?.def?.shape
+    check(
+      sameStrings(schemaObjectKeys(success), ['ok', 'receipt', 'value'])
+        && sameStrings(schemaObjectKeys(successShape?.value), expectedValueKeys),
+      `${packageName}: ${label} ${commandLabel} returns only a PII-free acknowledgement and receipt`,
+    )
+  }
+
   const projectQuery = project?.parameters?.find(parameter => parameter?.name === 'query')
   check(
     sameStrings(schemaObjectKeys(projectQuery?.codec?.schema), ['projectId']),
@@ -477,6 +800,36 @@ function arrayElementSchema(value) {
   const unwrapped = unwrapSchema(value)
   if (unwrapped?.def?.type !== 'array') return undefined
   return unwrapped.def.element
+}
+
+function unionOptions(value) {
+  const options = unwrapSchema(value)?.def?.options
+  return Array.isArray(options) ? options : []
+}
+
+function schemaLiteralValues(value) {
+  const values = unwrapSchema(value)?.def?.values
+  return Array.isArray(values) ? values : []
+}
+
+function isOptionalNever(value) {
+  return value?.def?.type === 'optional' && unwrapSchema(value)?.def?.type === 'never'
+}
+
+function schemaAccepts(schema, value) {
+  try {
+    return schema?.safeParse(value)?.success === true
+  } catch {
+    return false
+  }
+}
+
+function schemaRejects(schema, value) {
+  try {
+    return schema?.safeParse(value)?.success === false
+  } catch {
+    return false
+  }
 }
 
 function sameStrings(actual, expected) {

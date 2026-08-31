@@ -1,12 +1,17 @@
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
+  AddProjectMemberResult,
   CreateProjectResult,
   SetStatusResult,
   WorkbenchProjectMutation,
+  WorkbenchProjectMemberMutation,
+  WorkbenchProjectMemberStatusMutation,
+  WorkbenchProjectResponsibilityMutation,
   WorkbenchStatusMutation,
 } from '../src/index.ts'
 import {
@@ -17,6 +22,7 @@ import {
   WORKBENCH_SCHEMA_VERSION,
   WORKBENCH_SQLITE_APPLICATION_ID,
 } from '../src/index.ts'
+import { canonicalizeJson } from '../src/audit.ts'
 
 const roots: string[] = []
 const signal = new AbortController().signal
@@ -172,6 +178,210 @@ function projectArtifactCounts(database: DatabaseSync) {
     audit: database.prepare('SELECT COUNT(*) AS count FROM workbench_audit_event').get(),
     receipts: database.prepare('SELECT COUNT(*) AS count FROM workbench_command_receipt').get(),
   }
+}
+
+function memberCommand(
+  suffix: string,
+  expectedTeamRevision: number,
+  member: WorkbenchProjectMemberMutation['member'],
+  options: {
+    readonly projectId?: string
+    readonly organizationId?: string
+    readonly teamId?: string
+    readonly idempotencyKey?: string
+    readonly minute?: number
+  } = {},
+): WorkbenchProjectMemberMutation {
+  const minute = options.minute ?? Math.min(expectedTeamRevision + 1, 59)
+  const instant = `2026-08-31T10:${String(minute).padStart(2, '0')}:00.000Z`
+  return {
+    projectId: options.projectId ?? 'project-team',
+    memberId: `member-${suffix}`,
+    member,
+    expectedTeamRevision,
+    expectedRevision: null,
+    createdAt: instant,
+    command: {
+      commandId: `command-member-${suffix}`,
+      auditEventId: `audit-member-${suffix}`,
+      outboxId: `outbox-member-${suffix}`,
+      idempotencyKey: options.idempotencyKey ?? `member-key-${suffix.padStart(6, '0')}`,
+      causationId: `member-cause-${suffix.padStart(6, '0')}`,
+      reason: 'owner-project-member-add',
+      actor: {
+        kind: 'owner',
+        id: 'owner-test',
+        organizationId: options.organizationId ?? 'organization-test',
+        teamId: options.teamId ?? 'team-test',
+      },
+      occurredAt: instant,
+    },
+  }
+}
+
+function memberStatusCommand(
+  suffix: string,
+  memberId: string,
+  status: 'active' | 'inactive',
+  expectedTeamRevision: number,
+  expectedMemberRevision: number,
+  options: {
+    readonly projectId?: string
+    readonly idempotencyKey?: string
+    readonly minute?: number
+  } = {},
+): WorkbenchProjectMemberStatusMutation {
+  const minute = options.minute ?? Math.min(expectedTeamRevision + 1, 59)
+  const instant = `2026-08-31T11:${String(minute).padStart(2, '0')}:00.000Z`
+  return {
+    projectId: options.projectId ?? 'project-team',
+    memberId,
+    status,
+    expectedTeamRevision,
+    expectedMemberRevision,
+    updatedAt: instant,
+    command: {
+      commandId: `command-member-status-${suffix}`,
+      auditEventId: `audit-member-status-${suffix}`,
+      outboxId: `outbox-member-status-${suffix}`,
+      idempotencyKey: options.idempotencyKey ?? `status-key-${suffix.padStart(6, '0')}`,
+      causationId: `status-cause-${suffix.padStart(6, '0')}`,
+      reason: 'owner-project-member-status-change',
+      actor: {
+        kind: 'owner', id: 'owner-test',
+        organizationId: 'organization-test', teamId: 'team-test',
+      },
+      occurredAt: instant,
+    },
+  }
+}
+
+function responsibilityCommand(
+  suffix: string,
+  expectedTeamRevision: number,
+  expectedResponsibilityRevision: number | null,
+  accountableMemberId: string,
+  contributorMemberIds: readonly string[] = [],
+  humanSponsorMemberId: string | null = null,
+  projectId = 'project-team',
+): WorkbenchProjectResponsibilityMutation {
+  const minute = Math.min(expectedTeamRevision + 1, 59)
+  const instant = `2026-08-31T12:${String(minute).padStart(2, '0')}:00.000Z`
+  return {
+    projectId,
+    accountableMemberId,
+    contributorMemberIds,
+    humanSponsorMemberId,
+    expectedTeamRevision,
+    expectedResponsibilityRevision,
+    updatedAt: instant,
+    command: {
+      commandId: `command-responsibility-${suffix}`,
+      auditEventId: `audit-responsibility-${suffix}`,
+      outboxId: `outbox-responsibility-${suffix}`,
+      idempotencyKey: `responsibility-key-${suffix.padStart(6, '0')}`,
+      causationId: `responsibility-cause-${suffix.padStart(6, '0')}`,
+      reason: 'owner-project-responsibility-set',
+      actor: {
+        kind: 'owner', id: 'owner-test',
+        organizationId: 'organization-test', teamId: 'team-test',
+      },
+      occurredAt: instant,
+    },
+  }
+}
+
+async function createTeamProject(workbench: SqliteWorkbenchRepository): Promise<void> {
+  const result = await workbench.commitProject(projectCommand('team', 0), signal)
+  if (!result.ok) throw new Error('expected Team fixture Project')
+}
+
+function teamArtifactCounts(database: DatabaseSync) {
+  return {
+    heads: database.prepare('SELECT COUNT(*) AS count FROM workbench_project_team_head').get(),
+    members: database.prepare('SELECT COUNT(*) AS count FROM workbench_project_member').get(),
+    responsibilityVersions: database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_project_responsibility_version
+    `).get(),
+    contributors: database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_project_responsibility_contributor
+    `).get(),
+    teamRevision: database.prepare(`
+      SELECT team_revision, current_responsibility_revision
+      FROM workbench_project_team_head WHERE project_id = 'project-team'
+    `).get(),
+    outbox: database.prepare('SELECT COUNT(*) AS count FROM workbench_outbox').get(),
+    audit: database.prepare('SELECT COUNT(*) AS count FROM workbench_audit_event').get(),
+    receipts: database.prepare('SELECT COUNT(*) AS count FROM workbench_command_receipt').get(),
+  }
+}
+
+function bypassReceiptImmutability(database: DatabaseSync, tamper: () => void): void {
+  database.exec('DROP TRIGGER workbench_command_receipt_no_update')
+  try {
+    tamper()
+  } finally {
+    database.exec(`
+      CREATE TRIGGER workbench_command_receipt_no_update
+        BEFORE UPDATE ON workbench_command_receipt
+      BEGIN SELECT RAISE(ABORT, 'workbench command receipts are immutable'); END
+    `)
+  }
+}
+
+function bypassOutboxIntentImmutability(database: DatabaseSync, tamper: () => void): void {
+  database.exec('DROP TRIGGER workbench_outbox_intent_no_update')
+  try {
+    tamper()
+  } finally {
+    database.exec(`
+      CREATE TRIGGER workbench_outbox_intent_no_update BEFORE UPDATE OF
+        id, command_id, organization_id, topic, effect_key, project_id,
+        object_type, object_id, object_version, causation_id, payload_json, created_at
+        ON workbench_outbox
+      BEGIN SELECT RAISE(ABORT, 'workbench Outbox intent is immutable'); END
+    `)
+  }
+}
+
+function forgeReceiptAndOutbox(
+  database: DatabaseSync,
+  commandId: string,
+  mutateResult: (result: Record<string, unknown>) => void,
+  mutatePayload: (payload: Record<string, unknown>) => void,
+  requestHash?: string,
+): void {
+  const row = database.prepare(`
+    SELECT receipt.result_json, receipt.outbox_id, outbox.payload_json
+    FROM workbench_command_receipt AS receipt
+    INNER JOIN workbench_outbox AS outbox ON outbox.id = receipt.outbox_id
+    WHERE receipt.command_id = ?
+  `).get(commandId) as {
+    readonly result_json: string
+    readonly outbox_id: string
+    readonly payload_json: string
+  }
+  const result = JSON.parse(row.result_json) as Record<string, unknown>
+  const payload = JSON.parse(row.payload_json) as Record<string, unknown>
+  mutateResult(result)
+  mutatePayload(payload)
+  bypassReceiptImmutability(database, () => {
+    if (requestHash === undefined) {
+      database.prepare(`
+        UPDATE workbench_command_receipt SET result_json = ? WHERE command_id = ?
+      `).run(canonicalizeJson(result), commandId)
+      return
+    }
+    database.prepare(`
+      UPDATE workbench_command_receipt SET result_json = ?, request_hash = ?
+      WHERE command_id = ?
+    `).run(canonicalizeJson(result), requestHash, commandId)
+  })
+  bypassOutboxIntentImmutability(database, () => {
+    database.prepare(`
+      UPDATE workbench_outbox SET payload_json = ? WHERE id = ?
+    `).run(canonicalizeJson(payload), row.outbox_id)
+  })
 }
 
 describe('SqliteWorkbenchRepository', () => {
@@ -839,7 +1049,7 @@ describe('SqliteWorkbenchRepository', () => {
     await expect(workbench.open()).rejects.toThrow(/closed/u)
   })
 
-  it('migrates v2 to v3, seeds the exact compiled template, and preserves the T03 ledger', async () => {
+  it('migrates v2 through v4, seeds the exact template, and preserves the T03 ledger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -848,6 +1058,18 @@ describe('SqliteWorkbenchRepository', () => {
 
     const legacy = new DatabaseSync(path)
     legacy.exec(`
+      DROP TRIGGER workbench_project_responsibility_contributor_no_delete;
+      DROP TRIGGER workbench_project_responsibility_contributor_no_update;
+      DROP TRIGGER workbench_project_responsibility_no_delete;
+      DROP TRIGGER workbench_project_responsibility_no_update;
+      DROP TRIGGER workbench_project_member_no_delete;
+      DROP TRIGGER workbench_project_member_identity_no_update;
+      DROP TRIGGER workbench_project_team_no_delete;
+      DROP TRIGGER workbench_project_team_scope_no_update;
+      DROP TABLE workbench_project_responsibility_contributor;
+      DROP TABLE workbench_project_responsibility_version;
+      DROP TABLE workbench_project_member;
+      DROP TABLE workbench_project_team_head;
       DROP TRIGGER workbench_project_snapshot_columns_no_update;
       DROP TRIGGER workbench_project_template_snapshot_no_delete;
       DROP TRIGGER workbench_project_template_snapshot_no_update;
@@ -867,7 +1089,7 @@ describe('SqliteWorkbenchRepository', () => {
     const upgraded = repository(path)
     await upgraded.open()
     expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({
-      user_version: 3,
+      user_version: 4,
     })
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({
       id: 'status-legacy-v2',
@@ -1487,6 +1709,1342 @@ describe('SqliteWorkbenchRepository', () => {
 
     const restarted = repository(path)
     await expect(restarted.open()).rejects.toThrow(/request hash|audit and Outbox facts/u)
+    await restarted.close()
+  })
+
+  it('migrates v3 to v4, backfills one empty Team per Project, and creates heads for new Projects', async () => {
+    const path = await databasePath()
+    const seeded = repository(path)
+    await seeded.open()
+    await createTeamProject(seeded)
+    await seeded.close()
+
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      DROP TRIGGER workbench_project_responsibility_contributor_no_delete;
+      DROP TRIGGER workbench_project_responsibility_contributor_no_update;
+      DROP TRIGGER workbench_project_responsibility_no_delete;
+      DROP TRIGGER workbench_project_responsibility_no_update;
+      DROP TRIGGER workbench_project_member_no_delete;
+      DROP TRIGGER workbench_project_member_identity_no_update;
+      DROP TRIGGER workbench_project_team_no_delete;
+      DROP TRIGGER workbench_project_team_scope_no_update;
+      DROP TABLE workbench_project_responsibility_contributor;
+      DROP TABLE workbench_project_responsibility_version;
+      DROP TABLE workbench_project_member;
+      DROP TABLE workbench_project_team_head;
+      PRAGMA user_version = 3;
+    `)
+    legacy.close()
+
+    const upgraded = repository(path)
+    await upgraded.open()
+    expect(connection(upgraded).prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
+    await expect(upgraded.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toEqual({
+      projectId: 'project-team', teamRevision: 0, members: [], responsibility: null,
+    })
+    await expect(upgraded.commitProjectMember(memberCommand('migrated', 0, {
+      kind: 'agent', displayName: 'Migrated Agent',
+    }), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { memberId: 'member-migrated', teamRevision: 1 },
+    })
+    await upgraded.commitProject(projectCommand('after-v4', 1), signal)
+    expect(connection(upgraded).prepare(`
+      SELECT project_id, team_revision, current_responsibility_revision
+      FROM workbench_project_team_head ORDER BY project_id
+    `).all()).toEqual([
+      { project_id: 'project-after-v4', team_revision: 0, current_responsibility_revision: null },
+      { project_id: 'project-team', team_revision: 1, current_responsibility_revision: null },
+    ])
+    await upgraded.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toMatchObject({
+      teamRevision: 1,
+      members: [{ memberId: 'member-migrated', kind: 'agent', status: 'active' }],
+    })
+    await restarted.close()
+  })
+
+  it('persists closed Feishu, external-human, and Agent identities with derived eligibility', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createTeamProject(workbench)
+    const feishu = await workbench.commitProjectMember(memberCommand('feishu', 0, {
+      kind: 'human', displayName: 'Feishu Human',
+      identity: { type: 'feishu', appId: 'cli_app', openId: 'ou_member' },
+    }), signal)
+    const external = await workbench.commitProjectMember(memberCommand('external', 1, {
+      kind: 'human', displayName: 'External Human',
+      identity: { type: 'external', method: 'email', value: 'person@example.test' },
+    }), signal)
+    const agent = await workbench.commitProjectMember(memberCommand('agent', 2, {
+      kind: 'agent', displayName: 'Research Agent',
+    }), signal)
+    expect([feishu, external, agent]).toMatchObject([
+      { ok: true, value: { kind: 'human', status: 'active', memberRevision: 1, teamRevision: 1 } },
+      { ok: true, value: { kind: 'human', status: 'active', memberRevision: 1, teamRevision: 2 } },
+      { ok: true, value: { kind: 'agent', status: 'active', memberRevision: 1, teamRevision: 3 } },
+    ])
+    const team = await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)
+    expect(team).toEqual({
+      projectId: 'project-team',
+      teamRevision: 3,
+      members: [
+        {
+          memberId: 'member-feishu', projectId: 'project-team', kind: 'human',
+          displayName: 'Feishu Human', status: 'active', revision: 1,
+          identity: { type: 'feishu', appId: 'cli_app', openId: 'ou_member', state: 'declared' },
+          feishuAssigneeEligibility: 'identifier-present',
+          createdAt: '2026-08-31T10:01:00.000Z', updatedAt: '2026-08-31T10:01:00.000Z',
+        },
+        {
+          memberId: 'member-external', projectId: 'project-team', kind: 'human',
+          displayName: 'External Human', status: 'active', revision: 1,
+          identity: { type: 'external', method: 'email', value: 'person@example.test' },
+          feishuAssigneeEligibility: 'external-contact',
+          createdAt: '2026-08-31T10:02:00.000Z', updatedAt: '2026-08-31T10:02:00.000Z',
+        },
+        {
+          memberId: 'member-agent', projectId: 'project-team', kind: 'agent',
+          displayName: 'Research Agent', status: 'active', revision: 1,
+          feishuAssigneeEligibility: 'agent-not-assignable',
+          createdAt: '2026-08-31T10:03:00.000Z', updatedAt: '2026-08-31T10:03:00.000Z',
+        },
+      ],
+      responsibility: null,
+    })
+    expect(Object.isFrozen(team?.members)).toBe(true)
+    expect(Object.isFrozen(team?.members[0]?.kind === 'human' ? team.members[0].identity : null)).toBe(true)
+    await expect(workbench.readProjectTeam({
+      organizationId: 'organization-other', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toBeNull()
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toEqual(team)
+    await restarted.close()
+  })
+
+  it.each([
+    [
+      'caller-supplied Feishu state',
+      {
+        kind: 'human', displayName: 'State injection',
+        identity: { type: 'feishu', appId: 'app', openId: 'ou_state', state: 'declared' },
+      },
+      /unsupported fields/u,
+    ],
+    [
+      'mixed Feishu/external identity',
+      {
+        kind: 'human', displayName: 'Mixed identity',
+        identity: {
+          type: 'feishu', appId: 'app', openId: 'ou_mixed', method: 'email', value: 'mixed@test',
+        },
+      },
+      /unsupported fields/u,
+    ],
+    [
+      'Agent identity',
+      {
+        kind: 'agent', displayName: 'Agent identity injection',
+        identity: { type: 'external', method: 'other', value: 'not-allowed' },
+      },
+      /unsupported fields/u,
+    ],
+    [
+      'Agent profile',
+      { kind: 'agent', displayName: 'Agent profile injection', profile: { secret: 'no' } },
+      /unsupported fields/u,
+    ],
+    [
+      'unsafe Feishu application id',
+      {
+        kind: 'human', displayName: 'Unsafe app id',
+        identity: { type: 'feishu', appId: 'app/unsafe', openId: 'ou_safe' },
+      },
+      /bounded safe identifier/u,
+    ],
+    [
+      'unsafe Feishu open id',
+      {
+        kind: 'human', displayName: 'Unsafe open id',
+        identity: { type: 'feishu', appId: 'app_safe', openId: 'ou unsafe' },
+      },
+      /bounded safe identifier/u,
+    ],
+    [
+      'oversized Feishu application id',
+      {
+        kind: 'human', displayName: 'Oversized app id',
+        identity: { type: 'feishu', appId: `a${'x'.repeat(128)}`, openId: 'ou_safe' },
+      },
+      /at most 128/u,
+    ],
+    [
+      'missing human identity',
+      { kind: 'human', displayName: 'Missing identity' },
+      /unsupported fields/u,
+    ],
+    [
+      'unsupported human identity',
+      {
+        kind: 'human', displayName: 'Unsupported identity',
+        identity: { type: 'directory', directoryId: 'person-one' },
+      },
+      /identity type is unsupported/u,
+    ],
+    [
+      'unsupported external method',
+      {
+        kind: 'human', displayName: 'Unsupported external method',
+        identity: { type: 'external', method: 'fax', value: '1234' },
+      },
+      /contact method is invalid/u,
+    ],
+    [
+      'control-bearing external contact',
+      {
+        kind: 'human', displayName: 'Unsafe external',
+        identity: { type: 'external', method: 'other', value: 'line-one\nline-two' },
+      },
+      /trimmed text/u,
+    ],
+    [
+      'oversized external contact',
+      {
+        kind: 'human', displayName: 'Oversized external',
+        identity: { type: 'external', method: 'other', value: 'x'.repeat(321) },
+      },
+      /1 to 320/u,
+    ],
+  ] as const)('rejects %s without creating Team artifacts', async (_label, member, error) => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createTeamProject(workbench)
+    const baseline = teamArtifactCounts(connection(workbench))
+    const mutation: WorkbenchProjectMemberMutation = {
+      ...memberCommand('invalid-shape', 0, {
+        kind: 'agent', displayName: 'placeholder',
+      }),
+      member: member as unknown as WorkbenchProjectMemberMutation['member'],
+    }
+    await expect(workbench.commitProjectMember(mutation, signal)).rejects.toThrow(error)
+    expect(teamArtifactCounts(connection(workbench))).toEqual(baseline)
+    await workbench.close()
+  })
+
+  it('enforces scoped Feishu uniqueness, member CAS, and typed no-op or missing conflicts', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createTeamProject(workbench)
+    await expect(workbench.commitProjectMember(memberCommand('missing-project', 0, {
+      kind: 'agent', displayName: 'Missing Project',
+    }, { projectId: 'project-missing' }), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'project-not-found', projectId: 'project-missing' },
+    })
+    await workbench.commitProjectMember(memberCommand('unique-one', 0, {
+      kind: 'human', displayName: 'First',
+      identity: { type: 'feishu', appId: 'app-one', openId: 'ou_same' },
+    }), signal)
+    const baseline = teamArtifactCounts(connection(workbench))
+    await expect(workbench.commitProjectMember(memberCommand('duplicate', 1, {
+      kind: 'human', displayName: 'Duplicate',
+      identity: { type: 'feishu', appId: 'app-one', openId: 'ou_same' },
+    }), signal)).resolves.toMatchObject({ ok: false, error: { code: 'duplicate-feishu-identity' } })
+    await expect(workbench.commitProjectMember(memberCommand('stale-team', 0, {
+      kind: 'agent', displayName: 'Stale',
+    }), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'team-revision-conflict', currentTeamRevision: 1 },
+    })
+    expect(teamArtifactCounts(connection(workbench))).toEqual(baseline)
+    await expect(workbench.commitProjectMember(memberCommand('other-app', 1, {
+      kind: 'human', displayName: 'Other app',
+      identity: { type: 'feishu', appId: 'app-two', openId: 'ou_same' },
+    }), signal)).resolves.toMatchObject({ ok: true, value: { teamRevision: 2 } })
+    await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+      'stale-team', 'member-unique-one', 'inactive', 1, 1,
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'team-revision-conflict', currentTeamRevision: 2 },
+    })
+    await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+      'missing', 'member-missing', 'inactive', 2, 1,
+    ), signal)).resolves.toMatchObject({ ok: false, error: { code: 'member-not-found' } })
+    await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+      'revision', 'member-unique-one', 'inactive', 2, 2,
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'member-revision-conflict', currentMemberRevision: 1 },
+    })
+    await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+      'same-state', 'member-unique-one', 'active', 2, 1,
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'member-status-conflict', status: 'active' },
+    })
+    await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+      'inactive', 'member-unique-one', 'inactive', 2, 1,
+    ), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { status: 'inactive', memberRevision: 2, teamRevision: 3 },
+    })
+    const inactive = await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)
+    expect(inactive?.members.find(member => member.memberId === 'member-unique-one'))
+      .toMatchObject({ status: 'inactive', revision: 2, feishuAssigneeEligibility: 'inactive' })
+    await workbench.close()
+  })
+
+  it('enforces Accountable, Contributor, Sponsor, active, same-Project, and in-use policies', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createTeamProject(workbench)
+    await workbench.commitProject(projectCommand('other-team', 1), signal)
+    await workbench.commitProjectMember(memberCommand('cross-project', 0, {
+      kind: 'human', displayName: 'Cross Project Human',
+      identity: { type: 'feishu', appId: 'app', openId: 'ou_cross' },
+    }, { projectId: 'project-other-team' }), signal)
+    await workbench.commitProjectMember(memberCommand('feishu-owner', 0, {
+      kind: 'human', displayName: 'Declared Human',
+      identity: { type: 'feishu', appId: 'app', openId: 'ou_owner' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('external', 1, {
+      kind: 'human', displayName: 'External Human',
+      identity: { type: 'external', method: 'other', value: 'external-reference' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('agent', 2, {
+      kind: 'agent', displayName: 'Accountable Agent',
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('sponsor', 3, {
+      kind: 'human', displayName: 'Human Sponsor',
+      identity: { type: 'feishu', appId: 'app', openId: 'ou_sponsor' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('inactive', 4, {
+      kind: 'human', displayName: 'Inactive Human',
+      identity: { type: 'external', method: 'phone', value: '+86-000-0000' },
+    }), signal)
+    await workbench.commitProjectMemberStatus(memberStatusCommand(
+      'make-inactive', 'member-inactive', 'inactive', 5, 1,
+    ), signal)
+
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'stale-team', 5, null, 'member-feishu-owner', [], null,
+    ), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'team-revision-conflict', currentTeamRevision: 6 },
+    })
+
+    for (const [label, mutation, code] of [
+      [
+        'missing',
+        responsibilityCommand('missing', 6, null, 'member-missing'),
+        'member-not-found',
+      ],
+      [
+        'cross Project',
+        responsibilityCommand('cross', 6, null, 'member-cross-project'),
+        'member-not-found',
+      ],
+      [
+        'inactive',
+        responsibilityCommand('inactive', 6, null, 'member-inactive', [], 'member-sponsor'),
+        'member-inactive',
+      ],
+      [
+        'missing Contributor',
+        responsibilityCommand('missing-contributor', 6, null, 'member-feishu-owner', ['member-missing']),
+        'member-not-found',
+      ],
+      [
+        'inactive Contributor',
+        responsibilityCommand('inactive-contributor', 6, null, 'member-feishu-owner', ['member-inactive']),
+        'member-inactive',
+      ],
+      [
+        'cross-Project Sponsor',
+        responsibilityCommand('cross-sponsor', 6, null, 'member-external', [], 'member-cross-project'),
+        'member-not-found',
+      ],
+      [
+        'inactive Sponsor',
+        responsibilityCommand('inactive-sponsor', 6, null, 'member-external', [], 'member-inactive'),
+        'member-inactive',
+      ],
+      [
+        'Accountable contributor overlap',
+        responsibilityCommand('overlap', 6, null, 'member-feishu-owner', ['member-feishu-owner']),
+        'accountable-also-contributor',
+      ],
+      [
+        'Agent without Sponsor',
+        responsibilityCommand('agent-no-sponsor', 6, null, 'member-agent'),
+        'human-sponsor-required',
+      ],
+      [
+        'external without Sponsor',
+        responsibilityCommand('external-no-sponsor', 6, null, 'member-external'),
+        'human-sponsor-required',
+      ],
+      [
+        'Agent Sponsor',
+        responsibilityCommand(
+          'agent-sponsor', 6, null, 'member-external', [], 'member-agent',
+        ),
+        'human-sponsor-invalid',
+      ],
+      [
+        'self Sponsor',
+        responsibilityCommand(
+          'self-sponsor', 6, null, 'member-external', [], 'member-external',
+        ),
+        'human-sponsor-invalid',
+      ],
+      [
+        'declared human Sponsor forbidden',
+        responsibilityCommand(
+          'forbidden-sponsor', 6, null, 'member-feishu-owner', [], 'member-sponsor',
+        ),
+        'human-sponsor-forbidden',
+      ],
+    ] as const) {
+      await expect(workbench.commitProjectResponsibility(mutation, signal), label)
+        .resolves.toMatchObject({ ok: false, error: { code } })
+    }
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'duplicate-contributor', 6, null, 'member-feishu-owner',
+      ['member-external', 'member-external'],
+    ), signal)).rejects.toThrow(/must be unique/u)
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'unsorted-contributors', 6, null, 'member-feishu-owner',
+      ['member-sponsor', 'member-external'],
+    ), signal)).rejects.toThrow(/canonical sorted/u)
+    expect(teamArtifactCounts(connection(workbench))).toMatchObject({
+      members: { count: 6 },
+      responsibilityVersions: { count: 0 }, contributors: { count: 0 },
+      teamRevision: { team_revision: 6, current_responsibility_revision: null },
+    })
+
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'agent-valid',
+      6,
+      null,
+      'member-agent',
+      ['member-external', 'member-sponsor'],
+      'member-sponsor',
+    ), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { responsibilityRevision: 1, teamRevision: 7 },
+    })
+    const assigned = await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)
+    expect(assigned?.responsibility).toEqual({
+      projectId: 'project-team', revision: 1,
+      accountableMemberId: 'member-agent',
+      contributorMemberIds: ['member-external', 'member-sponsor'],
+      humanSponsorMemberId: 'member-sponsor',
+      updatedAt: '2026-08-31T12:07:00.000Z',
+    })
+    for (const memberId of ['member-agent', 'member-external', 'member-sponsor']) {
+      await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+        `in-use-${memberId}`, memberId, 'inactive', 7, 1,
+      ), signal)).resolves.toMatchObject({
+        ok: false, error: { code: 'member-in-use', memberId },
+      })
+    }
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'stale-responsibility', 7, null, 'member-feishu-owner', [], null,
+    ), signal)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'responsibility-revision-conflict',
+        currentResponsibilityRevision: 1,
+      },
+    })
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'human-valid', 7, 1, 'member-feishu-owner', [], null,
+    ), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { responsibilityRevision: 2, teamRevision: 8 },
+    })
+    await workbench.commitProjectMemberStatus(memberStatusCommand(
+      'retire-agent', 'member-agent', 'inactive', 8, 1,
+    ), signal)
+    await workbench.commitProjectMemberStatus(memberStatusCommand(
+      'retire-external', 'member-external', 'inactive', 9, 1,
+    ), signal)
+    await workbench.commitProjectMemberStatus(memberStatusCommand(
+      'retire-sponsor', 'member-sponsor', 'inactive', 10, 1,
+    ), signal)
+    const retained = await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)
+    expect(retained).toMatchObject({
+      teamRevision: 11,
+      responsibility: {
+        revision: 2,
+        accountableMemberId: 'member-feishu-owner',
+        contributorMemberIds: [],
+        humanSponsorMemberId: null,
+      },
+    })
+    expect(retained?.members.filter(member => member.status === 'inactive')
+      .map(member => member.memberId).sort())
+      .toEqual(['member-agent', 'member-external', 'member-inactive', 'member-sponsor'].sort())
+    expect(connection(workbench).prepare(`
+      SELECT revision, accountable_member_id, human_sponsor_member_id
+      FROM workbench_project_responsibility_version
+      WHERE project_id = 'project-team' ORDER BY revision
+    `).all()).toEqual([
+      { revision: 1, accountable_member_id: 'member-agent', human_sponsor_member_id: 'member-sponsor' },
+      { revision: 2, accountable_member_id: 'member-feishu-owner', human_sponsor_member_id: null },
+    ])
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toEqual(retained)
+    expect(connection(restarted).prepare(`
+      SELECT COUNT(*) AS count FROM workbench_project_responsibility_version
+      WHERE project_id = 'project-team'
+    `).get()).toEqual({ count: 2 })
+    await restarted.close()
+  })
+
+  it('enforces exactly one hundred retained members and at most twenty Contributors', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createTeamProject(workbench)
+    for (let index = 0; index < 100; index += 1) {
+      const suffix = `limit-${String(index).padStart(3, '0')}`
+      const member = index === 0
+        ? {
+          kind: 'human' as const,
+          displayName: 'Limit Accountable',
+          identity: { type: 'feishu' as const, appId: 'app', openId: 'ou_limit_owner' },
+        }
+        : { kind: 'agent' as const, displayName: `Limit Agent ${String(index)}` }
+      const result = await workbench.commitProjectMember(
+        memberCommand(suffix, index, member),
+        signal,
+      )
+      expect(result).toMatchObject({ ok: true, value: { teamRevision: index + 1 } })
+    }
+    const beforeLimit = teamArtifactCounts(connection(workbench))
+    await expect(workbench.commitProjectMember(memberCommand('limit-overflow', 100, {
+      kind: 'agent', displayName: 'One too many',
+    }), signal)).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'member-limit-reached',
+        message: 'Workbench Project Team already contains 100 members',
+        limit: 100,
+      },
+    })
+    expect(teamArtifactCounts(connection(workbench))).toEqual(beforeLimit)
+
+    const twenty = Array.from(
+      { length: 20 },
+      (_, index) => `member-limit-${String(index + 1).padStart(3, '0')}`,
+    )
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'twenty', 100, null, 'member-limit-000', twenty,
+    ), signal)).resolves.toMatchObject({
+      ok: true, value: { responsibilityRevision: 1, teamRevision: 101 },
+    })
+    expect((await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal))?.responsibility?.contributorMemberIds).toEqual(twenty)
+    const twentyOne = [...twenty, 'member-limit-021']
+    await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+      'twenty-one', 101, 1, 'member-limit-000', twentyOne,
+    ), signal)).rejects.toThrow(/at most 20 Contributors/u)
+    expect(teamArtifactCounts(connection(workbench))).toMatchObject({
+      members: { count: 100 },
+      responsibilityVersions: { count: 1 }, contributors: { count: 20 },
+      teamRevision: { team_revision: 101, current_responsibility_revision: 1 },
+    })
+    await workbench.close()
+  })
+
+  it('replays all three PII-free acknowledgements exactly after later changes and restart', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createTeamProject(workbench)
+    const addOriginal = memberCommand('replay-external', 0, {
+      kind: 'human', displayName: 'Replay External PII',
+      identity: { type: 'external', method: 'email', value: 'replay@example.test' },
+    }, { idempotencyKey: 'stable-member-replay-key' })
+    const addResult = await workbench.commitProjectMember(addOriginal, signal)
+    const statusOriginal = memberStatusCommand(
+      'replay-inactive', 'member-replay-external', 'inactive', 1, 1,
+      { idempotencyKey: 'stable-status-replay-key' },
+    )
+    const statusResult = await workbench.commitProjectMemberStatus(statusOriginal, signal)
+    await workbench.commitProjectMemberStatus(memberStatusCommand(
+      'later-reactivation', 'member-replay-external', 'active', 2, 2,
+    ), signal)
+    await workbench.commitProjectMember(memberCommand('replay-sponsor', 3, {
+      kind: 'human', displayName: 'Replay Sponsor PII',
+      identity: { type: 'feishu', appId: 'app_replay', openId: 'ou_replay_sponsor' },
+    }), signal)
+    const responsibilityOriginal = responsibilityCommand(
+      'replay-original', 4, null, 'member-replay-external', [], 'member-replay-sponsor',
+    )
+    const responsibilityResult = await workbench.commitProjectResponsibility(
+      responsibilityOriginal,
+      signal,
+    )
+    await workbench.commitProjectResponsibility(responsibilityCommand(
+      'later-replacement', 5, 1, 'member-replay-sponsor', [], null,
+    ), signal)
+
+    const addRetry: WorkbenchProjectMemberMutation = {
+      ...addOriginal,
+      memberId: 'member-regenerated-on-retry',
+      createdAt: '2026-08-31T20:00:00.000Z',
+      command: {
+        ...addOriginal.command,
+        commandId: 'command-regenerated-add',
+        auditEventId: 'audit-regenerated-add',
+        outboxId: 'outbox-regenerated-add',
+        occurredAt: '2026-08-31T20:00:00.000Z',
+      },
+    }
+    const statusRetry: WorkbenchProjectMemberStatusMutation = {
+      ...statusOriginal,
+      updatedAt: '2026-08-31T20:01:00.000Z',
+      command: {
+        ...statusOriginal.command,
+        commandId: 'command-regenerated-status',
+        auditEventId: 'audit-regenerated-status',
+        outboxId: 'outbox-regenerated-status',
+        occurredAt: '2026-08-31T20:01:00.000Z',
+      },
+    }
+    const responsibilityRetry: WorkbenchProjectResponsibilityMutation = {
+      ...responsibilityOriginal,
+      updatedAt: '2026-08-31T20:02:00.000Z',
+      command: {
+        ...responsibilityOriginal.command,
+        commandId: 'command-regenerated-responsibility',
+        auditEventId: 'audit-regenerated-responsibility',
+        outboxId: 'outbox-regenerated-responsibility',
+        occurredAt: '2026-08-31T20:02:00.000Z',
+      },
+    }
+    await expect(workbench.commitProjectMember(addRetry, signal)).resolves.toEqual(addResult)
+    await expect(workbench.commitProjectMemberStatus(statusRetry, signal)).resolves.toEqual(statusResult)
+    await expect(workbench.commitProjectResponsibility(responsibilityRetry, signal))
+      .resolves.toEqual(responsibilityResult)
+    const beforeConflicts = teamArtifactCounts(connection(workbench))
+    await expect(workbench.commitProjectMember({
+      ...addRetry,
+      member: { ...addRetry.member, displayName: 'Changed replay intent' },
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'idempotency-conflict' } })
+    await expect(workbench.commitProjectMemberStatus({
+      ...statusRetry,
+      status: 'active',
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'idempotency-conflict' } })
+    await expect(workbench.commitProjectResponsibility({
+      ...responsibilityRetry,
+      contributorMemberIds: ['member-replay-sponsor'],
+    }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'idempotency-conflict' } })
+    expect(teamArtifactCounts(connection(workbench))).toEqual(beforeConflicts)
+    const counts = teamArtifactCounts(connection(workbench))
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.commitProjectMember(addRetry, signal)).resolves.toEqual(addResult)
+    await expect(restarted.commitProjectMemberStatus(statusRetry, signal)).resolves.toEqual(statusResult)
+    await expect(restarted.commitProjectResponsibility(responsibilityRetry, signal))
+      .resolves.toEqual(responsibilityResult)
+    expect(teamArtifactCounts(connection(restarted))).toEqual(counts)
+    const receiptJson = JSON.stringify(connection(restarted).prepare(`
+      SELECT result_json FROM workbench_command_receipt
+      WHERE command_type IN (
+        'workbench.project-member.add',
+        'workbench.project-member.set-status',
+        'workbench.project.set-responsibility'
+      )
+    `).all())
+    for (const pii of [
+      'Replay External PII', 'replay@example.test',
+      'Replay Sponsor PII', 'app_replay', 'ou_replay_sponsor',
+    ]) expect(receiptJson).not.toContain(pii)
+    await restarted.close()
+  })
+
+  it('projects allowlisted Team Activity and keeps identity PII out of permanent ledgers', async () => {
+    const workbench = repository(':memory:')
+    await workbench.open()
+    await createTeamProject(workbench)
+    await workbench.commitProjectMember(memberCommand('activity-sponsor', 0, {
+      kind: 'human', displayName: 'FEISHU-DISPLAY-PII-CANARY',
+      identity: {
+        type: 'feishu', appId: 'app_activity_secret', openId: 'ou_activity_secret',
+      },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('activity-external', 1, {
+      kind: 'human', displayName: 'EXTERNAL-DISPLAY-PII-CANARY',
+      identity: { type: 'external', method: 'email', value: 'private-activity@example.test' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('activity-agent', 2, {
+      kind: 'agent', displayName: 'AGENT-DISPLAY-PII-CANARY',
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('activity-retired', 3, {
+      kind: 'human', displayName: 'RETIRED-DISPLAY-PII-CANARY',
+      identity: { type: 'external', method: 'phone', value: '+86-activity-secret' },
+    }), signal)
+    await workbench.commitProjectMemberStatus(memberStatusCommand(
+      'activity-retire', 'member-activity-retired', 'inactive', 4, 1,
+    ), signal)
+    await workbench.commitProjectResponsibility(responsibilityCommand(
+      'activity',
+      5,
+      null,
+      'member-activity-agent',
+      ['member-activity-external'],
+      'member-activity-sponsor',
+    ), signal)
+
+    const team = await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)
+    const teamJson = JSON.stringify(team)
+    const pii = [
+      'FEISHU-DISPLAY-PII-CANARY', 'app_activity_secret', 'ou_activity_secret',
+      'EXTERNAL-DISPLAY-PII-CANARY', 'private-activity@example.test',
+      'AGENT-DISPLAY-PII-CANARY', 'RETIRED-DISPLAY-PII-CANARY', '+86-activity-secret',
+    ]
+    for (const canary of pii) expect(teamJson).toContain(canary)
+
+    const activity = await workbench.readActivity({
+      organizationId: 'organization-test',
+      filter: { projectId: 'project-team', limit: 20 },
+    }, signal)
+    expect(activity.items.map(item => item.action)).toEqual([
+      'workbench.project.responsibility-assigned',
+      'workbench.project-member.status-changed',
+      'workbench.project-member.created',
+      'workbench.project-member.created',
+      'workbench.project-member.created',
+      'workbench.project-member.created',
+      'workbench.project.created',
+    ])
+    expect(activity.items[0]).toMatchObject({
+      projectId: 'project-team',
+      reason: 'owner-project-responsibility-set',
+      object: { type: 'project-responsibility', id: 'project-team', version: 1 },
+      summaryCode: 'project-responsibility-assigned',
+    })
+    expect(activity.items[1]).toMatchObject({
+      reason: 'owner-project-member-status-change',
+      object: { type: 'project-member', id: 'member-activity-retired', version: 2 },
+      summaryCode: 'project-member-status-changed',
+    })
+    expect(activity.items[2]).toMatchObject({
+      reason: 'owner-project-member-add',
+      object: { type: 'project-member', id: 'member-activity-retired', version: 1 },
+      summaryCode: 'project-member-created',
+    })
+    const permanentRows = connection(workbench).prepare(`
+      SELECT audit.canonical_envelope, audit.summary_fields_json,
+        outbox.payload_json, receipt.result_json, receipt.request_hash
+      FROM workbench_audit_event AS audit
+      INNER JOIN workbench_outbox AS outbox ON outbox.id = audit.outbox_id
+      INNER JOIN workbench_command_receipt AS receipt ON receipt.audit_event_id = audit.id
+      WHERE audit.command_type IN (
+        'workbench.project-member.add',
+        'workbench.project-member.set-status',
+        'workbench.project.set-responsibility'
+      )
+    `).all()
+    const redacted = JSON.stringify({ activity, permanentRows })
+    for (const canary of pii) expect(redacted).not.toContain(canary)
+    await workbench.close()
+  })
+
+  it('converges two SQLite connections for all three Team command receipts', async () => {
+    const path = await databasePath()
+    const firstConnection = repository(path)
+    const secondConnection = repository(path)
+    await firstConnection.open()
+    await createTeamProject(firstConnection)
+    await secondConnection.open()
+    const original = memberCommand('concurrent', 0, {
+      kind: 'agent', displayName: 'Concurrent Agent',
+    }, { idempotencyKey: 'concurrent-member-stable-key' })
+    const retry: WorkbenchProjectMemberMutation = {
+      ...original,
+      memberId: 'member-concurrent-regenerated',
+      createdAt: '2026-08-31T20:03:00.000Z',
+      command: {
+        ...original.command,
+        commandId: 'command-concurrent-regenerated',
+        auditEventId: 'audit-concurrent-regenerated',
+        outboxId: 'outbox-concurrent-regenerated',
+        occurredAt: '2026-08-31T20:03:00.000Z',
+      },
+    }
+    const results = await Promise.all([
+      firstConnection.commitProjectMember(original, signal),
+      secondConnection.commitProjectMember(retry, signal),
+    ])
+    expect(results[0]).toEqual(results[1])
+    expect(results[0]).toMatchObject({
+      ok: true,
+      value: { memberId: 'member-concurrent', teamRevision: 1 },
+      receipt: { commandId: 'command-member-concurrent' },
+    })
+    await expect(secondConnection.commitProjectMember(memberCommand('stale-writer', 0, {
+      kind: 'agent', displayName: 'Stale writer',
+    }), signal)).resolves.toMatchObject({
+      ok: false, error: { code: 'team-revision-conflict', currentTeamRevision: 1 },
+    })
+
+    const statusOriginal = memberStatusCommand(
+      'concurrent',
+      'member-concurrent',
+      'inactive',
+      1,
+      1,
+      { idempotencyKey: 'concurrent-status-stable-key' },
+    )
+    const statusRetry: WorkbenchProjectMemberStatusMutation = {
+      ...statusOriginal,
+      updatedAt: '2026-08-31T20:04:00.000Z',
+      command: {
+        ...statusOriginal.command,
+        commandId: 'command-concurrent-status-regenerated',
+        auditEventId: 'audit-concurrent-status-regenerated',
+        outboxId: 'outbox-concurrent-status-regenerated',
+        occurredAt: '2026-08-31T20:04:00.000Z',
+      },
+    }
+    const statusResults = await Promise.all([
+      firstConnection.commitProjectMemberStatus(statusOriginal, signal),
+      secondConnection.commitProjectMemberStatus(statusRetry, signal),
+    ])
+    expect(statusResults[0]).toEqual(statusResults[1])
+    expect(statusResults[0]).toMatchObject({
+      ok: true,
+      value: { status: 'inactive', memberRevision: 2, teamRevision: 2 },
+      receipt: { commandId: 'command-member-status-concurrent' },
+    })
+    await firstConnection.commitProjectMemberStatus(memberStatusCommand(
+      'concurrent-reactivate', 'member-concurrent', 'active', 2, 2,
+    ), signal)
+    const sponsorMutation = memberCommand('concurrent-sponsor', 3, {
+      kind: 'human', displayName: 'Concurrent Sponsor',
+      identity: { type: 'feishu', appId: 'app_concurrent', openId: 'ou_concurrent' },
+    })
+    await firstConnection.commitProjectMember({
+      ...sponsorMutation,
+      createdAt: '2026-08-31T11:04:00.000Z',
+      command: { ...sponsorMutation.command, occurredAt: '2026-08-31T11:04:00.000Z' },
+    }, signal)
+
+    const responsibilityOriginal = responsibilityCommand(
+      'concurrent', 4, null, 'member-concurrent', [], 'member-concurrent-sponsor',
+    )
+    const responsibilityRetry: WorkbenchProjectResponsibilityMutation = {
+      ...responsibilityOriginal,
+      updatedAt: '2026-08-31T20:05:00.000Z',
+      command: {
+        ...responsibilityOriginal.command,
+        commandId: 'command-concurrent-responsibility-regenerated',
+        auditEventId: 'audit-concurrent-responsibility-regenerated',
+        outboxId: 'outbox-concurrent-responsibility-regenerated',
+        occurredAt: '2026-08-31T20:05:00.000Z',
+      },
+    }
+    const responsibilityResults = await Promise.all([
+      firstConnection.commitProjectResponsibility(responsibilityOriginal, signal),
+      secondConnection.commitProjectResponsibility(responsibilityRetry, signal),
+    ])
+    expect(responsibilityResults[0]).toEqual(responsibilityResults[1])
+    expect(responsibilityResults[0]).toMatchObject({
+      ok: true,
+      value: { responsibilityRevision: 1, teamRevision: 5 },
+      receipt: { commandId: 'command-responsibility-concurrent' },
+    })
+    expect(teamArtifactCounts(connection(firstConnection))).toMatchObject({
+      members: { count: 2 },
+      responsibilityVersions: { count: 1 },
+      teamRevision: { team_revision: 5, current_responsibility_revision: 1 },
+      outbox: { count: 6 }, audit: { count: 6 }, receipts: { count: 6 },
+    })
+    await secondConnection.close()
+    await firstConnection.close()
+  })
+
+  it('enforces immutable member identity and append-only Responsibility history at runtime', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createTeamProject(workbench)
+    await workbench.commitProjectMember(memberCommand('immutable-owner', 0, {
+      kind: 'human', displayName: 'Immutable Owner',
+      identity: { type: 'feishu', appId: 'app_immutable', openId: 'ou_immutable' },
+    }), signal)
+    await workbench.commitProjectMember(memberCommand('immutable-contributor', 1, {
+      kind: 'agent', displayName: 'Immutable Contributor',
+    }), signal)
+    await workbench.commitProjectResponsibility(responsibilityCommand(
+      'immutable',
+      2,
+      null,
+      'member-immutable-owner',
+      ['member-immutable-contributor'],
+    ), signal)
+    const database = connection(workbench)
+    expect(() => database.prepare(`
+      UPDATE workbench_project_member SET display_name = 'Changed'
+      WHERE id = 'member-immutable-owner'
+    `).run()).toThrow(/identity is immutable/u)
+    expect(() => database.prepare(`
+      UPDATE workbench_project_member SET feishu_open_id = 'ou_changed'
+      WHERE id = 'member-immutable-owner'
+    `).run()).toThrow(/identity is immutable/u)
+    expect(() => database.prepare(`
+      DELETE FROM workbench_project_member WHERE id = 'member-immutable-contributor'
+    `).run()).toThrow(/cannot be deleted/u)
+    expect(() => database.prepare(`
+      UPDATE workbench_project_responsibility_version SET contributor_count = 0
+      WHERE project_id = 'project-team' AND revision = 1
+    `).run()).toThrow(/append-only/u)
+    expect(() => database.prepare(`
+      DELETE FROM workbench_project_responsibility_version
+      WHERE project_id = 'project-team' AND revision = 1
+    `).run()).toThrow(/cannot be deleted/u)
+    expect(() => database.prepare(`
+      UPDATE workbench_project_responsibility_contributor SET ordinal = ordinal
+      WHERE project_id = 'project-team' AND responsibility_revision = 1
+    `).run()).toThrow(/append-only/u)
+    expect(() => database.prepare(`
+      DELETE FROM workbench_project_responsibility_contributor
+      WHERE project_id = 'project-team' AND responsibility_revision = 1
+    `).run()).toThrow(/cannot be deleted/u)
+    expect(() => database.prepare(`
+      UPDATE workbench_project_team_head SET team_id = 'team-forged'
+      WHERE project_id = 'project-team'
+    `).run()).toThrow(/scope is immutable/u)
+    expect(() => database.prepare(`
+      DELETE FROM workbench_project_team_head WHERE project_id = 'project-team'
+    `).run()).toThrow(/cannot be deleted/u)
+    const retained = await workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toEqual(retained)
+    await restarted.close()
+  })
+
+  it.each([
+    [
+      'receipt result PII injection',
+      (database: DatabaseSync) => {
+        const row = database.prepare(`
+          SELECT result_json FROM workbench_command_receipt
+          WHERE command_id = 'command-member-tamper-sponsor'
+        `).get() as { readonly result_json: string }
+        const forged = JSON.parse(row.result_json) as {
+          value: Record<string, unknown>
+        }
+        forged.value.displayName = 'FORGED-PERMANENT-PII-CANARY'
+        bypassReceiptImmutability(database, () => {
+          database.prepare(`
+            UPDATE workbench_command_receipt SET result_json = ?
+            WHERE command_id = 'command-member-tamper-sponsor'
+          `).run(JSON.stringify(forged))
+        })
+      },
+      /unsupported fields/u,
+    ],
+    [
+      'correlated member-add kind',
+      (database: DatabaseSync) => {
+        forgeReceiptAndOutbox(
+          database,
+          'command-member-tamper-sponsor',
+          (result) => {
+            const value = result.value as Record<string, unknown>
+            value.kind = 'agent'
+          },
+          (payload) => { payload.memberKind = 'agent' },
+        )
+      },
+      /creation command|immutable member kind/u,
+    ],
+    [
+      'correlated historical member-status kind',
+      (database: DatabaseSync) => {
+        forgeReceiptAndOutbox(
+          database,
+          'command-member-status-tamper-status',
+          (result) => {
+            const value = result.value as Record<string, unknown>
+            value.kind = 'human'
+          },
+          (payload) => { payload.memberKind = 'human' },
+        )
+      },
+      /immutable kind/u,
+    ],
+    [
+      'fully correlated historical member-status transition',
+      (database: DatabaseSync) => {
+        const forgedHash = createHash('sha256').update(canonicalizeJson({
+          commandType: 'workbench.project-member.set-status',
+          target: 'project-member',
+          scope: {
+            organizationId: 'organization-test',
+            teamId: 'team-test',
+            projectId: 'project-team',
+          },
+          memberId: 'member-tamper-status',
+          status: 'active',
+          expectedTeamRevision: 3,
+          expectedMemberRevision: 1,
+          reason: 'owner-project-member-status-change',
+          causationId: 'status-cause-tamper-status',
+        }), 'utf8').digest('hex')
+        forgeReceiptAndOutbox(
+          database,
+          'command-member-status-tamper-status',
+          (result) => {
+            const value = result.value as Record<string, unknown>
+            value.status = 'active'
+          },
+          (payload) => {
+            payload.memberStatus = 'active'
+            payload.requestHash = forgedHash
+          },
+          forgedHash,
+        )
+      },
+      /transition sequence/u,
+    ],
+    ...([
+      ['member add', 'command-member-tamper-sponsor'],
+      ['member status', 'command-member-status-tamper-status'],
+      ['Responsibility', 'command-responsibility-tamper-responsibility'],
+    ] as const).map(([label, commandId]) => [
+      `correlated ${label} request hash and Outbox hash`,
+      (database: DatabaseSync) => {
+        const row = database.prepare(`
+          SELECT outbox_id FROM workbench_command_receipt WHERE command_id = ?
+        `).get(commandId) as { readonly outbox_id: string }
+        const forgedHash = '0'.repeat(64)
+        bypassReceiptImmutability(database, () => {
+          database.prepare(`
+            UPDATE workbench_command_receipt SET request_hash = ? WHERE command_id = ?
+          `).run(forgedHash, commandId)
+        })
+        bypassOutboxIntentImmutability(database, () => {
+          database.prepare(`
+            UPDATE workbench_outbox
+            SET payload_json = json_set(payload_json, '$.requestHash', ?)
+            WHERE id = ?
+          `).run(forgedHash, row.outbox_id)
+        })
+      },
+      /request hash/u,
+    ] as const),
+    [
+      'unexplained member status',
+      (database: DatabaseSync) => {
+        database.prepare(`
+          UPDATE workbench_project_member SET status = 'inactive'
+          WHERE id = 'member-tamper-status'
+        `).run()
+      },
+      /latest status command/u,
+    ],
+    [
+      'Team revision jump',
+      (database: DatabaseSync) => {
+        database.prepare(`
+          UPDATE workbench_project_team_head SET team_revision = team_revision + 1
+          WHERE project_id = 'project-team'
+        `).run()
+      },
+      /revision does not match its command history/u,
+    ],
+    [
+      'Outbox organization escape',
+      (database: DatabaseSync) => {
+        bypassOutboxIntentImmutability(database, () => {
+          database.prepare(`
+            UPDATE workbench_outbox SET organization_id = 'organization-forged'
+            WHERE command_id = 'command-responsibility-tamper-responsibility'
+          `).run()
+        })
+      },
+      /audit and Outbox facts/u,
+    ],
+  ] as ReadonlyArray<readonly [string, (database: DatabaseSync) => void, RegExp]>) (
+    'rejects T05 %s during the next command and after restart',
+    async (_label, tamper, error) => {
+      const path = await databasePath()
+      const workbench = repository(path)
+      await workbench.open()
+      await createTeamProject(workbench)
+      await workbench.commitProjectMember(memberCommand('tamper-sponsor', 0, {
+        kind: 'human', displayName: 'Tamper Sponsor',
+        identity: { type: 'feishu', appId: 'app_tamper', openId: 'ou_tamper' },
+      }), signal)
+      await workbench.commitProjectMember(memberCommand('tamper-external', 1, {
+        kind: 'human', displayName: 'Tamper External',
+        identity: { type: 'external', method: 'other', value: 'tamper-contact' },
+      }), signal)
+      await workbench.commitProjectMember(memberCommand('tamper-status', 2, {
+        kind: 'agent', displayName: 'Tamper Status Agent',
+      }), signal)
+      await workbench.commitProjectMemberStatus(memberStatusCommand(
+        'tamper-status', 'member-tamper-status', 'inactive', 3, 1,
+      ), signal)
+      await workbench.commitProjectMemberStatus(memberStatusCommand(
+        'tamper-reactivate', 'member-tamper-status', 'active', 4, 2,
+      ), signal)
+      await workbench.commitProjectResponsibility(responsibilityCommand(
+        'tamper-responsibility',
+        5,
+        null,
+        'member-tamper-external',
+        [],
+        'member-tamper-sponsor',
+      ), signal)
+      tamper(connection(workbench))
+      await expect(workbench.commitProjectMember(memberCommand('after-tamper', 6, {
+        kind: 'agent', displayName: 'Must not commit after tamper',
+      }), signal)).rejects.toThrow(error)
+      await workbench.close()
+
+      const restarted = repository(path)
+      await expect(restarted.open()).rejects.toThrow(error)
+      await restarted.close()
+    },
+  )
+
+  it.each([
+    ['member row', 'BEFORE INSERT ON workbench_project_member'],
+    ['Team head', 'BEFORE UPDATE ON workbench_project_team_head'],
+    ['Outbox', 'BEFORE INSERT ON workbench_outbox'],
+    ['audit event', 'BEFORE INSERT ON workbench_audit_event'],
+    ['audit head', 'BEFORE UPDATE ON workbench_audit_head'],
+    ['receipt', 'BEFORE INSERT ON workbench_command_receipt'],
+  ] as const)(
+    'rolls back member creation when the %s stage fails, including after restart',
+    async (label, triggerPoint) => {
+      const path = await databasePath()
+      const workbench = repository(path)
+      await workbench.open()
+      await createTeamProject(workbench)
+      const baseline = teamArtifactCounts(connection(workbench))
+      connection(workbench).exec(`
+        CREATE TRIGGER injected_t05_member_failure ${triggerPoint}
+        BEGIN SELECT RAISE(ABORT, 'injected T05 member ${label} failure'); END
+      `)
+      await expect(workbench.commitProjectMember(memberCommand(`fault-${label.replaceAll(' ', '-')}`, 0, {
+        kind: 'human', displayName: 'Rollback PII',
+        identity: { type: 'external', method: 'email', value: 'rollback@example.test' },
+      }), signal)).rejects.toThrow(/injected T05 member/u)
+      expect(teamArtifactCounts(connection(workbench))).toEqual(baseline)
+      await workbench.close()
+
+      const restarted = repository(path)
+      await restarted.open()
+      expect(teamArtifactCounts(connection(restarted))).toEqual(baseline)
+      await expect(restarted.verifyAuditChain(signal)).resolves.toMatchObject({
+        valid: true, eventCount: 1,
+      })
+      await restarted.close()
+    },
+  )
+
+  it.each([
+    ['member status', "BEFORE UPDATE OF status ON workbench_project_member"],
+    ['Team head', 'BEFORE UPDATE ON workbench_project_team_head'],
+    ['Outbox', 'BEFORE INSERT ON workbench_outbox'],
+    ['audit event', 'BEFORE INSERT ON workbench_audit_event'],
+    ['audit head', 'BEFORE UPDATE ON workbench_audit_head'],
+    ['receipt', 'BEFORE INSERT ON workbench_command_receipt'],
+  ] as const)(
+    'rolls back member status when the %s stage fails, including after restart',
+    async (label, triggerPoint) => {
+      const path = await databasePath()
+      const workbench = repository(path)
+      await workbench.open()
+      await createTeamProject(workbench)
+      await workbench.commitProjectMember(memberCommand('status-fault-member', 0, {
+        kind: 'agent', displayName: 'Status rollback Agent',
+      }), signal)
+      const baseline = teamArtifactCounts(connection(workbench))
+      connection(workbench).exec(`
+        CREATE TRIGGER injected_t05_status_failure ${triggerPoint}
+        BEGIN SELECT RAISE(ABORT, 'injected T05 status ${label} failure'); END
+      `)
+      await expect(workbench.commitProjectMemberStatus(memberStatusCommand(
+        `fault-${label.replaceAll(' ', '-')}`,
+        'member-status-fault-member',
+        'inactive',
+        1,
+        1,
+      ), signal)).rejects.toThrow(/injected T05 status/u)
+      expect(teamArtifactCounts(connection(workbench))).toEqual(baseline)
+      await expect(workbench.readProjectTeam({
+        organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+      }, signal)).resolves.toMatchObject({
+        teamRevision: 1,
+        members: [{ memberId: 'member-status-fault-member', status: 'active', revision: 1 }],
+      })
+      await workbench.close()
+
+      const restarted = repository(path)
+      await restarted.open()
+      expect(teamArtifactCounts(connection(restarted))).toEqual(baseline)
+      await restarted.close()
+    },
+  )
+
+  it.each([
+    ['Responsibility version', 'BEFORE INSERT ON workbench_project_responsibility_version'],
+    ['Contributor', 'BEFORE INSERT ON workbench_project_responsibility_contributor'],
+    ['Team head', 'BEFORE UPDATE ON workbench_project_team_head'],
+    ['Outbox', 'BEFORE INSERT ON workbench_outbox'],
+    ['audit event', 'BEFORE INSERT ON workbench_audit_event'],
+    ['audit head', 'BEFORE UPDATE ON workbench_audit_head'],
+    ['receipt', 'BEFORE INSERT ON workbench_command_receipt'],
+  ] as const)(
+    'rolls back Responsibility replacement when the %s stage fails, including after restart',
+    async (label, triggerPoint) => {
+      const path = await databasePath()
+      const workbench = repository(path)
+      await workbench.open()
+      await createTeamProject(workbench)
+      await workbench.commitProjectMember(memberCommand('responsibility-owner', 0, {
+        kind: 'human', displayName: 'Responsibility Owner',
+        identity: { type: 'feishu', appId: 'app', openId: 'ou_responsibility_owner' },
+      }), signal)
+      await workbench.commitProjectMember(memberCommand('responsibility-contributor', 1, {
+        kind: 'agent', displayName: 'Responsibility Contributor',
+      }), signal)
+      const baseline = teamArtifactCounts(connection(workbench))
+      connection(workbench).exec(`
+        CREATE TRIGGER injected_t05_responsibility_failure ${triggerPoint}
+        BEGIN SELECT RAISE(ABORT, 'injected T05 responsibility ${label} failure'); END
+      `)
+      await expect(workbench.commitProjectResponsibility(responsibilityCommand(
+        `fault-${label.replaceAll(' ', '-')}`,
+        2,
+        null,
+        'member-responsibility-owner',
+        ['member-responsibility-contributor'],
+      ), signal)).rejects.toThrow(/injected T05 responsibility/u)
+      expect(teamArtifactCounts(connection(workbench))).toEqual(baseline)
+      await expect(workbench.readProjectTeam({
+        organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+      }, signal)).resolves.toMatchObject({ teamRevision: 2, responsibility: null })
+      await workbench.close()
+
+      const restarted = repository(path)
+      await restarted.open()
+      expect(teamArtifactCounts(connection(restarted))).toEqual(baseline)
+      await restarted.close()
+    },
+  )
+
+  it('rolls back a Team command on cancellation before COMMIT and preserves a raced commit', async () => {
+    const path = await databasePath()
+    const workbench = repository(path)
+    await workbench.open()
+    await createTeamProject(workbench)
+    const database = connection(workbench)
+    const baseline = teamArtifactCounts(database)
+
+    const preAborted = new AbortController()
+    preAborted.abort(new Error('Team caller left before admission'))
+    await expect(workbench.commitProjectMember(memberCommand('cancelled-before', 0, {
+      kind: 'agent', displayName: 'Must not be admitted',
+    }), preAborted.signal)).rejects.toThrow('Team caller left before admission')
+    expect(teamArtifactCounts(database)).toEqual(baseline)
+
+    const during = new AbortController()
+    const originalPrepare = database.prepare.bind(database)
+    const prepare = vi.spyOn(database, 'prepare').mockImplementation(sql => {
+      const statement = originalPrepare(sql)
+      if (sql.includes('INSERT INTO workbench_command_receipt')) {
+        const originalRun = statement.run.bind(statement)
+        vi.spyOn(statement, 'run').mockImplementation((...parameters) => {
+          const result = originalRun(...parameters)
+          during.abort(new Error('Team caller left before commit'))
+          return result
+        })
+      }
+      return statement
+    })
+    await expect(workbench.commitProjectMember(memberCommand('cancelled-during', 0, {
+      kind: 'human', displayName: 'Rolled-back PII',
+      identity: { type: 'external', method: 'email', value: 'rollback-cancel@example.test' },
+    }), during.signal)).rejects.toThrow('Team caller left before commit')
+    prepare.mockRestore()
+    expect(teamArtifactCounts(database)).toEqual(baseline)
+    await expect(workbench.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toMatchObject({ teamRevision: 0, members: [] })
+
+    const afterCommit = new AbortController()
+    const execute = database.exec.bind(database)
+    const exec = vi.spyOn(database, 'exec').mockImplementation(sql => {
+      const result = execute(sql)
+      if (sql === 'COMMIT') afterCommit.abort(new Error('Team response raced after commit'))
+      return result
+    })
+    await expect(workbench.commitProjectMember(memberCommand('committed-race', 0, {
+      kind: 'agent', displayName: 'Committed Race Agent',
+    }), afterCommit.signal)).resolves.toMatchObject({
+      ok: true,
+      value: { memberId: 'member-committed-race', memberRevision: 1, teamRevision: 1 },
+    })
+    exec.mockRestore()
+    expect(teamArtifactCounts(database)).toMatchObject({
+      members: { count: 1 },
+      teamRevision: { team_revision: 1, current_responsibility_revision: null },
+      outbox: { count: 2 }, audit: { count: 2 }, receipts: { count: 2 },
+    })
+    await workbench.close()
+
+    const restarted = repository(path)
+    await restarted.open()
+    await expect(restarted.readProjectTeam({
+      organizationId: 'organization-test', teamId: 'team-test', projectId: 'project-team',
+    }, signal)).resolves.toMatchObject({
+      teamRevision: 1,
+      members: [{ memberId: 'member-committed-race', status: 'active', revision: 1 }],
+    })
     await restarted.close()
   })
 

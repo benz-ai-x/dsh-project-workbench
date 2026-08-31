@@ -225,6 +225,328 @@ export type CreateProjectResult =
     }
   }
 
+/** Project-scoped member eligibility state; inactive never deletes identity or history. */
+export type ProjectMemberStatus = 'active' | 'inactive'
+
+/** Closed app-scoped Feishu declaration. Verification belongs to the later connector ticket. */
+export interface DeclaredFeishuIdentityDraft {
+  readonly type: 'feishu'
+  readonly appId: string
+  readonly openId: string
+  readonly state?: never
+  readonly method?: never
+  readonly value?: never
+}
+
+/** Host-derived projection state; callers never claim verification or declaration state. */
+export interface DeclaredFeishuIdentity {
+  readonly type: 'feishu'
+  readonly appId: string
+  readonly openId: string
+  readonly state: 'declared'
+}
+
+/** Closed non-Feishu human contact. It is never translated into a formal assignee. */
+export interface ExternalContactIdentity {
+  readonly type: 'external'
+  readonly method: 'email' | 'phone' | 'other'
+  readonly value: string
+}
+
+/** Creation face explicitly forbids Feishu declaration fields on an external contact. */
+export interface ExternalContactIdentityDraft extends ExternalContactIdentity {
+  readonly appId?: never
+  readonly openId?: never
+  readonly state?: never
+}
+
+export type HumanProjectMemberIdentity = DeclaredFeishuIdentity | ExternalContactIdentity
+export type HumanProjectMemberIdentityDraft =
+  | DeclaredFeishuIdentityDraft
+  | ExternalContactIdentityDraft
+
+/** Exact creation material: human has one identity; Agent is descriptive only in T05. */
+export type ProjectMemberDraft =
+  | {
+    readonly kind: 'human'
+    readonly displayName: string
+    readonly identity: HumanProjectMemberIdentityDraft
+    readonly agentProfileId?: never
+    readonly agentProfileVersionId?: never
+  }
+  | {
+    readonly kind: 'agent'
+    readonly displayName: string
+    readonly identity?: never
+    readonly agentProfileId?: never
+    readonly agentProfileVersionId?: never
+  }
+
+export type FeishuAssigneeEligibility =
+  | 'identifier-present'
+  | 'external-contact'
+  | 'agent-not-assignable'
+  | 'inactive'
+
+interface ProjectMemberProjectionBase {
+  readonly memberId: string
+  readonly projectId: string
+  readonly displayName: string
+  readonly status: ProjectMemberStatus
+  readonly revision: number
+  readonly feishuAssigneeEligibility: FeishuAssigneeEligibility
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Authorized roster value. Identity data never appears in receipts, audit, or Activity. */
+export type ProjectMemberProjection =
+  | ProjectMemberProjectionBase & {
+    readonly kind: 'human'
+    readonly identity: HumanProjectMemberIdentity
+  }
+  | ProjectMemberProjectionBase & {
+    readonly kind: 'agent'
+  }
+
+/** Complete current responsibility tuple. History remains repository-owned and append-only. */
+export interface ProjectResponsibilityProjection {
+  readonly projectId: string
+  readonly revision: number
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly updatedAt: string
+}
+
+/** One detached Project Team read; responsibility is null until first configuration. */
+export interface ProjectTeamProjection {
+  readonly projectId: string
+  readonly teamRevision: number
+  readonly members: readonly ProjectMemberProjection[]
+  readonly responsibility: ProjectResponsibilityProjection | null
+}
+
+export interface ProjectTeamQuery {
+  readonly projectId: string
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+export interface AddProjectMemberRequest {
+  readonly projectId: string
+  readonly member: ProjectMemberDraft
+  readonly expectedTeamRevision: number
+  readonly expectedRevision: null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-member-add'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+  readonly memberId?: never
+}
+
+export interface SetProjectMemberStatusRequest {
+  readonly projectId: string
+  readonly memberId: string
+  readonly status: ProjectMemberStatus
+  readonly expectedTeamRevision: number
+  readonly expectedMemberRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-member-status-change'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+  readonly displayName?: never
+  readonly identity?: never
+}
+
+export interface SetProjectResponsibilityRequest {
+  readonly projectId: string
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly expectedTeamRevision: number
+  readonly expectedResponsibilityRevision: number | null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-responsibility-set'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+  readonly responsibilityRevision?: never
+}
+
+/** PII-free member acknowledgement safe to retain in an immutable replay receipt. */
+export interface ProjectMemberCommandAcknowledgement {
+  readonly projectId: string
+  readonly memberId: string
+  readonly kind: 'human' | 'agent'
+  readonly status: ProjectMemberStatus
+  readonly memberRevision: number
+  readonly teamRevision: number
+}
+
+/** PII-free responsibility acknowledgement; role membership stays out of the receipt. */
+export interface ProjectResponsibilityCommandAcknowledgement {
+  readonly projectId: string
+  readonly responsibilityRevision: number
+  readonly teamRevision: number
+}
+
+export interface ProjectNotFoundConflict {
+  readonly code: 'project-not-found'
+  readonly message: string
+  readonly projectId: string
+}
+
+export interface ProjectTeamRevisionConflict {
+  readonly code: 'team-revision-conflict'
+  readonly message: string
+  readonly expectedTeamRevision: number
+  readonly currentTeamRevision: number
+}
+
+export interface ProjectMemberNotFoundConflict {
+  readonly code: 'member-not-found'
+  readonly message: string
+  readonly memberId: string
+}
+
+type IdempotencyConflict = {
+  readonly code: 'idempotency-conflict'
+  readonly message: string
+}
+
+/** Atomic member creation result; the full member is obtained through projectTeam. */
+export type AddProjectMemberResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectMemberCommandAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectTeamRevisionConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-limit-reached'
+      readonly message: string
+      readonly limit: 100
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'duplicate-feishu-identity'
+      readonly message: string
+    }
+  }
+
+/** Atomic member lifecycle result. In-use members must be reassigned first. */
+export type SetProjectMemberStatusResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectMemberCommandAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectTeamRevisionConflict }
+  | { readonly ok: false; readonly error: ProjectMemberNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-revision-conflict'
+      readonly message: string
+      readonly memberId: string
+      readonly expectedMemberRevision: number
+      readonly currentMemberRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-in-use'
+      readonly message: string
+      readonly memberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-status-conflict'
+      readonly message: string
+      readonly memberId: string
+      readonly status: ProjectMemberStatus
+    }
+  }
+
+/** Whole-tuple responsibility replacement result with closed policy conflicts. */
+export type SetProjectResponsibilityResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectResponsibilityCommandAcknowledgement
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectTeamRevisionConflict }
+  | { readonly ok: false; readonly error: ProjectMemberNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'responsibility-revision-conflict'
+      readonly message: string
+      readonly expectedResponsibilityRevision: number | null
+      readonly currentResponsibilityRevision: number | null
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'member-inactive'
+      readonly message: string
+      readonly memberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'accountable-also-contributor'
+      readonly message: string
+      readonly memberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-required'
+      readonly message: string
+      readonly accountableMemberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-invalid'
+      readonly message: string
+      readonly humanSponsorMemberId: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'human-sponsor-forbidden'
+      readonly message: string
+      readonly accountableMemberId: string
+    }
+  }
+
 /** Durable truth about one committed integration intent. */
 export type WorkbenchOutboxState = 'pending' | 'delivered' | 'unknown' | 'failed'
 
@@ -236,12 +558,31 @@ export type WorkbenchOutboxErrorCode =
 
 /** T03's first versioned audit vocabulary. Later aggregates extend these unions. */
 export type WorkbenchProjectCreateReason = 'owner-project-create'
-export type WorkbenchCommandReason = WorkbenchStatusChangeReason | WorkbenchProjectCreateReason
-export type WorkbenchAuditAction = 'workbench.status.updated' | 'workbench.project.created'
-export type WorkbenchAuditObjectType = 'workbench-status' | 'project'
+export type WorkbenchProjectTeamReason =
+  | 'owner-project-member-add'
+  | 'owner-project-member-status-change'
+  | 'owner-project-responsibility-set'
+export type WorkbenchCommandReason =
+  | WorkbenchStatusChangeReason
+  | WorkbenchProjectCreateReason
+  | WorkbenchProjectTeamReason
+export type WorkbenchAuditAction =
+  | 'workbench.status.updated'
+  | 'workbench.project.created'
+  | 'workbench.project-member.created'
+  | 'workbench.project-member.status-changed'
+  | 'workbench.project.responsibility-assigned'
+export type WorkbenchAuditObjectType =
+  | 'workbench-status'
+  | 'project'
+  | 'project-member'
+  | 'project-responsibility'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
+  | 'project-member-created'
+  | 'project-member-status-changed'
+  | 'project-responsibility-assigned'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

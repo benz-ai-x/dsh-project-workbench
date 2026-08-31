@@ -50,7 +50,12 @@ export interface AuditObjectReference {
 
 export interface AuditCommandReference {
   readonly id: string
-  readonly type: 'workbench.status.set' | 'workbench.project.create'
+  readonly type:
+    | 'workbench.status.set'
+    | 'workbench.project.create'
+    | 'workbench.project-member.add'
+    | 'workbench.project-member.set-status'
+    | 'workbench.project.set-responsibility'
 }
 
 export interface AuditCausationReference {
@@ -402,7 +407,11 @@ function normalizeReason(value: unknown): AuditReason {
     throw new TypeError('Audit events admit a reason code but no arbitrary detail')
   }
   assertFields(record, ['code'], [], 'Audit reason')
-  if (record.code !== 'owner-status-edit' && record.code !== 'owner-project-create') {
+  if (record.code !== 'owner-status-edit'
+    && record.code !== 'owner-project-create'
+    && record.code !== 'owner-project-member-add'
+    && record.code !== 'owner-project-member-status-change'
+    && record.code !== 'owner-project-responsibility-set') {
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -486,28 +495,43 @@ function auditOutcome(value: unknown): AuditOutcome {
 }
 
 function auditAction(value: unknown): WorkbenchAuditAction {
-  if (value !== 'workbench.status.updated' && value !== 'workbench.project.created') {
+  if (value !== 'workbench.status.updated'
+    && value !== 'workbench.project.created'
+    && value !== 'workbench.project-member.created'
+    && value !== 'workbench.project-member.status-changed'
+    && value !== 'workbench.project.responsibility-assigned') {
     throw new TypeError('Audit action is unsupported')
   }
   return value
 }
 
 function auditObjectType(value: unknown): WorkbenchAuditObjectType {
-  if (value !== 'workbench-status' && value !== 'project') {
+  if (value !== 'workbench-status'
+    && value !== 'project'
+    && value !== 'project-member'
+    && value !== 'project-responsibility') {
     throw new TypeError('Audit object type is unsupported')
   }
   return value
 }
 
 function auditCommandType(value: unknown): AuditCommandReference['type'] {
-  if (value !== 'workbench.status.set' && value !== 'workbench.project.create') {
+  if (value !== 'workbench.status.set'
+    && value !== 'workbench.project.create'
+    && value !== 'workbench.project-member.add'
+    && value !== 'workbench.project-member.set-status'
+    && value !== 'workbench.project.set-responsibility') {
     throw new TypeError('Audit command type is unsupported')
   }
   return value
 }
 
 function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
-  if (value !== 'status-revision-committed' && value !== 'project-created-from-template') {
+  if (value !== 'status-revision-committed'
+    && value !== 'project-created-from-template'
+    && value !== 'project-member-created'
+    && value !== 'project-member-status-changed'
+    && value !== 'project-responsibility-assigned') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -521,27 +545,65 @@ function assertCorrelatedVocabulary(
   command: AuditCommandReference,
   summary: AuditSafeSummary,
 ): void {
-  if (action === 'workbench.status.updated') {
-    if (reason.code !== 'owner-status-edit'
-      || object.type !== 'workbench-status'
-      || command.type !== 'workbench.status.set'
-      || summary.code !== 'status-revision-committed'
-      || scope.projectId !== null) {
-      throw new AuditVocabularyCorrelationError(
-        'Status audit vocabulary is not a valid correlated combination',
-      )
+  const correlated = (() => {
+    switch (action) {
+      case 'workbench.status.updated':
+        return reason.code === 'owner-status-edit'
+          && object.type === 'workbench-status'
+          && command.type === 'workbench.status.set'
+          && summary.code === 'status-revision-committed'
+          && exactChangedFields(summary, ['message'])
+          && scope.projectId === null
+      case 'workbench.project.created':
+        return reason.code === 'owner-project-create'
+          && object.type === 'project'
+          && command.type === 'workbench.project.create'
+          && summary.code === 'project-created-from-template'
+          && exactChangedFields(summary, [
+            'primaryGoal',
+            'outcomes',
+            'supportingGoals',
+            'templateSnapshot',
+          ])
+          && scope.projectId === object.id
+      case 'workbench.project-member.created':
+        return reason.code === 'owner-project-member-add'
+          && object.type === 'project-member'
+          && command.type === 'workbench.project-member.add'
+          && summary.code === 'project-member-created'
+          && exactChangedFields(summary, ['member', 'teamRevision'])
+          && scope.projectId !== null
+      case 'workbench.project-member.status-changed':
+        return reason.code === 'owner-project-member-status-change'
+          && object.type === 'project-member'
+          && command.type === 'workbench.project-member.set-status'
+          && summary.code === 'project-member-status-changed'
+          && exactChangedFields(summary, ['status', 'teamRevision'])
+          && scope.projectId !== null
+      case 'workbench.project.responsibility-assigned':
+        return reason.code === 'owner-project-responsibility-set'
+          && object.type === 'project-responsibility'
+          && command.type === 'workbench.project.set-responsibility'
+          && summary.code === 'project-responsibility-assigned'
+          && exactChangedFields(summary, [
+            'accountable',
+            'contributors',
+            'humanSponsor',
+            'teamRevision',
+          ])
+          && scope.projectId === object.id
     }
-    return
-  }
-  if (reason.code !== 'owner-project-create'
-    || object.type !== 'project'
-    || command.type !== 'workbench.project.create'
-    || summary.code !== 'project-created-from-template'
-    || scope.projectId !== object.id) {
+  })()
+  if (!correlated) {
     throw new AuditVocabularyCorrelationError(
-      'Project audit vocabulary is not a valid correlated combination',
+      'Audit vocabulary is not a valid correlated combination',
     )
   }
+}
+
+function exactChangedFields(summary: AuditSafeSummary, expected: readonly string[]): boolean {
+  return summary.changedFields.length === expected.length
+    && summary.changedFields.every((field, index) => field === expected[index])
 }
 
 class AuditVocabularyCorrelationError extends TypeError {}

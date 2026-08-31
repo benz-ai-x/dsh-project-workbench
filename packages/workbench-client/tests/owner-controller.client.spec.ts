@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
 import type { WorkbenchRemote } from '../src/client/controller.ts'
 import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
+import type { WorkbenchProjectTeamRemote } from '../src/client/project-team-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 
 function fakeClock(initial: string) {
@@ -190,7 +191,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
   }
 }
 
-type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote
+type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -218,6 +219,24 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
     project: overrides.project ?? vi.fn(() => Promise.resolve(remoteOk(null))),
+    projectTeam: overrides.projectTeam ?? vi.fn(query => Promise.resolve(remoteOk({
+      projectId: query.projectId,
+      teamRevision: 0,
+      members: [],
+      responsibility: null,
+    }))),
+    addProjectMember: overrides.addProjectMember ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    setProjectMemberStatus: overrides.setProjectMemberStatus ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    setProjectResponsibility: overrides.setProjectResponsibility ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
   }
 }
 
@@ -261,6 +280,7 @@ describe('OwnerController', () => {
       access: { state: 'setup-required' },
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -318,6 +338,7 @@ describe('OwnerController', () => {
       access: access(),
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: 'WB1-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH',
     })
@@ -418,6 +439,42 @@ describe('OwnerController', () => {
 
   it('refreshes Activity after a committed Project create while retaining one Project controller', async () => {
     const activityRemote = vi.fn(() => Promise.resolve(remoteOk(activityProjection())))
+    const projectTeam = vi.fn()
+      .mockResolvedValueOnce(remoteOk({
+        projectId: 'project-1', teamRevision: 0, members: [], responsibility: null,
+      }))
+      .mockResolvedValueOnce(remoteOk({
+        projectId: 'project-1',
+        teamRevision: 1,
+        members: [{
+          memberId: 'member-1',
+          projectId: 'project-1',
+          kind: 'agent' as const,
+          displayName: 'Research Agent',
+          status: 'active' as const,
+          revision: 1,
+          feishuAssigneeEligibility: 'agent-not-assignable' as const,
+          createdAt: '2026-08-31T12:00:00.000Z',
+          updatedAt: '2026-08-31T12:00:00.000Z',
+        }],
+        responsibility: null,
+      }))
+    const addProjectMember = vi.fn(() => Promise.resolve(remoteOk({
+      ok: true as const,
+      value: {
+        projectId: 'project-1',
+        memberId: 'member-1',
+        kind: 'agent' as const,
+        status: 'active' as const,
+        memberRevision: 1,
+        teamRevision: 1,
+      },
+      receipt: {
+        commandId: 'command-member-created',
+        auditEventId: 'audit-member-created',
+        outboxId: 'outbox-member-created',
+      },
+    })))
     const createProject = vi.fn(() => Promise.resolve(remoteOk({
       ok: true as const,
       value: projectDetail(),
@@ -430,7 +487,7 @@ describe('OwnerController', () => {
     })))
     const controller = new OwnerController(auth({
       state: vi.fn(() => Promise.resolve(authOk(access()))),
-    }), remote({ activity: activityRemote, createProject }))
+    }), remote({ activity: activityRemote, createProject, projectTeam, addProjectMember }))
 
     await controller.start()
     const projects = controller.getSnapshot().projects
@@ -444,6 +501,20 @@ describe('OwnerController', () => {
       phase: 'ready',
       detail: { project: { projectId: 'project-1' } },
       draft: { projectName: '', primaryGoalName: '' },
+    })
+    const retainedTeam = controller.getSnapshot().projectTeam
+    await vi.waitFor(() => {
+      expect(retainedTeam?.getSnapshot()).toMatchObject({
+        phase: 'ready', selection: { projectId: 'project-1' }, team: { teamRevision: 0 },
+      })
+    })
+    retainedTeam?.setMemberKind('agent')
+    retainedTeam?.setMemberDisplayName('Research Agent')
+    await retainedTeam?.addMember()
+    await vi.waitFor(() => { expect(activityRemote).toHaveBeenCalledTimes(3) })
+    expect(controller.getSnapshot().projectTeam).toBe(retainedTeam)
+    expect(retainedTeam?.getSnapshot()).toMatchObject({
+      phase: 'ready', team: { teamRevision: 1, members: [{ memberId: 'member-1' }] },
     })
     await controller.dispose()
   })
@@ -482,6 +553,7 @@ describe('OwnerController', () => {
       access: { state: 'signed-out' },
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -524,6 +596,7 @@ describe('OwnerController', () => {
       access: { state: 'signed-out' },
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -865,6 +938,7 @@ describe('OwnerController', () => {
       access: null,
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -888,6 +962,7 @@ describe('OwnerController', () => {
       access: null,
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,

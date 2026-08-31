@@ -39,9 +39,19 @@
 - [x] Let the authenticated browser create, list, reopen, and accessibly inspect the Project, Goal, Outcomes, Supporting Goals, and Template Version without becoming an authority.
 - [x] Prove migration, rollback, replay, contention, Scenario/Remote, Loader/Profile, Client HMR/drain, built/packed artifacts, restart, and real-browser behavior for T04.
 
+## T05 — Unified ProjectMember roster and responsibility (#6)
+
+- [x] Add a Project-scoped, non-login ProjectMember roster with closed Feishu-human, external-human, and Agent identities.
+- [x] Record app-scoped Feishu identity as declared metadata, derive formal-assignee eligibility, and perform no Feishu verification or write.
+- [x] Atomically replace one Project Responsibility with exactly one Accountable, distinct Contributors, and the required active Human Sponsor.
+- [x] Preserve stable member identity and append-only responsibility history; block current role holders from deactivation until responsibility is reassigned.
+- [x] Extend the authorized command ledger with PII-free member/status/responsibility acknowledgements, CAS, replay, Outbox, audit, and Activity.
+- [x] Let the authenticated browser manage the roster and responsibility accessibly, retain drafts across safe retries, and reopen the Team after HMR/restart.
+- [x] Prove Schema v3→v4 migration, rollback, replay, contention, Remote/Loader, packed artifacts, redaction, and real-browser behavior for T05.
+
 ## Later tickets
 
-- [ ] T05+ collaboration, integrations, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T04.
+- [ ] T06+ review, integrations, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T05.
 
 ## Definition of done
 

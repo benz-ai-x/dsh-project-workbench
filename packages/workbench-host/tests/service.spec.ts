@@ -71,6 +71,10 @@ describe('WorkbenchService', () => {
       { method: 'projectStart', invocation: { kind: 'direct' } },
       { method: 'createProject', invocation: { kind: 'direct' } },
       { method: 'project', invocation: { kind: 'direct' } },
+      { method: 'projectTeam', invocation: { kind: 'direct' } },
+      { method: 'addProjectMember', invocation: { kind: 'direct' } },
+      { method: 'setProjectMemberStatus', invocation: { kind: 'direct' } },
+      { method: 'setProjectResponsibility', invocation: { kind: 'direct' } },
     ])
     const auth = ctx.get('workbenchAuth') as unknown as TestWorkbenchAuthService
     await expect(ctx.workbench.snapshot(new AbortController().signal)).rejects.toMatchObject({
@@ -108,6 +112,46 @@ describe('WorkbenchService', () => {
       { projectId: 'project-secret' },
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.projectTeam(
+      { projectId: 'project-secret' },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(ctx.workbench.addProjectMember({
+      projectId: 'project-secret',
+      member: { kind: 'agent', displayName: 'Secret Agent' },
+      expectedTeamRevision: 0,
+      expectedRevision: null,
+      idempotencyKey: 'unauthorized-member-key-001',
+      causationId: 'unauthorized-member-cause-001',
+      reason: 'owner-project-member-add',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.setProjectMemberStatus({
+      projectId: 'project-secret',
+      memberId: 'member-secret',
+      status: 'inactive',
+      expectedTeamRevision: 0,
+      expectedMemberRevision: 1,
+      idempotencyKey: 'unauthorized-member-status-key-001',
+      causationId: 'unauthorized-member-status-cause-001',
+      reason: 'owner-project-member-status-change',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
+    await expect(ctx.workbench.setProjectResponsibility({
+      projectId: 'project-secret',
+      accountableMemberId: 'member-secret',
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+      expectedTeamRevision: 0,
+      expectedResponsibilityRevision: null,
+      idempotencyKey: 'unauthorized-responsibility-key-001',
+      causationId: 'unauthorized-responsibility-cause-001',
+      reason: 'owner-project-responsibility-set',
+    }, new AbortController().signal)).rejects.toMatchObject({
+      failure: { code: 'unauthorized' },
+    })
     await expect(auth.run(() =>
       ctx.workbench.snapshot(new AbortController().signal))).resolves.toBeNull()
     await expect(auth.run(() => ctx.workbench.setStatus({
@@ -182,6 +226,124 @@ describe('WorkbenchService', () => {
       { projectId: created.value.project.projectId },
       new AbortController().signal,
     ))).resolves.toEqual(created.value)
+
+    const projectId = created.value.project.projectId
+    await expect(auth.run(() => ctx.workbench.projectTeam(
+      { projectId },
+      new AbortController().signal,
+    ))).resolves.toEqual({
+      projectId,
+      teamRevision: 0,
+      members: [],
+      responsibility: null,
+    })
+    const sponsor = await auth.run(() => ctx.workbench.addProjectMember({
+      projectId,
+      member: {
+        kind: 'human',
+        displayName: 'Service Sponsor',
+        identity: { type: 'feishu', appId: 'cli_service', openId: 'ou_sponsor' },
+      },
+      expectedTeamRevision: 0,
+      expectedRevision: null,
+      idempotencyKey: 'service-member-idempotency-001',
+      causationId: 'service-member-causation-001',
+      reason: 'owner-project-member-add',
+    }, new AbortController().signal))
+    if (!sponsor.ok) throw new Error('service Sponsor creation unexpectedly failed')
+    expect(JSON.stringify(sponsor)).not.toContain('Service Sponsor')
+    expect(JSON.stringify(sponsor)).not.toContain('ou_sponsor')
+    const agent = await auth.run(() => ctx.workbench.addProjectMember({
+      projectId,
+      member: { kind: 'agent', displayName: 'Service Agent' },
+      expectedTeamRevision: 1,
+      expectedRevision: null,
+      idempotencyKey: 'service-member-idempotency-002',
+      causationId: 'service-member-causation-002',
+      reason: 'owner-project-member-add',
+    }, new AbortController().signal))
+    if (!agent.ok) throw new Error('service Agent creation unexpectedly failed')
+    await expect(auth.run(() => ctx.workbench.setProjectResponsibility({
+      projectId,
+      accountableMemberId: agent.value.memberId,
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+      expectedTeamRevision: 2,
+      expectedResponsibilityRevision: null,
+      idempotencyKey: 'service-responsibility-idempotency-001',
+      causationId: 'service-responsibility-causation-001',
+      reason: 'owner-project-responsibility-set',
+    }, new AbortController().signal))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'human-sponsor-required' },
+    })
+    await expect(auth.run(() => ctx.workbench.setProjectResponsibility({
+      projectId,
+      accountableMemberId: agent.value.memberId,
+      contributorMemberIds: [],
+      humanSponsorMemberId: sponsor.value.memberId,
+      expectedTeamRevision: 2,
+      expectedResponsibilityRevision: null,
+      idempotencyKey: 'service-responsibility-idempotency-002',
+      causationId: 'service-responsibility-causation-002',
+      reason: 'owner-project-responsibility-set',
+    }, new AbortController().signal))).resolves.toMatchObject({
+      ok: true,
+      value: { projectId, responsibilityRevision: 1, teamRevision: 3 },
+    })
+    const projectTeam = await auth.run(() => ctx.workbench.projectTeam(
+      { projectId },
+      new AbortController().signal,
+    ))
+    expect(projectTeam).toMatchObject({
+      projectId,
+      teamRevision: 3,
+      members: [
+        {
+          memberId: sponsor.value.memberId,
+          kind: 'human',
+          identity: { type: 'feishu', state: 'declared' },
+          feishuAssigneeEligibility: 'identifier-present',
+        },
+        {
+          memberId: agent.value.memberId,
+          kind: 'agent',
+          feishuAssigneeEligibility: 'agent-not-assignable',
+        },
+      ],
+      responsibility: {
+        revision: 1,
+        accountableMemberId: agent.value.memberId,
+        contributorMemberIds: [],
+        humanSponsorMemberId: sponsor.value.memberId,
+      },
+    })
+    await expect(auth.run(() => ctx.workbench.setProjectMemberStatus({
+      projectId,
+      memberId: sponsor.value.memberId,
+      status: 'inactive',
+      expectedTeamRevision: 3,
+      expectedMemberRevision: 1,
+      idempotencyKey: 'service-member-status-idempotency-001',
+      causationId: 'service-member-status-causation-001',
+      reason: 'owner-project-member-status-change',
+    }, new AbortController().signal))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'member-in-use' },
+    })
+    const teamActivity = await auth.run(() => ctx.workbench.activity(
+      { projectId, limit: 20 },
+      new AbortController().signal,
+    ))
+    expect(teamActivity.items.map(item => item.action)).toEqual([
+      'workbench.project.responsibility-assigned',
+      'workbench.project-member.created',
+      'workbench.project-member.created',
+      'workbench.project.created',
+    ])
+    expect(JSON.stringify(teamActivity)).not.toMatch(
+      /Service Sponsor|Service Agent|ou_sponsor|cli_service/u,
+    )
 
     const service = ctx.workbench
     await fiber.dispose()

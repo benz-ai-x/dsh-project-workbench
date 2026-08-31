@@ -2,7 +2,7 @@
 
 Project Workbench 是一个外置 DeepSeek Harness Cordis 插件，目标是把项目状态、证据、文档、协作和 AI 原生项目分析组织成可追溯的项目驾驶舱。
 
-当前已完成 T04：Owner 可从不可变的 Knowledge Work Template Version 原子创建 Project、Primary Goal、一个或多个可衡量 Outcome，以及可选 Supporting Goals。每个 Project 都保存精确模板来源和独立、不可变、可在重启后重新打开的 Project Template Snapshot；创建命令沿用 T03 的回执、Outbox、乐观并发、只追加审计链与安全 Activity。下一阶段 T05 引入统一的人类/AI 成员名册与责任规则；飞书同步、文件和 AI 分析仍由后续票据逐步实现。
+当前已完成 T05：Owner 可在单个 Project 中管理稳定的人类/Agent 成员名册，人类成员可记录 app-scoped 飞书 `{appId, openId}` 声明或外部联系信息。Project Responsibility 以单一 Team revision 原子维护唯一 Accountable、可选 Contributors，以及 Agent/外部联系人担任 Accountable 时必需的 Human Sponsor；停用不删除成员或只追加的责任历史。飞书身份仍只是未验证声明，本阶段不调用飞书或创建真实 assignee。下一阶段 T06 将建立 Review Center 与 SuggestedChange 人工确认闭环；飞书同步、文件和 AI 分析由后续票据逐步实现。
 
 ## Workspace layout
 
@@ -53,6 +53,6 @@ Workbench 会话 Cookie 使用 `__Host-` 前缀、`Secure`、`HttpOnly`、`SameS
 
 ## Verification boundary
 
-`pnpm verify` 覆盖 Config/Scenario/SQLite、Owner credential/session/recovery、Schema v2→v3 migration、不可变 Template Version 与 Project-owned snapshot、Goal/Outcome/Project/Supporting Goal 关系、目录与 Goal 并发冲突、事务回滚与响应丢失重放、审计链篡改检测、四态 Outbox、Activity 过滤与脱敏、真实 Loader、Client 状态与 HMR 生命周期、Profile 组合、真实 Chrome 的设置/登录/Project 创建与重开/Activity/HMR/恢复/重启旅程、built exports、恢复 CLI 和三个真实 tarball。当前三个 Workbench 包仍是 `private`，DSH 依赖仍绑定到经审计源码；因此这些结果证明本地源码兼容和产物完整性，不代表已完成纯 registry 发布闭包。
+`pnpm verify` 覆盖 Config/Scenario/SQLite、Owner credential/session/recovery、Schema v2→v3 与 v3→v4 migration、不可变 Template Version 与 Project-owned snapshot、Goal/Outcome/Project/Supporting Goal 关系、ProjectMember 身份/状态与 Project Responsibility 政策、Team/member/responsibility 并发冲突、事务回滚与响应丢失重放、审计链及关联回执/Outbox 篡改检测、四态 Outbox、Activity 过滤与脱敏、真实 Loader、Client 状态与 HMR 生命周期、Profile 组合、11 方法生成 Remote、真实 Chrome 的设置/登录/Project 创建/Team 管理/Activity/HMR/恢复/重启旅程、built exports、恢复 CLI 和三个真实 tarball。当前三个 Workbench 包仍是 `private`，DSH 依赖仍绑定到经审计源码；因此这些结果证明本地源码兼容和产物完整性，不代表已完成纯 registry 发布闭包。
 
 协作代理在修改前应先阅读 [AGENTS.md](./AGENTS.md) 和 [Project Contract](./docs/agent/PROJECT_CONTRACT.md)。

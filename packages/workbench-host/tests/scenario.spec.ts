@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  AddProjectMemberRequest,
+  AddProjectMemberResult,
   CreateProjectRequest,
   CreateProjectResult,
   ProjectDetailProjection,
+  ProjectMemberProjection,
+  ProjectResponsibilityProjection,
   ProjectStartProjection,
+  ProjectTeamProjection,
+  SetProjectMemberStatusRequest,
+  SetProjectMemberStatusResult,
+  SetProjectResponsibilityRequest,
+  SetProjectResponsibilityResult,
   SetStatusRequest,
   SetStatusResult,
   WorkbenchActivityProjection,
@@ -14,8 +23,12 @@ import type {
   WorkbenchOutboxClaimRequest,
   WorkbenchOutboxSettlement,
   WorkbenchProjectMutation,
+  WorkbenchProjectMemberMutation,
+  WorkbenchProjectMemberStatusMutation,
   WorkbenchProjectReadQuery,
+  WorkbenchProjectResponsibilityMutation,
   WorkbenchProjectStartQuery,
+  WorkbenchProjectTeamReadQuery,
   WorkbenchRepository,
   WorkbenchStatusMutation,
   WorkbenchStatusSnapshot,
@@ -50,8 +63,15 @@ class MemoryRepository implements WorkbenchRepository {
   projectStartCalls = 0
   projectWriteCalls = 0
   projectReadCalls = 0
+  projectTeamReadCalls = 0
+  projectMemberWriteCalls = 0
+  projectMemberStatusWriteCalls = 0
+  projectResponsibilityWriteCalls = 0
   catalogRevision = 0
   readonly projects = new Map<string, ProjectDetailProjection>()
+  readonly members = new Map<string, ProjectMemberProjection>()
+  readonly responsibilities = new Map<string, ProjectResponsibilityProjection>()
+  readonly teamRevisions = new Map<string, number>()
   onSnapshot: ((signal: AbortSignal) => Promise<void>) | undefined
   onSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
   afterSetStatus: ((signal: AbortSignal) => Promise<void>) | undefined
@@ -227,6 +247,292 @@ class MemoryRepository implements WorkbenchRepository {
     return this.projects.get(query.projectId) ?? null
   }
 
+  lastProjectTeamReadQuery: WorkbenchProjectTeamReadQuery | null = null
+
+  async readProjectTeam(
+    query: WorkbenchProjectTeamReadQuery,
+  ): Promise<ProjectTeamProjection | null> {
+    this.projectTeamReadCalls += 1
+    this.lastProjectTeamReadQuery = query
+    if (!this.projects.has(query.projectId)) return null
+    return {
+      projectId: query.projectId,
+      teamRevision: this.teamRevisions.get(query.projectId) ?? 0,
+      members: [...this.members.values()]
+        .filter(member => member.projectId === query.projectId)
+        .sort((left, right) => left.memberId < right.memberId ? -1 : left.memberId > right.memberId ? 1 : 0),
+      responsibility: this.responsibilities.get(query.projectId) ?? null,
+    }
+  }
+
+  lastProjectMemberMutation: WorkbenchProjectMemberMutation | null = null
+
+  async commitProjectMember(
+    mutation: WorkbenchProjectMemberMutation,
+  ): Promise<AddProjectMemberResult> {
+    this.projectMemberWriteCalls += 1
+    this.lastProjectMemberMutation = mutation
+    if (!this.projects.has(mutation.projectId)) {
+      return projectNotFound(mutation.projectId)
+    }
+    const teamRevision = this.teamRevisions.get(mutation.projectId) ?? 0
+    if (teamRevision !== mutation.expectedTeamRevision) {
+      return teamConflict(mutation.expectedTeamRevision, teamRevision)
+    }
+    const projectMembers = [...this.members.values()]
+      .filter(member => member.projectId === mutation.projectId)
+    if (projectMembers.length >= 100) {
+      return { ok: false, error: { code: 'member-limit-reached', message: 'fixture limit', limit: 100 } }
+    }
+    if (mutation.member.kind === 'human' && mutation.member.identity.type === 'feishu'
+      && projectMembers.some(member => member.kind === 'human'
+        && member.identity.type === 'feishu'
+        && member.identity.appId === mutation.member.identity.appId
+        && member.identity.openId === mutation.member.identity.openId)) {
+      return { ok: false, error: { code: 'duplicate-feishu-identity', message: 'fixture duplicate' } }
+    }
+    const nextTeamRevision = teamRevision + 1
+    const member: ProjectMemberProjection = mutation.member.kind === 'agent'
+      ? {
+        memberId: mutation.memberId,
+        projectId: mutation.projectId,
+        kind: 'agent',
+        displayName: mutation.member.displayName,
+        status: 'active',
+        revision: 1,
+        feishuAssigneeEligibility: 'agent-not-assignable',
+        createdAt: mutation.createdAt,
+        updatedAt: mutation.createdAt,
+      }
+      : {
+        memberId: mutation.memberId,
+        projectId: mutation.projectId,
+        kind: 'human',
+        displayName: mutation.member.displayName,
+        status: 'active',
+        revision: 1,
+        identity: mutation.member.identity.type === 'feishu'
+          ? { ...mutation.member.identity, state: 'declared' }
+          : { ...mutation.member.identity },
+        feishuAssigneeEligibility: mutation.member.identity.type === 'feishu'
+          ? 'identifier-present'
+          : 'external-contact',
+        createdAt: mutation.createdAt,
+        updatedAt: mutation.createdAt,
+      }
+    this.members.set(member.memberId, member)
+    this.teamRevisions.set(mutation.projectId, nextTeamRevision)
+    return {
+      ok: true,
+      value: {
+        projectId: mutation.projectId,
+        memberId: mutation.memberId,
+        kind: mutation.member.kind,
+        status: 'active',
+        memberRevision: 1,
+        teamRevision: nextTeamRevision,
+        // Deliberate repository-boundary smuggling attempt: Scenario result
+        // copying must drop identity material outside the public acknowledgement.
+        displayName: member.displayName,
+        identity: member.kind === 'human' ? member.identity : null,
+      },
+      receipt: { ...receipt(mutation), rawIdentity: member },
+    } as unknown as AddProjectMemberResult
+  }
+
+  lastProjectMemberStatusMutation: WorkbenchProjectMemberStatusMutation | null = null
+
+  async commitProjectMemberStatus(
+    mutation: WorkbenchProjectMemberStatusMutation,
+  ): Promise<SetProjectMemberStatusResult> {
+    this.projectMemberStatusWriteCalls += 1
+    this.lastProjectMemberStatusMutation = mutation
+    if (!this.projects.has(mutation.projectId)) return projectNotFound(mutation.projectId)
+    const teamRevision = this.teamRevisions.get(mutation.projectId) ?? 0
+    if (teamRevision !== mutation.expectedTeamRevision) {
+      return teamConflict(mutation.expectedTeamRevision, teamRevision)
+    }
+    const member = this.members.get(mutation.memberId)
+    if (member === undefined || member.projectId !== mutation.projectId) {
+      return memberNotFound(mutation.memberId)
+    }
+    if (member.revision !== mutation.expectedMemberRevision) {
+      return {
+        ok: false,
+        error: {
+          code: 'member-revision-conflict',
+          message: 'fixture member conflict',
+          memberId: mutation.memberId,
+          expectedMemberRevision: mutation.expectedMemberRevision,
+          currentMemberRevision: member.revision,
+        },
+      }
+    }
+    if (member.status === mutation.status) {
+      return {
+        ok: false,
+        error: {
+          code: 'member-status-conflict',
+          message: 'fixture same status',
+          memberId: mutation.memberId,
+          status: mutation.status,
+        },
+      }
+    }
+    const responsibility = this.responsibilities.get(mutation.projectId)
+    if (mutation.status === 'inactive' && responsibility !== undefined
+      && (responsibility.accountableMemberId === mutation.memberId
+        || responsibility.humanSponsorMemberId === mutation.memberId
+        || responsibility.contributorMemberIds.includes(mutation.memberId))) {
+      return {
+        ok: false,
+        error: { code: 'member-in-use', message: 'fixture in use', memberId: mutation.memberId },
+      }
+    }
+    const revision = member.revision + 1
+    const nextTeamRevision = teamRevision + 1
+    const updated: ProjectMemberProjection = member.kind === 'human'
+      ? {
+        ...member,
+        status: mutation.status,
+        revision,
+        updatedAt: mutation.updatedAt,
+        feishuAssigneeEligibility: mutation.status === 'inactive'
+          ? 'inactive'
+          : member.identity.type === 'feishu' ? 'identifier-present' : 'external-contact',
+      }
+      : {
+        ...member,
+        status: mutation.status,
+        revision,
+        updatedAt: mutation.updatedAt,
+        feishuAssigneeEligibility: mutation.status === 'inactive'
+          ? 'inactive'
+          : 'agent-not-assignable',
+      }
+    this.members.set(member.memberId, updated)
+    this.teamRevisions.set(mutation.projectId, nextTeamRevision)
+    return {
+      ok: true,
+      value: {
+        projectId: mutation.projectId,
+        memberId: mutation.memberId,
+        kind: member.kind,
+        status: mutation.status,
+        memberRevision: revision,
+        teamRevision: nextTeamRevision,
+      },
+      receipt: receipt(mutation),
+    }
+  }
+
+  lastProjectResponsibilityMutation: WorkbenchProjectResponsibilityMutation | null = null
+
+  async commitProjectResponsibility(
+    mutation: WorkbenchProjectResponsibilityMutation,
+  ): Promise<SetProjectResponsibilityResult> {
+    this.projectResponsibilityWriteCalls += 1
+    this.lastProjectResponsibilityMutation = mutation
+    if (!this.projects.has(mutation.projectId)) return projectNotFound(mutation.projectId)
+    const teamRevision = this.teamRevisions.get(mutation.projectId) ?? 0
+    if (teamRevision !== mutation.expectedTeamRevision) {
+      return teamConflict(mutation.expectedTeamRevision, teamRevision)
+    }
+    const current = this.responsibilities.get(mutation.projectId)
+    const currentRevision = current?.revision ?? null
+    if (currentRevision !== mutation.expectedResponsibilityRevision) {
+      return {
+        ok: false,
+        error: {
+          code: 'responsibility-revision-conflict',
+          message: 'fixture responsibility conflict',
+          expectedResponsibilityRevision: mutation.expectedResponsibilityRevision,
+          currentResponsibilityRevision: currentRevision,
+        },
+      }
+    }
+    const referenced = [
+      mutation.accountableMemberId,
+      ...mutation.contributorMemberIds,
+      ...(mutation.humanSponsorMemberId === null ? [] : [mutation.humanSponsorMemberId]),
+    ]
+    for (const memberId of referenced) {
+      const member = this.members.get(memberId)
+      if (member === undefined || member.projectId !== mutation.projectId) {
+        return memberNotFound(memberId)
+      }
+      if (member.status !== 'active') {
+        return { ok: false, error: { code: 'member-inactive', message: 'fixture inactive', memberId } }
+      }
+    }
+    if (mutation.contributorMemberIds.includes(mutation.accountableMemberId)) {
+      return {
+        ok: false,
+        error: {
+          code: 'accountable-also-contributor',
+          message: 'fixture overlap',
+          memberId: mutation.accountableMemberId,
+        },
+      }
+    }
+    const accountable = this.members.get(mutation.accountableMemberId) as ProjectMemberProjection
+    const sponsorRequired = accountable.kind === 'agent'
+      || (accountable.kind === 'human' && accountable.identity.type === 'external')
+    if (sponsorRequired && mutation.humanSponsorMemberId === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'human-sponsor-required',
+          message: 'fixture sponsor required',
+          accountableMemberId: accountable.memberId,
+        },
+      }
+    }
+    if (!sponsorRequired && mutation.humanSponsorMemberId !== null) {
+      return {
+        ok: false,
+        error: {
+          code: 'human-sponsor-forbidden',
+          message: 'fixture sponsor forbidden',
+          accountableMemberId: accountable.memberId,
+        },
+      }
+    }
+    if (mutation.humanSponsorMemberId !== null) {
+      const sponsor = this.members.get(mutation.humanSponsorMemberId) as ProjectMemberProjection
+      if (sponsor.memberId === accountable.memberId || sponsor.kind !== 'human') {
+        return {
+          ok: false,
+          error: {
+            code: 'human-sponsor-invalid',
+            message: 'fixture sponsor invalid',
+            humanSponsorMemberId: sponsor.memberId,
+          },
+        }
+      }
+    }
+    const responsibilityRevision = (current?.revision ?? 0) + 1
+    const nextTeamRevision = teamRevision + 1
+    this.responsibilities.set(mutation.projectId, {
+      projectId: mutation.projectId,
+      revision: responsibilityRevision,
+      accountableMemberId: mutation.accountableMemberId,
+      contributorMemberIds: [...mutation.contributorMemberIds],
+      humanSponsorMemberId: mutation.humanSponsorMemberId,
+      updatedAt: mutation.updatedAt,
+    })
+    this.teamRevisions.set(mutation.projectId, nextTeamRevision)
+    return {
+      ok: true,
+      value: {
+        projectId: mutation.projectId,
+        responsibilityRevision,
+        teamRevision: nextTeamRevision,
+      },
+      receipt: receipt(mutation),
+    }
+  }
+
   lastActivityQuery: WorkbenchActivityQuery | null = null
 
   async readActivity(query: WorkbenchActivityQuery): Promise<WorkbenchActivityProjection> {
@@ -267,6 +573,54 @@ class MemoryRepository implements WorkbenchRepository {
   }
 }
 
+function projectNotFound(projectId: string) {
+  return {
+    ok: false as const,
+    error: {
+      code: 'project-not-found' as const,
+      message: 'fixture Project not found',
+      projectId,
+    },
+  }
+}
+
+function teamConflict(expectedTeamRevision: number, currentTeamRevision: number) {
+  return {
+    ok: false as const,
+    error: {
+      code: 'team-revision-conflict' as const,
+      message: 'fixture Team conflict',
+      expectedTeamRevision,
+      currentTeamRevision,
+    },
+  }
+}
+
+function memberNotFound(memberId: string) {
+  return {
+    ok: false as const,
+    error: {
+      code: 'member-not-found' as const,
+      message: 'fixture member not found',
+      memberId,
+    },
+  }
+}
+
+function receipt(mutation: {
+  readonly command: {
+    readonly commandId: string
+    readonly auditEventId: string
+    readonly outboxId: string
+  }
+}) {
+  return {
+    commandId: mutation.command.commandId,
+    auditEventId: mutation.command.auditEventId,
+    outboxId: mutation.command.outboxId,
+  }
+}
+
 function createScenario(
   repository = new MemoryRepository(),
   access: WorkbenchAuthorization = authorization,
@@ -280,11 +634,12 @@ function createScenario(
   ]
   const statusIds = ['status-001', 'status-002']
   const projectIds = ['project-001', 'project-002']
+  const projectMemberIds = ['member-001', 'member-002', 'member-003', 'member-004']
   const goalIds = ['goal-001', 'goal-002']
   const outcomeIds = ['outcome-001', 'outcome-002', 'outcome-003']
-  const commandIds = ['command-001', 'command-002']
-  const auditIds = ['audit-001', 'audit-002']
-  const outboxIds = ['outbox-001', 'outbox-002']
+  const commandIds = Array.from({ length: 12 }, (_, index) => `command-${String(index + 1).padStart(3, '0')}`)
+  const auditIds = Array.from({ length: 12 }, (_, index) => `audit-${String(index + 1).padStart(3, '0')}`)
+  const outboxIds = Array.from({ length: 12 }, (_, index) => `outbox-${String(index + 1).padStart(3, '0')}`)
   const adapters = { feishu: { adapterId: 'fixture-feishu' } } as const
   return {
     repository,
@@ -294,6 +649,7 @@ function createScenario(
       ids: {
         nextStatusId: () => statusIds.shift() ?? 'status-fallback',
         nextProjectId: () => projectIds.shift() ?? 'project-fallback',
+        nextProjectMemberId: () => projectMemberIds.shift() ?? 'member-fallback',
         nextGoalId: () => goalIds.shift() ?? 'goal-fallback',
         nextOutcomeId: () => outcomeIds.shift() ?? 'outcome-fallback',
         nextCommandId: () => commandIds.shift() ?? 'command-fallback',
@@ -348,6 +704,60 @@ function projectRequest(overrides: Partial<CreateProjectRequest> = {}): CreatePr
     idempotencyKey: 'project-idempotency-key-0001',
     causationId: 'project-causation-id-0001',
     reason: 'owner-project-create',
+    ...overrides,
+  }
+}
+
+function addMemberRequest(
+  member: AddProjectMemberRequest['member'],
+  expectedTeamRevision: number,
+  overrides: Partial<AddProjectMemberRequest> = {},
+): AddProjectMemberRequest {
+  return {
+    projectId: 'project-001',
+    member,
+    expectedTeamRevision,
+    expectedRevision: null,
+    idempotencyKey: `member-idempotency-${String(expectedTeamRevision).padStart(4, '0')}`,
+    causationId: `member-causation-${String(expectedTeamRevision).padStart(6, '0')}`,
+    reason: 'owner-project-member-add',
+    ...overrides,
+  }
+}
+
+function memberStatusRequest(
+  memberId: string,
+  status: SetProjectMemberStatusRequest['status'],
+  expectedTeamRevision: number,
+  expectedMemberRevision: number,
+  overrides: Partial<SetProjectMemberStatusRequest> = {},
+): SetProjectMemberStatusRequest {
+  return {
+    projectId: 'project-001',
+    memberId,
+    status,
+    expectedTeamRevision,
+    expectedMemberRevision,
+    idempotencyKey: `status-idempotency-${memberId}-${String(expectedMemberRevision)}`,
+    causationId: `status-causation-${memberId}-${String(expectedMemberRevision)}`,
+    reason: 'owner-project-member-status-change',
+    ...overrides,
+  }
+}
+
+function responsibilityRequest(
+  overrides: Partial<SetProjectResponsibilityRequest> = {},
+): SetProjectResponsibilityRequest {
+  return {
+    projectId: 'project-001',
+    accountableMemberId: 'member-003',
+    contributorMemberIds: ['member-002', 'member-001'],
+    humanSponsorMemberId: 'member-001',
+    expectedTeamRevision: 3,
+    expectedResponsibilityRevision: null,
+    idempotencyKey: 'responsibility-idempotency-0001',
+    causationId: 'responsibility-causation-0001',
+    reason: 'owner-project-responsibility-set',
     ...overrides,
   }
 }
@@ -555,6 +965,306 @@ describe('WorkbenchScenario', () => {
     await scenario.close()
   })
 
+  it('manages a detached Project Team, canonical responsibility, and retained inactive members', async () => {
+    const { scenario, repository } = createScenario()
+    await scenario.open()
+    const signal = new AbortController().signal
+    const project = await scenario.createProject(projectRequest(), signal)
+    if (!project.ok) throw new Error('fixture Project creation unexpectedly failed')
+
+    await expect(scenario.projectTeam({ projectId: 'project-001' }, signal)).resolves.toEqual({
+      projectId: 'project-001',
+      teamRevision: 0,
+      members: [],
+      responsibility: null,
+    })
+    expect(repository.lastProjectTeamReadQuery).toEqual({
+      organizationId: 'organization-test',
+      teamId: 'team-test',
+      projectId: 'project-001',
+    })
+
+    const feishu = await scenario.addProjectMember(addMemberRequest({
+      kind: 'human',
+      displayName: '  Lin Owner  ',
+      identity: { type: 'feishu', appId: 'cli.app:001', openId: 'ou-user_001' },
+    }, 0), signal)
+    expect(feishu).toMatchObject({
+      ok: true,
+      value: {
+        projectId: 'project-001',
+        memberId: 'member-001',
+        kind: 'human',
+        status: 'active',
+        memberRevision: 1,
+        teamRevision: 1,
+      },
+    })
+    expect(JSON.stringify(feishu)).not.toContain('Lin Owner')
+    expect(JSON.stringify(feishu)).not.toContain('ou-user_001')
+
+    await scenario.addProjectMember(addMemberRequest({
+      kind: 'human',
+      displayName: 'External Expert',
+      identity: { type: 'external', method: 'email', value: 'expert@example.test' },
+    }, 1, {
+      idempotencyKey: 'member-idempotency-0002',
+      causationId: 'member-causation-000002',
+    }), signal)
+    await scenario.addProjectMember(addMemberRequest({
+      kind: 'agent',
+      displayName: 'Research Agent',
+    }, 2, {
+      idempotencyKey: 'member-idempotency-0003',
+      causationId: 'member-causation-000003',
+    }), signal)
+
+    const team = await scenario.projectTeam({ projectId: 'project-001' }, signal)
+    expect(team).toMatchObject({
+      projectId: 'project-001',
+      teamRevision: 3,
+      members: [
+        {
+          memberId: 'member-001',
+          kind: 'human',
+          displayName: 'Lin Owner',
+          identity: { type: 'feishu', state: 'declared' },
+          feishuAssigneeEligibility: 'identifier-present',
+        },
+        {
+          memberId: 'member-002',
+          kind: 'human',
+          identity: { type: 'external' },
+          feishuAssigneeEligibility: 'external-contact',
+        },
+        {
+          memberId: 'member-003',
+          kind: 'agent',
+          feishuAssigneeEligibility: 'agent-not-assignable',
+        },
+      ],
+      responsibility: null,
+    })
+    if (team === null) throw new Error('fixture Team unexpectedly missing')
+    expect(Object.isFrozen(team)).toBe(true)
+    expect(Object.isFrozen(team.members)).toBe(true)
+    expect(Object.isFrozen(team.members[0])).toBe(true)
+    expect(Object.isFrozen(team.members[0]?.kind === 'human' && team.members[0].identity)).toBe(true)
+
+    await expect(scenario.setProjectResponsibility(responsibilityRequest({
+      humanSponsorMemberId: null,
+    }), signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'human-sponsor-required', accountableMemberId: 'member-003' },
+    })
+    await expect(scenario.setProjectResponsibility(responsibilityRequest({
+      accountableMemberId: 'member-001',
+      contributorMemberIds: ['member-002', 'member-003'],
+      humanSponsorMemberId: 'member-002',
+    }), signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'human-sponsor-forbidden', accountableMemberId: 'member-001' },
+    })
+
+    const assigned = await scenario.setProjectResponsibility(responsibilityRequest(), signal)
+    expect(assigned).toMatchObject({
+      ok: true,
+      value: {
+        projectId: 'project-001',
+        responsibilityRevision: 1,
+        teamRevision: 4,
+      },
+    })
+    expect(repository.lastProjectResponsibilityMutation?.contributorMemberIds)
+      .toEqual(['member-001', 'member-002'])
+    expect(JSON.stringify(assigned)).not.toContain('member-001')
+    expect(JSON.stringify(assigned)).not.toContain('member-002')
+    expect(JSON.stringify(assigned)).not.toContain('member-003')
+
+    await expect(scenario.setProjectMemberStatus(
+      memberStatusRequest('member-001', 'inactive', 4, 1),
+      signal,
+    )).resolves.toMatchObject({ ok: false, error: { code: 'member-in-use' } })
+
+    await expect(scenario.setProjectResponsibility(responsibilityRequest({
+      accountableMemberId: 'member-001',
+      contributorMemberIds: ['member-003'],
+      humanSponsorMemberId: null,
+      expectedTeamRevision: 4,
+      expectedResponsibilityRevision: 1,
+      idempotencyKey: 'responsibility-idempotency-0002',
+      causationId: 'responsibility-causation-0002',
+    }), signal)).resolves.toMatchObject({
+      ok: true,
+      value: { responsibilityRevision: 2, teamRevision: 5 },
+    })
+
+    await expect(scenario.setProjectMemberStatus(
+      memberStatusRequest('member-002', 'inactive', 5, 1),
+      signal,
+    )).resolves.toMatchObject({
+      ok: true,
+      value: { memberId: 'member-002', memberRevision: 2, teamRevision: 6 },
+    })
+    await expect(scenario.setProjectMemberStatus(
+      memberStatusRequest('member-002', 'inactive', 6, 2, {
+        idempotencyKey: 'status-idempotency-member-002-2b',
+        causationId: 'status-causation-member-002-2b',
+      }),
+      signal,
+    )).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'member-status-conflict', status: 'inactive' },
+    })
+
+    const reopened = await scenario.projectTeam({ projectId: 'project-001' }, signal)
+    expect(reopened).toMatchObject({
+      teamRevision: 6,
+      responsibility: {
+        revision: 2,
+        accountableMemberId: 'member-001',
+        contributorMemberIds: ['member-003'],
+        humanSponsorMemberId: null,
+      },
+      members: [
+        { memberId: 'member-001', status: 'active' },
+        { memberId: 'member-002', status: 'inactive', feishuAssigneeEligibility: 'inactive' },
+        { memberId: 'member-003', status: 'active' },
+      ],
+    })
+    await expect(scenario.projectTeam({ projectId: 'project-missing' }, signal)).resolves.toBeNull()
+    await scenario.close()
+  })
+
+  it('rejects inexact Project Team identity, revision, and responsibility input before storage', async () => {
+    const { scenario, repository } = createScenario()
+    await scenario.open()
+    const signal = new AbortController().signal
+    const invalidMembers: unknown[] = [
+      { ...addMemberRequest({ kind: 'agent', displayName: 'Agent' }, 0), extra: true },
+      addMemberRequest({ kind: 'agent', displayName: 'Agent', identity: {
+        type: 'external', method: 'other', value: 'forged',
+      } } as never, 0),
+      addMemberRequest({
+        kind: 'agent',
+        displayName: 'Agent',
+        agentProfileVersionId: 'profile-version-forged',
+      } as never, 0),
+      addMemberRequest({ kind: 'human', displayName: 'Human' } as never, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: { type: 'feishu', appId: 'cli_app', openId: 'ou_user', state: 'declared' },
+      } as never, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: {
+          type: 'feishu',
+          appId: 'cli_app',
+          openId: 'ou_user',
+          method: 'email',
+          value: 'hybrid@example.test',
+        },
+      } as never, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: {
+          type: 'external',
+          method: 'email',
+          value: 'human@example.test',
+          appId: 'cli_app',
+          openId: 'ou_user',
+        },
+      } as never, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: { type: 'feishu', appId: 'cli app', openId: 'ou_user' },
+      }, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: { type: 'feishu', appId: 'cli_app', openId: '成员' },
+      }, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: '\ud800',
+        identity: { type: 'external', method: 'email', value: 'human@example.test' },
+      }, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: { type: 'external', method: 'email', value: 'line\nbreak' },
+      }, 0),
+      addMemberRequest({
+        kind: 'human',
+        displayName: 'Human',
+        identity: { type: 'external', method: 'sms', value: '123' },
+      } as never, 0),
+      { ...addMemberRequest({ kind: 'agent', displayName: 'Agent' }, 0), expectedTeamRevision: -1 },
+      { ...addMemberRequest({ kind: 'agent', displayName: 'Agent' }, 0), expectedRevision: 1 },
+      { ...addMemberRequest({ kind: 'agent', displayName: 'Agent' }, 0), reason: 'raw text' },
+    ]
+    for (const request of invalidMembers) {
+      const error = await scenario.addProjectMember(
+        request as AddProjectMemberRequest,
+        signal,
+      ).catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.projectMemberWriteCalls).toBe(0)
+
+    for (const request of [
+      { ...memberStatusRequest('member-001', 'inactive', 0, 1), status: 'deleted' },
+      { ...memberStatusRequest('member-001', 'inactive', 0, 1), expectedMemberRevision: 0 },
+      { ...memberStatusRequest('member-001', 'inactive', 0, 1), expectedTeamRevision: -1 },
+      { ...memberStatusRequest('member-001', 'inactive', 0, 1), displayName: 'leak' },
+    ]) {
+      const error = await scenario.setProjectMemberStatus(
+        request as SetProjectMemberStatusRequest,
+        signal,
+      ).catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.projectMemberStatusWriteCalls).toBe(0)
+
+    const duplicate = responsibilityRequest({
+      contributorMemberIds: ['member-001', 'member-001'],
+    })
+    const tooMany = responsibilityRequest({
+      contributorMemberIds: Array.from({ length: 21 }, (_, index) => `member-${String(index)}`),
+    })
+    for (const request of [
+      duplicate,
+      tooMany,
+      { ...responsibilityRequest(), expectedTeamRevision: -1 },
+      { ...responsibilityRequest(), expectedResponsibilityRevision: 0 },
+      { ...responsibilityRequest(), humanSponsorMemberId: 'unsafe member' },
+      { ...responsibilityRequest(), reason: 'raw text' },
+      { ...responsibilityRequest(), accountableDisplayName: 'leak' },
+    ]) {
+      const error = await scenario.setProjectResponsibility(
+        request as SetProjectResponsibilityRequest,
+        signal,
+      ).catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.projectResponsibilityWriteCalls).toBe(0)
+
+    for (const query of [
+      { projectId: 'unsafe member' },
+      { projectId: 'project-001', actor: 'forged' },
+    ]) {
+      const error = await scenario.projectTeam(query as never, signal)
+        .catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.projectTeamReadCalls).toBe(0)
+    await scenario.close()
+  })
+
   it('rejects invalid Project input before persistence and keeps domain conflicts typed', async () => {
     const { scenario, repository } = createScenario()
     await scenario.open()
@@ -708,6 +1418,26 @@ describe('WorkbenchScenario', () => {
       new AbortController().signal,
     ).catch((reason: unknown) => reason)
     expect(failureCode(projectError)).toBe('unauthorized')
+    const projectTeamError = await scenario.projectTeam(
+      { projectId: 'project-secret' },
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
+    expect(failureCode(projectTeamError)).toBe('unauthorized')
+    const addMemberError = await scenario.addProjectMember(addMemberRequest({
+      kind: 'agent',
+      displayName: 'Secret Agent',
+    }, 0), new AbortController().signal).catch((reason: unknown) => reason)
+    expect(failureCode(addMemberError)).toBe('unauthorized')
+    const statusMemberError = await scenario.setProjectMemberStatus(
+      memberStatusRequest('member-secret', 'inactive', 0, 1),
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
+    expect(failureCode(statusMemberError)).toBe('unauthorized')
+    const responsibilityError = await scenario.setProjectResponsibility(
+      responsibilityRequest(),
+      new AbortController().signal,
+    ).catch((reason: unknown) => reason)
+    expect(failureCode(responsibilityError)).toBe('unauthorized')
     expect(repository.readCalls).toBe(0)
     expect(repository.writeCalls).toBe(0)
     expect(repository.activityCalls).toBe(0)
@@ -715,6 +1445,10 @@ describe('WorkbenchScenario', () => {
     expect(repository.projectStartCalls).toBe(0)
     expect(repository.projectWriteCalls).toBe(0)
     expect(repository.projectReadCalls).toBe(0)
+    expect(repository.projectTeamReadCalls).toBe(0)
+    expect(repository.projectMemberWriteCalls).toBe(0)
+    expect(repository.projectMemberStatusWriteCalls).toBe(0)
+    expect(repository.projectResponsibilityWriteCalls).toBe(0)
 
     await scenario.close()
   })
@@ -768,14 +1502,37 @@ describe('WorkbenchScenario', () => {
         limit: 10,
       },
     })
+    await scenario.activity({
+      projectId: 'project-safe',
+      objectType: 'project-member',
+      objectId: 'member-safe',
+      action: 'workbench.project-member.status-changed',
+      limit: 5,
+    })
+    expect(repository.lastActivityQuery?.filter).toEqual({
+      projectId: 'project-safe',
+      objectType: 'project-member',
+      objectId: 'member-safe',
+      action: 'workbench.project-member.status-changed',
+      limit: 5,
+    })
     await expect(scenario.auditIntegrity()).resolves.toMatchObject({ valid: true, eventCount: 0 })
-    expect(required).toEqual(['workbench.activity.read', 'workbench.audit.verify'])
-    expect(filtered).toEqual(['workbench.activity.read', 'workbench.audit.verify'])
+    expect(required).toEqual([
+      'workbench.activity.read',
+      'workbench.activity.read',
+      'workbench.audit.verify',
+    ])
+    expect(filtered).toEqual([
+      'workbench.activity.read',
+      'workbench.activity.read',
+      'workbench.audit.verify',
+    ])
 
-    const error = await scenario.activity({ limit: 101 } as never)
-      .catch((reason: unknown) => reason)
-    expect(failureCode(error)).toBe('bad-request')
-    expect(repository.activityCalls).toBe(1)
+    for (const filter of [{ limit: 101 }, { limit: 10, rawContact: 'secret' }]) {
+      const error = await scenario.activity(filter as never).catch((reason: unknown) => reason)
+      expect(failureCode(error)).toBe('bad-request')
+    }
+    expect(repository.activityCalls).toBe(2)
     await scenario.close()
   })
 

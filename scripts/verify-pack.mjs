@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T04 npm archives without touching publication.
+ * Create and inspect the real T05 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -88,6 +88,7 @@ const packageSpecs = [
     expectedDeclarations: [
       'lib/types/client/ActivityPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
+      'lib/types/client/ProjectTeamPanel.d.ts',
       'lib/types/client/ProjectsPanel.d.ts',
       'lib/types/client/WorkbenchStatusPage.d.ts',
       'lib/types/client/activity-controller.d.ts',
@@ -98,6 +99,7 @@ const packageSpecs = [
       'lib/types/client/mount.d.ts',
       'lib/types/client/owner-controller.d.ts',
       'lib/types/client/project-controller.d.ts',
+      'lib/types/client/project-team-controller.d.ts',
       'lib/types/client/style-lifecycle.d.ts',
       'lib/types/index.d.ts',
     ],
@@ -573,8 +575,9 @@ export default class PackedAuthFixture extends Service {
       && result?.createdProjectActivity?.items?.[0]?.outbox?.state === 'pending'
       && result?.createdProjectActivity?.integrity?.valid === true
       && result?.createdProjectActivity?.integrity?.eventCount === 2
-      && JSON.stringify(result?.finalIntegrity)
-        === JSON.stringify(result?.createdProjectActivity?.integrity),
+      && result?.finalIntegrity?.valid === true
+      && result?.finalIntegrity?.eventCount === 8
+      && result?.finalIntegrity?.issue === null,
     'clean consumer: Project audit and pending Outbox extend the verified ledger without business text',
   )
   check(
@@ -584,9 +587,14 @@ export default class PackedAuthFixture extends Service {
       && JSON.stringify(result?.restartProjectStart)
         === JSON.stringify(result?.createdProjectStart)
       && JSON.stringify(result?.restartProject) === JSON.stringify(result?.createdProject)
-      && JSON.stringify(result?.restartProjectActivity)
-        === JSON.stringify(result?.createdProjectActivity),
-    'clean consumer: installed Host recovers status, Project, snapshot, Activity, and integrity after restart',
+      && JSON.stringify(result?.restartProjectActivity?.items)
+        === JSON.stringify(result?.createdProjectActivity?.items)
+      && result?.restartProjectActivity?.nextBeforeSequence
+        === result?.createdProjectActivity?.nextBeforeSequence
+      && JSON.stringify(result?.restartProjectActivity?.integrity)
+        === JSON.stringify(result?.finalIntegrity)
+      && result?.teamRoundTripVerified === true,
+    'clean consumer: installed Host recovers status, Project, Team, Activity, and integrity after restart',
   )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
@@ -655,10 +663,14 @@ assert.equal(typeof client.apply, 'function')
 assert.ok(!('default' in client))
 const remoteMethods = [
   'activity',
+  'addProjectMember',
   'auditIntegrity',
   'createProject',
   'project',
   'projectStart',
+  'projectTeam',
+  'setProjectMemberStatus',
+  'setProjectResponsibility',
   'setStatus',
   'snapshot',
 ]
@@ -686,6 +698,9 @@ let projectReceipt
 let projectedProject
 let createdProjectStart
 let createdProjectActivity
+let committedTeam
+let teamActivity
+let teamRoundTripVerified = false
 let finalIntegrity
 let firstContext
 let firstService
@@ -885,10 +900,218 @@ try {
   assert.equal(createdProjectActivity.integrity.eventCount, 2)
   assert.equal(createdProjectActivity.integrity.issue, null)
   assert.equal(createdProjectActivity.integrity.headHash, projectItem.hash)
+
+  const projectId = createdProject.project.projectId
+  const initialTeam = await firstAuth.run(() => firstService.projectTeam(
+    { projectId },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(initialTeam, {
+    projectId,
+    teamRevision: 0,
+    members: [],
+    responsibility: null,
+  })
+  const feishuRequest = {
+    projectId,
+    member: {
+      kind: 'human',
+      displayName: 'Packed Feishu Sponsor',
+      identity: {
+        type: 'feishu',
+        appId: 'cli_packed_consumer',
+        openId: 'ou_packed_sponsor',
+      },
+    },
+    expectedTeamRevision: 0,
+    expectedRevision: null,
+    idempotencyKey: 'packed-member-feishu-idempotency-0001',
+    causationId: 'packed-member-feishu-causation-0001',
+    reason: 'owner-project-member-add',
+  }
+  const feishuAdded = await firstAuth.run(() => firstService.addProjectMember(
+    feishuRequest,
+    new AbortController().signal,
+  ))
+  assert.equal(feishuAdded.ok, true)
+  assert.equal(feishuAdded.value.kind, 'human')
+  assert.equal(feishuAdded.value.teamRevision, 1)
+  assert.deepEqual(
+    await firstAuth.run(() => firstService.addProjectMember(
+      feishuRequest,
+      new AbortController().signal,
+    )),
+    feishuAdded,
+  )
+
+  const externalAdded = await firstAuth.run(() => firstService.addProjectMember({
+    projectId,
+    member: {
+      kind: 'human',
+      displayName: 'Packed External Contributor',
+      identity: {
+        type: 'external',
+        method: 'email',
+        value: 'packed.external@example.invalid',
+      },
+    },
+    expectedTeamRevision: 1,
+    expectedRevision: null,
+    idempotencyKey: 'packed-member-external-idempotency-0001',
+    causationId: 'packed-member-external-causation-0001',
+    reason: 'owner-project-member-add',
+  }, new AbortController().signal))
+  assert.equal(externalAdded.ok, true)
+  assert.equal(externalAdded.value.kind, 'human')
+  assert.equal(externalAdded.value.teamRevision, 2)
+
+  const agentAdded = await firstAuth.run(() => firstService.addProjectMember({
+    projectId,
+    member: {
+      kind: 'agent',
+      displayName: 'Packed Research Agent',
+    },
+    expectedTeamRevision: 2,
+    expectedRevision: null,
+    idempotencyKey: 'packed-member-agent-idempotency-0001',
+    causationId: 'packed-member-agent-causation-0001',
+    reason: 'owner-project-member-add',
+  }, new AbortController().signal))
+  assert.equal(agentAdded.ok, true)
+  assert.equal(agentAdded.value.kind, 'agent')
+  assert.equal(agentAdded.value.teamRevision, 3)
+
+  const spareAdded = await firstAuth.run(() => firstService.addProjectMember({
+    projectId,
+    member: {
+      kind: 'human',
+      displayName: 'Packed Inactive Historian',
+      identity: {
+        type: 'external',
+        method: 'other',
+        value: 'packed-historian-reference',
+      },
+    },
+    expectedTeamRevision: 3,
+    expectedRevision: null,
+    idempotencyKey: 'packed-member-spare-idempotency-0001',
+    causationId: 'packed-member-spare-causation-0001',
+    reason: 'owner-project-member-add',
+  }, new AbortController().signal))
+  assert.equal(spareAdded.ok, true)
+  assert.equal(spareAdded.value.teamRevision, 4)
+
+  const spareInactive = await firstAuth.run(() => firstService.setProjectMemberStatus({
+    projectId,
+    memberId: spareAdded.value.memberId,
+    status: 'inactive',
+    expectedTeamRevision: 4,
+    expectedMemberRevision: 1,
+    idempotencyKey: 'packed-member-status-idempotency-0001',
+    causationId: 'packed-member-status-causation-0001',
+    reason: 'owner-project-member-status-change',
+  }, new AbortController().signal))
+  assert.equal(spareInactive.ok, true)
+  assert.equal(spareInactive.value.status, 'inactive')
+  assert.equal(spareInactive.value.memberRevision, 2)
+  assert.equal(spareInactive.value.teamRevision, 5)
+
+  const responsibilitySet = await firstAuth.run(() => firstService.setProjectResponsibility({
+    projectId,
+    accountableMemberId: agentAdded.value.memberId,
+    contributorMemberIds: [externalAdded.value.memberId],
+    humanSponsorMemberId: feishuAdded.value.memberId,
+    expectedTeamRevision: 5,
+    expectedResponsibilityRevision: null,
+    idempotencyKey: 'packed-responsibility-idempotency-0001',
+    causationId: 'packed-responsibility-causation-0001',
+    reason: 'owner-project-responsibility-set',
+  }, new AbortController().signal))
+  assert.equal(responsibilitySet.ok, true)
+  assert.equal(responsibilitySet.value.responsibilityRevision, 1)
+  assert.equal(responsibilitySet.value.teamRevision, 6)
+
+  const acknowledgementJson = JSON.stringify([
+    feishuAdded,
+    externalAdded,
+    agentAdded,
+    spareAdded,
+    spareInactive,
+    responsibilitySet,
+  ])
+  for (const privateValue of [
+    'Packed Feishu Sponsor',
+    'cli_packed_consumer',
+    'ou_packed_sponsor',
+    'Packed External Contributor',
+    'packed.external@example.invalid',
+    'Packed Research Agent',
+    'Packed Inactive Historian',
+    'packed-historian-reference',
+  ]) assert.equal(acknowledgementJson.includes(privateValue), false)
+
+  committedTeam = await firstAuth.run(() => firstService.projectTeam(
+    { projectId },
+    new AbortController().signal,
+  ))
+  assert.equal(committedTeam.teamRevision, 6)
+  assert.equal(committedTeam.members.length, 4)
+  assert.equal(
+    committedTeam.members.find(member => member.memberId === feishuAdded.value.memberId)
+      .identity.state,
+    'declared',
+  )
+  assert.equal(
+    committedTeam.members.find(member => member.memberId === externalAdded.value.memberId)
+      .feishuAssigneeEligibility,
+    'external-contact',
+  )
+  assert.equal(
+    committedTeam.members.find(member => member.memberId === agentAdded.value.memberId)
+      .feishuAssigneeEligibility,
+    'agent-not-assignable',
+  )
+  assert.equal(
+    committedTeam.members.find(member => member.memberId === spareAdded.value.memberId).status,
+    'inactive',
+  )
+  assert.deepEqual(committedTeam.responsibility, {
+    projectId,
+    revision: 1,
+    accountableMemberId: agentAdded.value.memberId,
+    contributorMemberIds: [externalAdded.value.memberId],
+    humanSponsorMemberId: feishuAdded.value.memberId,
+    updatedAt: committedTeam.responsibility.updatedAt,
+  })
+  teamActivity = await firstAuth.run(() => firstService.activity(
+    { projectId, limit: 10 },
+    new AbortController().signal,
+  ))
+  assert.equal(teamActivity.items.length, 7)
+  assert.equal(teamActivity.items[0].action, 'workbench.project.responsibility-assigned')
+  assert.equal(teamActivity.items.filter(
+    activity => activity.action === 'workbench.project-member.created',
+  ).length, 4)
+  assert.equal(teamActivity.items.filter(
+    activity => activity.action === 'workbench.project-member.status-changed',
+  ).length, 1)
+  const teamActivityJson = JSON.stringify(teamActivity)
+  for (const privateValue of [
+    'Packed Feishu Sponsor',
+    'cli_packed_consumer',
+    'ou_packed_sponsor',
+    'Packed External Contributor',
+    'packed.external@example.invalid',
+    'Packed Research Agent',
+    'Packed Inactive Historian',
+    'packed-historian-reference',
+  ]) assert.equal(teamActivityJson.includes(privateValue), false)
+  assert.equal(teamActivity.integrity.valid, true)
+  assert.equal(teamActivity.integrity.eventCount, 8)
   finalIntegrity = await firstAuth.run(() => firstService.auditIntegrity(
     new AbortController().signal,
   ))
-  assert.deepEqual(finalIntegrity, createdProjectActivity.integrity)
+  assert.deepEqual(finalIntegrity, teamActivity.integrity)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -902,6 +1125,7 @@ let restartIntegrity
 let restartProjectStart
 let restartProject
 let restartProjectActivity
+let restartTeam
 let secondContext
 let secondService
 try {
@@ -939,7 +1163,15 @@ try {
     action: 'workbench.project.created',
     limit: 10,
   }, new AbortController().signal))
-  assert.deepEqual(restartProjectActivity, createdProjectActivity)
+  assert.deepEqual(restartProjectActivity.items, createdProjectActivity.items)
+  assert.equal(restartProjectActivity.nextBeforeSequence, createdProjectActivity.nextBeforeSequence)
+  assert.deepEqual(restartProjectActivity.integrity, finalIntegrity)
+  restartTeam = await secondAuth.run(() => secondService.projectTeam(
+    { projectId: createdProject.project.projectId },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(restartTeam, committedTeam)
+  teamRoundTripVerified = true
 } finally {
   await secondContext?.fiber.dispose()
 }
@@ -968,6 +1200,7 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   projectedProject,
   createdProjectStart,
   createdProjectActivity,
+  teamRoundTripVerified,
   finalIntegrity,
   restartSnapshot,
   restartActivity,

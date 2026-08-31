@@ -2,7 +2,7 @@
 
 ## Product outcome
 
-Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, and T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity. The next implementation boundary is GitHub Issue #5 (T04): create Goal, Outcome, and Project from an immutable knowledge-work template snapshot.
+Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity, and T04 added immutable Template-driven Project creation. The current implementation boundary is GitHub Issue #6 (T05): one Project-scoped human/Agent roster and responsibility tuple.
 
 ## Runtime shape
 
@@ -65,9 +65,20 @@ Before runtime changes:
 - The browser supplies exact Template Version/digest, expected revisions, idempotency key, causation ID, and bounded domain input. Actor, organization/team scope, generated IDs, time, audit vocabulary, and Outbox facts remain Host-derived.
 - Project names, Goal/Outcome text, metric values, Template Snapshot content, request bodies, and raw failures never enter audit or Activity. The Project detail projection may return authorized business values as detached whole objects.
 
+## T05 ProjectMember and responsibility invariants
+
+- A ProjectMember is a stable, Project-scoped responsibility identity, not a Workbench login, Feishu contact record, or runnable Agent Profile. T05 admits exactly one creation identity variant: declared Feishu human (`appId + openId`), external-contact human, or descriptive Agent.
+- A declared Feishu identity is app-scoped metadata, not verified connector truth. Only an active declared-Feishu human is marked as having an assignee identifier; T07 must verify connection scope and T08 remains authoritative for real Feishu task assignment.
+- The Project is T05's only Responsibility Target. Its current Project Responsibility is either unconfigured or one complete tuple with exactly one active Accountable, zero or more distinct active Contributors excluding the Accountable, and a Human Sponsor when the Accountable is an Agent or external-contact human.
+- Human Sponsor is an active human ProjectMember distinct from the sponsored Accountable. Sponsor is oversight and escalation, not a second Accountable, and may also be a Contributor.
+- Project Team revision serializes roster creation, member status, and responsibility replacement. Responsibility versions are append-only. ProjectMember status is reversible; identity rows are never deleted, and a current Accountable, Contributor, or Sponsor must be reassigned before deactivation.
+- Member creation, status change, and responsibility replacement are authorized T03 commands with receipt-first replay, exact CAS, one pending Outbox fact, one Project-scoped audit event, and one receipt in the same transaction. Success receipts contain only IDs, versions, safe status/kind codes, and correlation IDs.
+- Display names, Feishu app/open IDs, external-contact values, complete responsibility input, raw request/failure content, and Project Team projections never enter audit, Activity, Outbox payloads, diagnostics, or immutable command receipts. Authorized roster reads may return detached business values.
+- The live Client controller retains Team drafts and exact retry identity across recoverable conflicts and connection-generation resets. Project switch, logout, session expiry, and Fiber disposal erase them. Under the pinned DSH HMR contract, a replacement Fiber re-reads Host truth after the Owner explicitly reopens the Project; T05 does not place protected draft data in Web Storage or a process-global handoff.
+
 ## Ticket boundary
 
-T04 is complete at the built-in Knowledge Work Template Version and the end-to-end creation/read path for Project, Primary Goal, measurable Outcomes, optional Supporting Goals, and the independent creation snapshot. The next implementation boundary is T05 (#6): a unified human/agent ProjectMember roster and responsibility rules. T05 must not pull in Review Center, Template Studio, template upgrade/apply, Feishu synchronization beyond member identity metadata, calendar, risks, topics, deliverables, files, AI analysis, automation, backup, TLS/VPN, or production operations.
+T05 adds only the Project-scoped human/Agent roster, declared identity metadata, Project Responsibility, status lifecycle, and their authorized browser/ledger paths. It does not implement a global directory, member login/invitation/claiming, Feishu verification or synchronization, real task assignees, Agent Profiles or execution, Review Center, Template Studio, calendar, risks, topics, Deliverables, files, AI analysis, automation, backup, TLS/VPN, or production operations.
 
 ## Required evidence
 
@@ -80,3 +91,4 @@ T04 is complete at the built-in Knowledge Work Template Version and the end-to-e
 - T02 additionally requires real carrier-level 401/403 evidence, server-observed Cookie attributes/round trips, one-time recovery behavior, and proof that an unauthenticated browser never renders or mutates the Workbench projection.
 - T03 additionally requires rollback fault evidence, response-loss replay without duplicate rows, hash-chain mutation/deletion/reorder detection, Activity filtering/redaction, all four observable Outbox states, generated four-method Typert faces, and a real-browser Activity journey that never renders protected data before authentication.
 - T04 additionally requires immutable Template Version and Project Template Snapshot evidence, Goal/Outcome/Project relationship and metric validation, catalog/Supporting Goal conflict and rollback matrices, response-loss replay, Project-scoped Activity redaction, migration/restart, generated seven-method Typert faces, and a real-browser create/reopen journey.
+- T05 additionally requires discriminated member-identity validation, app-scoped Feishu declaration semantics, unique Accountable and Sponsor policy evidence, retained inactive/history facts, Project Team CAS/replay/rollback, PII-redacted Activity and receipts, Schema v3→v4 migration/restart, generated eleven-method Typert faces, and a real-browser roster/responsibility journey.

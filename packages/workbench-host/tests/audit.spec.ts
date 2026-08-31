@@ -201,7 +201,7 @@ describe('audit hash envelope', () => {
       command: { id: 'command-001', type: 'workbench.project.create' },
       summary: {
         code: 'project-created-from-template',
-        changedFields: ['template', 'primaryGoal', 'outcomes', 'supportingGoals'],
+        changedFields: ['primaryGoal', 'outcomes', 'supportingGoals', 'templateSnapshot'],
       },
     }
     const created = createAuditEvent(input)
@@ -227,6 +227,55 @@ describe('audit hash envelope', () => {
       ...input,
       reason: { code: 'owner-project-create', detail: 'must-not-enter-audit' },
     } as unknown as AuditEventInput)).toThrow(/no arbitrary detail/u)
+  })
+
+  it('admits only correlated, Project-scoped, PII-free Project Team vocabulary', () => {
+    const created = createAuditEvent(projectTeamEventInput('created'))
+    const statusChanged = createAuditEvent(projectTeamEventInput('status'))
+    const responsibility = createAuditEvent(projectTeamEventInput('responsibility'))
+
+    expect(created).toMatchObject({
+      action: 'workbench.project-member.created',
+      scope: { projectId: 'project-001' },
+      reason: { code: 'owner-project-member-add' },
+      object: { type: 'project-member', id: 'member-001', version: '1' },
+      command: { type: 'workbench.project-member.add' },
+      summary: { code: 'project-member-created', changedFields: ['member', 'teamRevision'] },
+    })
+    expect(statusChanged).toMatchObject({
+      action: 'workbench.project-member.status-changed',
+      reason: { code: 'owner-project-member-status-change' },
+      command: { type: 'workbench.project-member.set-status' },
+      summary: { code: 'project-member-status-changed' },
+    })
+    expect(responsibility).toMatchObject({
+      action: 'workbench.project.responsibility-assigned',
+      object: { type: 'project-responsibility', id: 'project-001', version: '1' },
+      command: { type: 'workbench.project.set-responsibility' },
+      summary: { code: 'project-responsibility-assigned' },
+    })
+    for (const event of [created, statusChanged, responsibility]) {
+      expect(event.canonicalEnvelope).not.toMatch(
+        /displayName|openId|appId|externalContact|expert@example|responsibilityInput/u,
+      )
+    }
+
+    expect(() => createAuditEvent({
+      ...projectTeamEventInput('created'),
+      command: { id: 'command-001', type: 'workbench.project-member.set-status' },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...projectTeamEventInput('created'),
+      scope: { organizationId: 'organization-001', teamId: 'team-001', projectId: null },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...projectTeamEventInput('responsibility'),
+      object: { type: 'project-responsibility', id: 'project-other', version: '1' },
+    })).toThrow(/correlated combination/u)
+    expect(() => createAuditEvent({
+      ...projectTeamEventInput('created'),
+      summary: { code: 'project-member-created', changedFields: ['displayName'] },
+    })).toThrow(/correlated combination/u)
   })
 })
 
@@ -365,6 +414,53 @@ function eventInput(): AuditEventInput {
     outbox: { id: 'outbox-001', state: 'pending' },
     outcome: 'committed',
     summary: { code: 'status-revision-committed', changedFields: ['message'] },
+  }
+}
+
+function projectTeamEventInput(
+  kind: 'created' | 'status' | 'responsibility',
+): AuditEventInput {
+  const scope = {
+    organizationId: 'organization-001',
+    teamId: 'team-001',
+    projectId: 'project-001',
+  } as const
+  if (kind === 'created') {
+    return {
+      ...eventInput(),
+      action: 'workbench.project-member.created',
+      scope,
+      reason: { code: 'owner-project-member-add' },
+      object: { type: 'project-member', id: 'member-001', version: '1' },
+      command: { id: 'command-001', type: 'workbench.project-member.add' },
+      summary: { code: 'project-member-created', changedFields: ['member', 'teamRevision'] },
+    }
+  }
+  if (kind === 'status') {
+    return {
+      ...eventInput(),
+      action: 'workbench.project-member.status-changed',
+      scope,
+      reason: { code: 'owner-project-member-status-change' },
+      object: { type: 'project-member', id: 'member-001', version: '2' },
+      command: { id: 'command-002', type: 'workbench.project-member.set-status' },
+      summary: {
+        code: 'project-member-status-changed',
+        changedFields: ['status', 'teamRevision'],
+      },
+    }
+  }
+  return {
+    ...eventInput(),
+    action: 'workbench.project.responsibility-assigned',
+    scope,
+    reason: { code: 'owner-project-responsibility-set' },
+    object: { type: 'project-responsibility', id: 'project-001', version: '1' },
+    command: { id: 'command-003', type: 'workbench.project.set-responsibility' },
+    summary: {
+      code: 'project-responsibility-assigned',
+      changedFields: ['accountable', 'contributors', 'humanSponsor', 'teamRevision'],
+    },
   }
 }
 

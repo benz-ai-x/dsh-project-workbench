@@ -8,11 +8,14 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import type {
+  AddProjectMemberResult,
   CreateProjectResult,
   ProjectDetailProjection,
   ProjectStartProjection,
+  ProjectTeamProjection,
   SetStatusRequest,
   SetStatusResult,
+  SetProjectResponsibilityResult,
   WorkbenchStatusSnapshot,
 } from '../../packages/workbench-host/src/client.ts'
 import type { WorkbenchService } from '../../packages/workbench-host/src/index.ts'
@@ -205,6 +208,10 @@ describe('built Workbench Host through the real DSH Loader', () => {
     })
     await expect(firstService.projectStart(
       { limit: 10 },
+      new AbortController().signal,
+    )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    await expect(firstService.projectTeam(
+      { projectId: 'project-secret' },
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
     await expect(first.workbenchAuth.run(() =>
@@ -403,6 +410,186 @@ describe('built Workbench Host through the real DSH Loader', () => {
     expect(JSON.stringify(projectActivity)).not.toContain('Feedback latency')
     expect(projectActivity.integrity.headHash).toBe(projectActivity.items[0]?.hash)
 
+    const initialTeam = await first.workbenchAuth.run(() => firstService.projectTeam(
+      { projectId: createdProject.project.projectId },
+      new AbortController().signal,
+    ))
+    expect(initialTeam).toEqual({
+      projectId: createdProject.project.projectId,
+      teamRevision: 0,
+      members: [],
+      responsibility: null,
+    })
+
+    const feishuMember: AddProjectMemberResult = await first.workbenchAuth.run(() =>
+      firstService.addProjectMember({
+        projectId: createdProject.project.projectId,
+        member: {
+          kind: 'human',
+          displayName: 'Loader Feishu Sponsor',
+          identity: {
+            type: 'feishu',
+            appId: 'cli_loader_test',
+            openId: 'ou_loader_sponsor',
+          },
+        },
+        expectedTeamRevision: 0,
+        expectedRevision: null,
+        idempotencyKey: 'loader-member-idempotency-0001',
+        causationId: 'loader-member-causation-0001',
+        reason: 'owner-project-member-add',
+      }, new AbortController().signal))
+    expect(feishuMember).toMatchObject({
+      ok: true,
+      value: {
+        projectId: createdProject.project.projectId,
+        kind: 'human',
+        status: 'active',
+        memberRevision: 1,
+        teamRevision: 1,
+      },
+      receipt: {
+        commandId: expect.stringMatching(/^command-/u),
+        auditEventId: expect.stringMatching(/^audit-/u),
+        outboxId: expect.stringMatching(/^outbox-/u),
+      },
+    })
+    if (!feishuMember.ok) throw new Error('expected Feishu human member creation to succeed')
+    expect(JSON.stringify(feishuMember)).not.toContain('Loader Feishu Sponsor')
+    expect(JSON.stringify(feishuMember)).not.toContain('cli_loader_test')
+    expect(JSON.stringify(feishuMember)).not.toContain('ou_loader_sponsor')
+
+    const externalMember: AddProjectMemberResult = await first.workbenchAuth.run(() =>
+      firstService.addProjectMember({
+        projectId: createdProject.project.projectId,
+        member: {
+          kind: 'human',
+          displayName: 'Loader External Contributor',
+          identity: {
+            type: 'external',
+            method: 'email',
+            value: 'external-loader@example.test',
+          },
+        },
+        expectedTeamRevision: 1,
+        expectedRevision: null,
+        idempotencyKey: 'loader-member-idempotency-0002',
+        causationId: 'loader-member-causation-0002',
+        reason: 'owner-project-member-add',
+      }, new AbortController().signal))
+    expect(externalMember).toMatchObject({ ok: true, value: { teamRevision: 2 } })
+    if (!externalMember.ok) throw new Error('expected external human member creation to succeed')
+    expect(JSON.stringify(externalMember)).not.toContain('external-loader@example.test')
+
+    const agentMember: AddProjectMemberResult = await first.workbenchAuth.run(() =>
+      firstService.addProjectMember({
+        projectId: createdProject.project.projectId,
+        member: { kind: 'agent', displayName: 'Loader Research Agent' },
+        expectedTeamRevision: 2,
+        expectedRevision: null,
+        idempotencyKey: 'loader-member-idempotency-0003',
+        causationId: 'loader-member-causation-0003',
+        reason: 'owner-project-member-add',
+      }, new AbortController().signal))
+    expect(agentMember).toMatchObject({ ok: true, value: { kind: 'agent', teamRevision: 3 } })
+    if (!agentMember.ok) throw new Error('expected Agent member creation to succeed')
+    expect(JSON.stringify(agentMember)).not.toContain('Loader Research Agent')
+
+    const responsibility: SetProjectResponsibilityResult = await first.workbenchAuth.run(() =>
+      firstService.setProjectResponsibility({
+        projectId: createdProject.project.projectId,
+        accountableMemberId: agentMember.value.memberId,
+        contributorMemberIds: [externalMember.value.memberId],
+        humanSponsorMemberId: feishuMember.value.memberId,
+        expectedTeamRevision: 3,
+        expectedResponsibilityRevision: null,
+        idempotencyKey: 'loader-responsibility-idempotency-0001',
+        causationId: 'loader-responsibility-causation-0001',
+        reason: 'owner-project-responsibility-set',
+      }, new AbortController().signal))
+    expect(responsibility).toMatchObject({
+      ok: true,
+      value: {
+        projectId: createdProject.project.projectId,
+        responsibilityRevision: 1,
+        teamRevision: 4,
+      },
+    })
+    if (!responsibility.ok) throw new Error('expected Project responsibility to succeed')
+
+    const loadedTeam = await first.workbenchAuth.run(() =>
+      firstService.projectTeam(
+        { projectId: createdProject.project.projectId },
+        new AbortController().signal,
+      ))
+    if (loadedTeam === null) throw new Error('expected committed Project Team to be readable')
+    const committedTeam: ProjectTeamProjection = loadedTeam
+    expect(committedTeam).toMatchObject({
+      projectId: createdProject.project.projectId,
+      teamRevision: 4,
+      responsibility: {
+        revision: 1,
+        accountableMemberId: agentMember.value.memberId,
+        contributorMemberIds: [externalMember.value.memberId],
+        humanSponsorMemberId: feishuMember.value.memberId,
+      },
+    })
+    expect(committedTeam.members).toHaveLength(3)
+    expect(committedTeam.members.find(member => member.memberId === feishuMember.value.memberId))
+      .toMatchObject({
+        kind: 'human',
+        status: 'active',
+        identity: {
+          type: 'feishu',
+          appId: 'cli_loader_test',
+          openId: 'ou_loader_sponsor',
+          state: 'declared',
+        },
+        feishuAssigneeEligibility: 'identifier-present',
+      })
+    expect(committedTeam.members.find(member => member.memberId === externalMember.value.memberId))
+      .toMatchObject({
+        kind: 'human',
+        identity: { type: 'external', method: 'email' },
+        feishuAssigneeEligibility: 'external-contact',
+      })
+    expect(committedTeam.members.find(member => member.memberId === agentMember.value.memberId))
+      .toMatchObject({
+        kind: 'agent',
+        feishuAssigneeEligibility: 'agent-not-assignable',
+      })
+    const teamActivity = await first.workbenchAuth.run(() => firstService.activity({
+      projectId: createdProject.project.projectId,
+      limit: 20,
+    }, new AbortController().signal))
+    expect(teamActivity).toMatchObject({
+      items: [
+        {
+          action: 'workbench.project.responsibility-assigned',
+          reason: 'owner-project-responsibility-set',
+          object: { type: 'project-responsibility', version: 1 },
+          summaryCode: 'project-responsibility-assigned',
+        },
+        { action: 'workbench.project-member.created' },
+        { action: 'workbench.project-member.created' },
+        { action: 'workbench.project-member.created' },
+        { action: 'workbench.project.created' },
+      ],
+      integrity: { valid: true, eventCount: 6, issue: null },
+    })
+    expect(teamActivity.items).toHaveLength(5)
+    const serializedTeamActivity = JSON.stringify(teamActivity)
+    for (const protectedValue of [
+      'Loader Feishu Sponsor',
+      'cli_loader_test',
+      'ou_loader_sponsor',
+      'Loader External Contributor',
+      'external-loader@example.test',
+      'Loader Research Agent',
+    ]) {
+      expect(serializedTeamActivity).not.toContain(protectedValue)
+    }
+
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
     expect(first.get('workbench')).toBeUndefined()
@@ -417,7 +604,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
     ))
     expect(restartWorkspaceActivity.items).toEqual(activity.items)
     expect(restartWorkspaceActivity.nextBeforeSequence).toBe(activity.nextBeforeSequence)
-    expect(restartWorkspaceActivity.integrity).toEqual(projectActivity.integrity)
+    expect(restartWorkspaceActivity.integrity).toEqual(teamActivity.integrity)
     await expect(restarted.workbenchAuth.run(() => restarted.workbench.project(
       { projectId: createdProject.project.projectId },
       new AbortController().signal,
@@ -430,9 +617,13 @@ describe('built Workbench Host through the real DSH Loader', () => {
       projects: [{ projectId: createdProject.project.projectId }],
       nextBeforeSequence: null,
     })
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.projectTeam(
+      { projectId: createdProject.project.projectId },
+      new AbortController().signal,
+    ))).resolves.toEqual(committedTeam)
     await expect(restarted.workbenchAuth.run(() =>
       restarted.workbench.auditIntegrity(new AbortController().signal))).resolves.toEqual(
-      projectActivity.integrity,
+      teamActivity.integrity,
     )
     await restarted.fiber.dispose()
     contexts.splice(contexts.indexOf(restarted), 1)

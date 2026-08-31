@@ -1,11 +1,17 @@
 import type {
+  AddProjectMemberResult,
   CreateProjectResult,
   OutcomeMetric,
   ProjectDetailProjection,
+  ProjectMemberDraft,
+  ProjectMemberStatus,
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
+  ProjectTeamProjection,
   ProjectTemplateSelection,
+  SetProjectMemberStatusResult,
+  SetProjectResponsibilityResult,
   SetStatusResult,
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
@@ -73,6 +79,44 @@ export interface WorkbenchProjectMutation {
   readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-create' }
 }
 
+/** Provider-neutral aggregate material for one Project-scoped roster addition. */
+export interface WorkbenchProjectMemberMutation {
+  readonly projectId: string
+  readonly memberId: string
+  readonly member: ProjectMemberDraft
+  readonly expectedTeamRevision: number
+  readonly expectedRevision: null
+  readonly createdAt: string
+  readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-member-add' }
+}
+
+/** Provider-neutral status transition retaining the immutable member identity row. */
+export interface WorkbenchProjectMemberStatusMutation {
+  readonly projectId: string
+  readonly memberId: string
+  readonly status: ProjectMemberStatus
+  readonly expectedTeamRevision: number
+  readonly expectedMemberRevision: number
+  readonly updatedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-project-member-status-change'
+  }
+}
+
+/** Provider-neutral whole Project Responsibility replacement. */
+export interface WorkbenchProjectResponsibilityMutation {
+  readonly projectId: string
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly expectedTeamRevision: number
+  readonly expectedResponsibilityRevision: number | null
+  readonly updatedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-project-responsibility-set'
+  }
+}
+
 /** Host-fixed scope for the Project creation-page read. */
 export interface WorkbenchProjectStartQuery {
   readonly organizationId: string
@@ -82,6 +126,12 @@ export interface WorkbenchProjectStartQuery {
 
 /** Host-fixed scope for one Project detail read. */
 export interface WorkbenchProjectReadQuery extends ProjectQuery {
+  readonly organizationId: string
+  readonly teamId: string
+}
+
+/** Host-fixed scope for one Project Team read. */
+export interface WorkbenchProjectTeamReadQuery extends ProjectQuery {
   readonly organizationId: string
   readonly teamId: string
 }
@@ -143,6 +193,26 @@ export interface WorkbenchRepository {
     query: WorkbenchProjectReadQuery,
     signal: AbortSignal,
   ): Promise<ProjectDetailProjection | null>
+  /** Return one detached Project Team or null when the Project is outside the fixed scope. */
+  readProjectTeam(
+    query: WorkbenchProjectTeamReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTeamProjection | null>
+  /** Atomically add a member, advance Team CAS, Outbox, audit, and replay receipt. */
+  commitProjectMember(
+    mutation: WorkbenchProjectMemberMutation,
+    signal: AbortSignal,
+  ): Promise<AddProjectMemberResult>
+  /** Atomically transition one retained member's status. */
+  commitProjectMemberStatus(
+    mutation: WorkbenchProjectMemberStatusMutation,
+    signal: AbortSignal,
+  ): Promise<SetProjectMemberStatusResult>
+  /** Atomically append and select one complete Project Responsibility version. */
+  commitProjectResponsibility(
+    mutation: WorkbenchProjectResponsibilityMutation,
+    signal: AbortSignal,
+  ): Promise<SetProjectResponsibilityResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */
@@ -271,6 +341,172 @@ export function projectResult(value: CreateProjectResult): CreateProjectResult {
         }),
       })
   }
+}
+
+/** Copy and recursively freeze one complete authorized Project Team projection. */
+export function projectTeamProjection(value: ProjectTeamProjection): ProjectTeamProjection {
+  return Object.freeze({
+    projectId: value.projectId,
+    teamRevision: value.teamRevision,
+    members: Object.freeze(value.members.map(projectMemberProjection)),
+    responsibility: value.responsibility === null
+      ? null
+      : Object.freeze({
+        projectId: value.responsibility.projectId,
+        revision: value.responsibility.revision,
+        accountableMemberId: value.responsibility.accountableMemberId,
+        contributorMemberIds: Object.freeze([...value.responsibility.contributorMemberIds]),
+        humanSponsorMemberId: value.responsibility.humanSponsorMemberId,
+        updatedAt: value.responsibility.updatedAt,
+      }),
+  })
+}
+
+/** Copy and freeze one PII-free Project Team command result. */
+export function projectTeamCommandResult<T extends
+  | AddProjectMemberResult
+  | SetProjectMemberStatusResult
+  | SetProjectResponsibilityResult>(value: T): T {
+  if (value.ok) {
+    const receipt = Object.freeze({
+      commandId: value.receipt.commandId,
+      auditEventId: value.receipt.auditEventId,
+      outboxId: value.receipt.outboxId,
+    })
+    if ('memberId' in value.value) {
+      return Object.freeze({
+        ok: true,
+        value: Object.freeze({
+          projectId: value.value.projectId,
+          memberId: value.value.memberId,
+          kind: value.value.kind,
+          status: value.value.status,
+          memberRevision: value.value.memberRevision,
+          teamRevision: value.value.teamRevision,
+        }),
+        receipt,
+      }) as T
+    }
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        projectId: value.value.projectId,
+        responsibilityRevision: value.value.responsibilityRevision,
+        teamRevision: value.value.teamRevision,
+      }),
+      receipt,
+    }) as T
+  }
+  const error = value.error
+  switch (error.code) {
+    case 'idempotency-conflict':
+    case 'duplicate-feishu-identity':
+      return failedTeamCommand({ code: error.code, message: error.message }) as T
+    case 'project-not-found':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        projectId: error.projectId,
+      }) as T
+    case 'team-revision-conflict':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        expectedTeamRevision: error.expectedTeamRevision,
+        currentTeamRevision: error.currentTeamRevision,
+      }) as T
+    case 'member-limit-reached':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        limit: 100 as const,
+      }) as T
+    case 'member-not-found':
+    case 'member-in-use':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        memberId: error.memberId,
+      }) as T
+    case 'member-revision-conflict':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        memberId: error.memberId,
+        expectedMemberRevision: error.expectedMemberRevision,
+        currentMemberRevision: error.currentMemberRevision,
+      }) as T
+    case 'member-status-conflict':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        memberId: error.memberId,
+        status: error.status,
+      }) as T
+    case 'responsibility-revision-conflict':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        expectedResponsibilityRevision: error.expectedResponsibilityRevision,
+        currentResponsibilityRevision: error.currentResponsibilityRevision,
+      }) as T
+    case 'member-inactive':
+    case 'accountable-also-contributor':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        memberId: error.memberId,
+      }) as T
+    case 'human-sponsor-required':
+    case 'human-sponsor-forbidden':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        accountableMemberId: error.accountableMemberId,
+      }) as T
+    case 'human-sponsor-invalid':
+      return failedTeamCommand({
+        code: error.code,
+        message: error.message,
+        humanSponsorMemberId: error.humanSponsorMemberId,
+      }) as T
+  }
+}
+
+function failedTeamCommand<T extends Readonly<{ code: string; message: string }>>(
+  error: T,
+): Readonly<{ ok: false; error: T }> {
+  return Object.freeze({ ok: false, error: Object.freeze(error) })
+}
+
+function projectMemberProjection(
+  member: ProjectTeamProjection['members'][number],
+): ProjectTeamProjection['members'][number] {
+  if (member.kind === 'human') {
+    return Object.freeze({
+      memberId: member.memberId,
+      projectId: member.projectId,
+      kind: 'human',
+      displayName: member.displayName,
+      status: member.status,
+      revision: member.revision,
+      identity: Object.freeze({ ...member.identity }),
+      feishuAssigneeEligibility: member.feishuAssigneeEligibility,
+      createdAt: member.createdAt,
+      updatedAt: member.updatedAt,
+    })
+  }
+  return Object.freeze({
+    memberId: member.memberId,
+    projectId: member.projectId,
+    kind: 'agent',
+    displayName: member.displayName,
+    status: member.status,
+    revision: member.revision,
+    feishuAssigneeEligibility: member.feishuAssigneeEligibility,
+    createdAt: member.createdAt,
+    updatedAt: member.updatedAt,
+  })
 }
 
 function projectSummaryProjection(

@@ -14,6 +14,10 @@ import {
   WorkbenchProjectController,
   type WorkbenchProjectRemote,
 } from './project-controller.ts'
+import {
+  WorkbenchProjectTeamController,
+  type WorkbenchProjectTeamRemote,
+} from './project-team-controller.ts'
 
 /** User-visible shell modes. */
 export type OwnerPhase =
@@ -43,6 +47,7 @@ export interface OwnerClientState {
   readonly access: OwnerAccessProjection | null
   readonly status: WorkbenchStatusController | null
   readonly projects: WorkbenchProjectController | null
+  readonly projectTeam: WorkbenchProjectTeamController | null
   readonly activity: WorkbenchActivityController | null
   readonly recoveryCode: string | null
   readonly issue: OwnerIssue | null
@@ -53,6 +58,7 @@ const INITIAL_STATE: OwnerClientState = Object.freeze({
   access: null,
   status: null,
   projects: null,
+  projectTeam: null,
   activity: null,
   recoveryCode: null,
   issue: null,
@@ -77,7 +83,9 @@ export class OwnerController {
   private readonly inFlight = new Set<Promise<void>>()
   private status: WorkbenchStatusController | null = null
   private projects: WorkbenchProjectController | null = null
+  private projectTeam: WorkbenchProjectTeamController | null = null
   private activity: WorkbenchActivityController | null = null
+  private projectSelectionOff: (() => void) | null = null
   private authEpoch = 0
   private authAbort: AbortController | null = null
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
@@ -86,7 +94,7 @@ export class OwnerController {
 
   constructor(
     private readonly auth: OwnerAuthHttp,
-    private readonly remote: WorkbenchRemote & WorkbenchProjectRemote,
+    private readonly remote: WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote,
     private readonly options: OwnerControllerOptions = {},
   ) {}
 
@@ -108,6 +116,7 @@ export class OwnerController {
     if (this.hasExpiredSignedInAccess()) return Promise.resolve()
     this.status?.markDisconnected()
     this.projects?.markDisconnected()
+    this.projectTeam?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -154,6 +163,7 @@ export class OwnerController {
     this.authAbort = null
     this.status?.markDisconnected()
     this.projects?.markDisconnected()
+    this.projectTeam?.markDisconnected()
     this.activity?.markDisconnected()
 
     const unavailable = ownerIssue(connectionFallbackOperation(this.state.phase), 'unavailable')
@@ -173,6 +183,7 @@ export class OwnerController {
     if (this.disposed || this.hasExpiredSignedInAccess()) return Promise.resolve()
     this.status?.markDisconnected()
     this.projects?.markDisconnected()
+    this.projectTeam?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -187,18 +198,24 @@ export class OwnerController {
     this.clearExpiryTimer()
     const currentStatus = this.status
     const currentProjects = this.projects
+    const currentProjectTeam = this.projectTeam
     const currentActivity = this.activity
+    this.projectSelectionOff?.()
+    this.projectSelectionOff = null
     this.status = null
     this.projects = null
+    this.projectTeam = null
     this.activity = null
     const statusDisposal = currentStatus?.dispose()
     const projectDisposal = currentProjects?.dispose()
+    const projectTeamDisposal = currentProjectTeam?.dispose()
     const activityDisposal = currentActivity?.dispose()
     this.state = INITIAL_STATE
     this.listeners.clear()
     const pending = [...this.inFlight]
     if (statusDisposal !== undefined) pending.push(statusDisposal)
     if (projectDisposal !== undefined) pending.push(projectDisposal)
+    if (projectTeamDisposal !== undefined) pending.push(projectTeamDisposal)
     if (activityDisposal !== undefined) pending.push(activityDisposal)
     this.disposal = Promise.allSettled(pending).then(() => undefined)
     return this.disposal
@@ -250,6 +267,7 @@ export class OwnerController {
             access: Object.freeze({ state: 'signed-out' }),
             status: null,
             projects: null,
+            projectTeam: null,
             activity: null,
             recoveryCode: null,
             issue,
@@ -265,6 +283,7 @@ export class OwnerController {
         access,
         status: null,
         projects: null,
+        projectTeam: null,
         activity: null,
         recoveryCode: result.value.recoveryCode,
         issue: null,
@@ -316,6 +335,7 @@ export class OwnerController {
     const operation = this.beginAuth('Workbench Owner logout was superseded')
     this.status?.markDisconnected()
     this.projects?.markDisconnected()
+    this.projectTeam?.markDisconnected()
     this.activity?.markDisconnected()
     this.publish({ ...this.state, phase: 'logout-pending', issue: null })
     try {
@@ -339,6 +359,7 @@ export class OwnerController {
         access: detachAccess(result.value),
         status: null,
         projects: null,
+        projectTeam: null,
         activity: null,
         recoveryCode: null,
         issue: null,
@@ -382,6 +403,7 @@ export class OwnerController {
           access,
           status: null,
           projects: null,
+          projectTeam: null,
           activity: null,
           recoveryCode: this.state.recoveryCode,
           issue: null,
@@ -400,6 +422,7 @@ export class OwnerController {
       access,
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -414,33 +437,40 @@ export class OwnerController {
   ): Promise<void> {
     if (this.disposed || epoch !== this.authEpoch) return
     const existingAccess = this.state.access
-    if ((this.status !== null || this.projects !== null || this.activity !== null)
+    if ((this.status !== null || this.projects !== null || this.projectTeam !== null
+      || this.activity !== null)
       && existingAccess?.state === 'signed-in'
       && existingAccess.ownerId !== access.ownerId) {
       await this.retireProtectedControllers()
       if (this.disposed || epoch !== this.authEpoch) return
     }
-    const created = this.status === null || this.projects === null || this.activity === null
+    const created = this.status === null || this.projects === null
+      || this.projectTeam === null || this.activity === null
     const status = this.status ?? this.createStatusController()
     const projects = this.projects ?? this.createProjectController()
+    const projectTeam = this.projectTeam ?? this.createProjectTeamController()
     const activity = this.activity ?? this.createActivityController()
     this.status = status
     this.projects = projects
+    this.projectTeam = projectTeam
     this.activity = activity
     this.publish({
       phase: 'authenticated',
       access,
       status,
       projects,
+      projectTeam,
       activity,
       recoveryCode: null,
       issue: null,
     })
+    this.bindProjectSelection(projects, projectTeam)
     this.scheduleExpiry(access)
     if (created || refreshStatus) {
       await Promise.all([
         status.refresh(),
         created ? projects.refresh() : projects.connectionReset(),
+        created ? Promise.resolve() : projectTeam.connectionReset(),
         activity.refresh(),
       ])
     }
@@ -469,6 +499,31 @@ export class OwnerController {
     })
   }
 
+  private createProjectTeamController(): WorkbenchProjectTeamController {
+    return new WorkbenchProjectTeamController(this.remote, {
+      onBeforeProtectedOperation: () => this.admitProtectedOperation(),
+      onTransportFailure: () => { this.revalidateAfterStatusFailure() },
+      onCommitted: () => { void this.activity?.refresh() },
+    })
+  }
+
+  private bindProjectSelection(
+    projects: WorkbenchProjectController,
+    projectTeam: WorkbenchProjectTeamController,
+  ): void {
+    this.projectSelectionOff?.()
+    const sync = () => {
+      const detail = projects.getSnapshot().detail
+      if (detail === null) {
+        projectTeam.clearSelection()
+      } else {
+        void projectTeam.selectProject(detail.project.projectId, detail.project.name)
+      }
+    }
+    this.projectSelectionOff = projects.subscribe(sync)
+    sync()
+  }
+
   /** Admit retained child controllers only while the Owner shell is fully authenticated. */
   private admitProtectedOperation(): boolean {
     return this.state.phase === 'authenticated' && this.checkSessionExpiry()
@@ -482,13 +537,18 @@ export class OwnerController {
   private retireProtectedControllers(): Promise<void> {
     const currentStatus = this.status
     const currentProjects = this.projects
+    const currentProjectTeam = this.projectTeam
     const currentActivity = this.activity
+    this.projectSelectionOff?.()
+    this.projectSelectionOff = null
     this.status = null
     this.projects = null
+    this.projectTeam = null
     this.activity = null
     return Promise.allSettled([
       currentStatus?.dispose() ?? Promise.resolve(),
       currentProjects?.dispose() ?? Promise.resolve(),
+      currentProjectTeam?.dispose() ?? Promise.resolve(),
       currentActivity?.dispose() ?? Promise.resolve(),
     ]).then(() => undefined)
   }
@@ -554,6 +614,7 @@ export class OwnerController {
       access: Object.freeze({ state: 'signed-out' }),
       status: null,
       projects: null,
+      projectTeam: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -572,12 +633,14 @@ export class OwnerController {
     } else if (access?.state === 'signed-in'
       && this.status !== null
       && this.projects !== null
+      && this.projectTeam !== null
       && this.activity !== null) {
       this.publish({
         ...this.state,
         phase: 'authenticated',
         status: this.status,
         projects: this.projects,
+        projectTeam: this.projectTeam,
         activity: this.activity,
         issue,
       })

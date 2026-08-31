@@ -28,11 +28,16 @@ export interface ActivityPanelCopy {
   readonly objectAll: string
   readonly objectStatus: string
   readonly objectProject: string
+  readonly objectProjectMember: string
+  readonly objectProjectResponsibility: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
   readonly actionStatusUpdated: string
   readonly actionProjectCreated: string
+  readonly actionProjectMemberCreated: string
+  readonly actionProjectMemberStatusChanged: string
+  readonly actionProjectResponsibilityAssigned: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -54,6 +59,9 @@ export interface ActivityPanelCopy {
   readonly integrityEmptyHead: string
   readonly summaryStatusCommitted: string
   readonly summaryProjectCreated: string
+  readonly summaryProjectMemberCreated: string
+  readonly summaryProjectMemberStatusChanged: string
+  readonly summaryProjectResponsibilityAssigned: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -62,6 +70,9 @@ export interface ActivityPanelCopy {
   readonly reasonPrefix: string
   readonly reasonOwnerStatusEdit: string
   readonly reasonOwnerProjectCreate: string
+  readonly reasonOwnerProjectMemberAdd: string
+  readonly reasonOwnerProjectMemberStatusChange: string
+  readonly reasonOwnerProjectResponsibilitySet: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -85,11 +96,16 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectAll: 'All object types',
   objectStatus: 'Workbench status',
   objectProject: 'Project',
+  objectProjectMember: 'ProjectMember',
+  objectProjectResponsibility: 'Project Responsibility',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
   actionStatusUpdated: 'Status updated',
   actionProjectCreated: 'Project created',
+  actionProjectMemberCreated: 'ProjectMember created',
+  actionProjectMemberStatusChanged: 'Member status changed',
+  actionProjectResponsibilityAssigned: 'Project Responsibility assigned',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -111,6 +127,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   integrityEmptyHead: 'No audit head yet',
   summaryStatusCommitted: 'Status revision committed',
   summaryProjectCreated: 'Project created from template',
+  summaryProjectMemberCreated: 'ProjectMember added',
+  summaryProjectMemberStatusChanged: 'ProjectMember status changed',
+  summaryProjectResponsibilityAssigned: 'Project Responsibility replaced',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -119,6 +138,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonPrefix: 'Reason',
   reasonOwnerStatusEdit: 'Owner status edit',
   reasonOwnerProjectCreate: 'Owner Project creation',
+  reasonOwnerProjectMemberAdd: 'Owner ProjectMember addition',
+  reasonOwnerProjectMemberStatusChange: 'Owner ProjectMember status change',
+  reasonOwnerProjectResponsibilitySet: 'Owner Project Responsibility assignment',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -183,10 +205,14 @@ export function ActivityPanel({
           ? { projectId: projectId.trim() }
           : {}),
       ...(objectType === 'workbench-status' || objectType === 'project'
+        || objectType === 'project-member' || objectType === 'project-responsibility'
         ? { objectType }
         : {}),
       ...(objectId.trim() === '' ? {} : { objectId: objectId.trim() }),
       ...(action === 'workbench.status.updated' || action === 'workbench.project.created'
+        || action === 'workbench.project-member.created'
+        || action === 'workbench.project-member.status-changed'
+        || action === 'workbench.project.responsibility-assigned'
         ? { action }
         : {}),
     }
@@ -275,6 +301,8 @@ export function ActivityPanel({
                 <option value="">{copy.objectAll}</option>
                 <option value="workbench-status">{copy.objectStatus}</option>
                 <option value="project">{copy.objectProject}</option>
+                <option value="project-member">{copy.objectProjectMember}</option>
+                <option value="project-responsibility">{copy.objectProjectResponsibility}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -297,6 +325,15 @@ export function ActivityPanel({
                 <option value="">{copy.actionAll}</option>
                 <option value="workbench.status.updated">{copy.actionStatusUpdated}</option>
                 <option value="workbench.project.created">{copy.actionProjectCreated}</option>
+                <option value="workbench.project-member.created">
+                  {copy.actionProjectMemberCreated}
+                </option>
+                <option value="workbench.project-member.status-changed">
+                  {copy.actionProjectMemberStatusChanged}
+                </option>
+                <option value="workbench.project.responsibility-assigned">
+                  {copy.actionProjectResponsibilityAssigned}
+                </option>
               </select>
             </label>
           </div>
@@ -464,6 +501,9 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
   switch (item.summaryCode) {
     case 'status-revision-committed': return copy.summaryStatusCommitted
     case 'project-created-from-template': return copy.summaryProjectCreated
+    case 'project-member-created': return copy.summaryProjectMemberCreated
+    case 'project-member-status-changed': return copy.summaryProjectMemberStatusChanged
+    case 'project-responsibility-assigned': return copy.summaryProjectResponsibilityAssigned
   }
 }
 
@@ -471,6 +511,9 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
   switch (item.reason) {
     case 'owner-status-edit': return copy.reasonOwnerStatusEdit
     case 'owner-project-create': return copy.reasonOwnerProjectCreate
+    case 'owner-project-member-add': return copy.reasonOwnerProjectMemberAdd
+    case 'owner-project-member-status-change': return copy.reasonOwnerProjectMemberStatusChange
+    case 'owner-project-responsibility-set': return copy.reasonOwnerProjectResponsibilitySet
   }
 }
 

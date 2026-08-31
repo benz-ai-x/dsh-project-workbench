@@ -3,14 +3,23 @@
 import { randomUUID } from 'node:crypto'
 import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
+  AddProjectMemberRequest,
+  AddProjectMemberResult,
   CreateProjectRequest,
   CreateProjectResult,
   OutcomeDraft,
   ProjectDetailProjection,
+  ProjectMemberDraft,
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
+  ProjectTeamProjection,
+  ProjectTeamQuery,
   ProjectTemplateSelection,
+  SetProjectMemberStatusRequest,
+  SetProjectMemberStatusResult,
+  SetProjectResponsibilityRequest,
+  SetProjectResponsibilityResult,
   SetStatusRequest,
   SetStatusResult,
   WorkbenchActivityFilter,
@@ -22,9 +31,14 @@ import {
   projectDetailProjection,
   projectResult,
   projectStartProjection,
+  projectTeamCommandResult,
+  projectTeamProjection,
   statusResult,
   statusSnapshot,
   type WorkbenchProjectMutation,
+  type WorkbenchProjectMemberMutation,
+  type WorkbenchProjectMemberStatusMutation,
+  type WorkbenchProjectResponsibilityMutation,
   type WorkbenchRepository,
 } from './repository.ts'
 import type { WorkbenchAuthorization } from './authorization.ts'
@@ -38,6 +52,7 @@ export interface WorkbenchClock {
 export interface WorkbenchIdGenerator {
   nextStatusId(): string
   nextProjectId(): string
+  nextProjectMemberId(): string
   nextGoalId(): string
   nextOutcomeId(): string
   nextCommandId(): string
@@ -78,6 +93,7 @@ export const systemWorkbenchClock: WorkbenchClock = Object.freeze({
 export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextStatusId: () => `status-${randomUUID()}`,
   nextProjectId: () => `project-${randomUUID()}`,
+  nextProjectMemberId: () => `member-${randomUUID()}`,
   nextGoalId: () => `goal-${randomUUID()}`,
   nextOutcomeId: () => `outcome-${randomUUID()}`,
   nextCommandId: () => `command-${randomUUID()}`,
@@ -341,6 +357,204 @@ export class WorkbenchScenario {
     })
   }
 
+  /** Read one authorized, detached Project Team and current responsibility. */
+  projectTeam(
+    query: ProjectTeamQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTeamProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('projectTeam requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.project.team.read',
+        operationSignal,
+      )
+      const normalized = validateProjectTeamQuery(query)
+      throwIfCancelled(operationSignal)
+      let projection: ProjectTeamProjection | null
+      try {
+        projection = await this.options.repository.readProjectTeam(Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          projectId: normalized.projectId,
+        }), operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.project.team.read',
+        projectTeamProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Atomically add one Project-scoped human or descriptive Agent member. */
+  addProjectMember(
+    request: AddProjectMemberRequest,
+    signal: AbortSignal,
+  ): Promise<AddProjectMemberResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('addProjectMember requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.project.member.create',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateAddProjectMemberRequest(request)
+      const memberId = generatedId(this.options.ids.nextProjectMemberId(), 'Project member')
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const auditEventId = generatedId(this.options.ids.nextAuditEventId(), 'audit event')
+      const outboxId = generatedId(this.options.ids.nextOutboxId(), 'outbox')
+      const occurredAt = commandInstant(this.options.clock)
+      const mutation: WorkbenchProjectMemberMutation = Object.freeze({
+        projectId: normalized.projectId,
+        memberId,
+        member: normalized.member,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedRevision: null,
+        createdAt: occurredAt,
+        command: Object.freeze({
+          commandId,
+          auditEventId,
+          outboxId,
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: 'owner-project-member-add',
+          actor: Object.freeze({
+            kind: 'owner',
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      let result: AddProjectMemberResult
+      try {
+        result = await this.options.repository.commitProjectMember(mutation, operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return projectTeamCommandResult(result)
+    })
+  }
+
+  /** Atomically activate or deactivate one retained Project member. */
+  setProjectMemberStatus(
+    request: SetProjectMemberStatusRequest,
+    signal: AbortSignal,
+  ): Promise<SetProjectMemberStatusResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('setProjectMemberStatus requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.project.member.status.write',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateSetProjectMemberStatusRequest(request)
+      const occurredAt = commandInstant(this.options.clock)
+      const mutation: WorkbenchProjectMemberStatusMutation = Object.freeze({
+        projectId: normalized.projectId,
+        memberId: normalized.memberId,
+        status: normalized.status,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedMemberRevision: normalized.expectedMemberRevision,
+        updatedAt: occurredAt,
+        command: Object.freeze({
+          commandId: generatedId(this.options.ids.nextCommandId(), 'command'),
+          auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+          outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: 'owner-project-member-status-change',
+          actor: Object.freeze({
+            kind: 'owner',
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      let result: SetProjectMemberStatusResult
+      try {
+        result = await this.options.repository.commitProjectMemberStatus(mutation, operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return projectTeamCommandResult(result)
+    })
+  }
+
+  /** Atomically replace the complete current Project Responsibility tuple. */
+  setProjectResponsibility(
+    request: SetProjectResponsibilityRequest,
+    signal: AbortSignal,
+  ): Promise<SetProjectResponsibilityResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('setProjectResponsibility requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      const scope = await this.options.authorization.require(
+        'workbench.project.responsibility.write',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateSetProjectResponsibilityRequest(request)
+      const occurredAt = commandInstant(this.options.clock)
+      const mutation: WorkbenchProjectResponsibilityMutation = Object.freeze({
+        projectId: normalized.projectId,
+        accountableMemberId: normalized.accountableMemberId,
+        contributorMemberIds: normalized.contributorMemberIds,
+        humanSponsorMemberId: normalized.humanSponsorMemberId,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedResponsibilityRevision: normalized.expectedResponsibilityRevision,
+        updatedAt: occurredAt,
+        command: Object.freeze({
+          commandId: generatedId(this.options.ids.nextCommandId(), 'command'),
+          auditEventId: generatedId(this.options.ids.nextAuditEventId(), 'audit event'),
+          outboxId: generatedId(this.options.ids.nextOutboxId(), 'outbox'),
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: 'owner-project-responsibility-set',
+          actor: Object.freeze({
+            kind: 'owner',
+            id: scope.ownerId,
+            organizationId: scope.organizationId,
+            teamId: scope.teamId,
+          }),
+          occurredAt,
+        }),
+      })
+      let result: SetProjectResponsibilityResult
+      try {
+        result = await this.options.repository.commitProjectResponsibility(mutation, operationSignal)
+      } catch (error: unknown) {
+        if (operationSignal.aborted) throw cancelled('Workbench request was cancelled')
+        throw error
+      }
+      return projectTeamCommandResult(result)
+    })
+  }
+
   /** Validate and execute the public compare-and-set command. */
   setStatus(request: SetStatusRequest, signal: AbortSignal): Promise<SetStatusResult> {
     return this.execute(async (lifetimeSignal) => {
@@ -498,6 +712,9 @@ const MAX_GOAL_NAME_LENGTH = 200
 const MAX_OUTCOME_NAME_LENGTH = 200
 const MAX_METRIC_NAME_LENGTH = 120
 const MAX_METRIC_UNIT_LENGTH = 64
+const MAX_PROJECT_MEMBER_DISPLAY_NAME_LENGTH = 200
+const MAX_EXTERNAL_CONTACT_VALUE_LENGTH = 320
+const MAX_PROJECT_CONTRIBUTORS = 20
 const TEXT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u
 
@@ -676,6 +893,234 @@ function validateProjectQuery(value: ProjectQuery): ProjectQuery {
   return Object.freeze({ projectId: safeId(record.projectId, 'projectId') })
 }
 
+function validateProjectTeamQuery(value: ProjectTeamQuery): ProjectTeamQuery {
+  const record = exactRecord(value, 'projectTeam query', ['projectId'])
+  return Object.freeze({ projectId: safeId(record.projectId, 'projectId') })
+}
+
+function validateAddProjectMemberRequest(value: AddProjectMemberRequest): AddProjectMemberRequest {
+  const record = exactRecord(value, 'addProjectMember request', [
+    'projectId',
+    'member',
+    'expectedTeamRevision',
+    'expectedRevision',
+    'idempotencyKey',
+    'causationId',
+    'reason',
+  ])
+  if (record.expectedRevision !== null) {
+    throw badRequest('expectedRevision must be null for a new Project member', {
+      field: 'expectedRevision',
+    })
+  }
+  if (record.reason !== 'owner-project-member-add') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    member: validateProjectMemberDraft(record.member),
+    expectedTeamRevision: nonNegativeRevision(
+      record.expectedTeamRevision,
+      'expectedTeamRevision',
+    ),
+    expectedRevision: null,
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-member-add',
+  })
+}
+
+function validateProjectMemberDraft(value: unknown): ProjectMemberDraft {
+  const record = exactRecord(
+    value,
+    'member',
+    ['kind', 'displayName'],
+    ['identity'],
+  )
+  const displayName = boundedText(
+    record.displayName,
+    'member.displayName',
+    MAX_PROJECT_MEMBER_DISPLAY_NAME_LENGTH,
+  )
+  if (record.kind === 'agent') {
+    if (Object.hasOwn(record, 'identity')) {
+      throw badRequest('Agent member must not carry an identity or profile', {
+        field: 'member.identity',
+      })
+    }
+    return Object.freeze({ kind: 'agent', displayName })
+  }
+  if (record.kind !== 'human') {
+    throw badRequest('member.kind must be human or agent', { field: 'member.kind' })
+  }
+  if (!Object.hasOwn(record, 'identity')) {
+    throw badRequest('Human member must carry exactly one identity', {
+      field: 'member.identity',
+    })
+  }
+  const identityType = exactRecord(
+    record.identity,
+    'member.identity',
+    ['type'],
+    ['appId', 'openId', 'method', 'value'],
+  ).type
+  if (identityType === 'feishu') {
+    const identity = exactRecord(record.identity, 'member.identity', ['type', 'appId', 'openId'])
+    return Object.freeze({
+      kind: 'human',
+      displayName,
+      identity: Object.freeze({
+        type: 'feishu',
+        appId: safeId(identity.appId, 'member.identity.appId'),
+        openId: safeId(identity.openId, 'member.identity.openId'),
+      }),
+    })
+  }
+  if (identityType !== 'external') {
+    throw badRequest('member.identity.type must be feishu or external', {
+      field: 'member.identity.type',
+    })
+  }
+  const identity = exactRecord(record.identity, 'member.identity', [
+    'type',
+    'method',
+    'value',
+  ])
+  if (identity.method !== 'email'
+    && identity.method !== 'phone'
+    && identity.method !== 'other') {
+    throw badRequest('member.identity.method must be email, phone, or other', {
+      field: 'member.identity.method',
+    })
+  }
+  return Object.freeze({
+    kind: 'human',
+    displayName,
+    identity: Object.freeze({
+      type: 'external',
+      method: identity.method,
+      value: boundedText(
+        identity.value,
+        'member.identity.value',
+        MAX_EXTERNAL_CONTACT_VALUE_LENGTH,
+      ),
+    }),
+  })
+}
+
+function validateSetProjectMemberStatusRequest(
+  value: SetProjectMemberStatusRequest,
+): SetProjectMemberStatusRequest {
+  const record = exactRecord(value, 'setProjectMemberStatus request', [
+    'projectId',
+    'memberId',
+    'status',
+    'expectedTeamRevision',
+    'expectedMemberRevision',
+    'idempotencyKey',
+    'causationId',
+    'reason',
+  ])
+  if (record.status !== 'active' && record.status !== 'inactive') {
+    throw badRequest('status must be active or inactive', { field: 'status' })
+  }
+  if (record.reason !== 'owner-project-member-status-change') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    memberId: safeId(record.memberId, 'memberId'),
+    status: record.status,
+    expectedTeamRevision: nonNegativeRevision(
+      record.expectedTeamRevision,
+      'expectedTeamRevision',
+    ),
+    expectedMemberRevision: positiveRevision(
+      record.expectedMemberRevision,
+      'expectedMemberRevision',
+    ),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-member-status-change',
+  })
+}
+
+function validateSetProjectResponsibilityRequest(
+  value: SetProjectResponsibilityRequest,
+): SetProjectResponsibilityRequest {
+  const record = exactRecord(value, 'setProjectResponsibility request', [
+    'projectId',
+    'accountableMemberId',
+    'contributorMemberIds',
+    'humanSponsorMemberId',
+    'expectedTeamRevision',
+    'expectedResponsibilityRevision',
+    'idempotencyKey',
+    'causationId',
+    'reason',
+  ])
+  if (!Array.isArray(record.contributorMemberIds)
+    || record.contributorMemberIds.length > MAX_PROJECT_CONTRIBUTORS) {
+    throw badRequest(`contributorMemberIds must contain 0-${MAX_PROJECT_CONTRIBUTORS} items`, {
+      field: 'contributorMemberIds',
+    })
+  }
+  const contributorMemberIds = Array.from(record.contributorMemberIds, (memberId, index) =>
+    safeId(memberId, `contributorMemberIds[${String(index)}]`))
+  if (new Set(contributorMemberIds).size !== contributorMemberIds.length) {
+    throw badRequest('contributorMemberIds must not contain duplicates', {
+      field: 'contributorMemberIds',
+    })
+  }
+  contributorMemberIds.sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+  const sponsor = record.humanSponsorMemberId
+  if (sponsor !== null && (typeof sponsor !== 'string' || !SAFE_FILTER_ID.test(sponsor))) {
+    throw badRequest('humanSponsorMemberId must be null or a safe identifier', {
+      field: 'humanSponsorMemberId',
+    })
+  }
+  const expectedResponsibilityRevision = record.expectedResponsibilityRevision
+  if (expectedResponsibilityRevision !== null
+    && (!Number.isSafeInteger(expectedResponsibilityRevision)
+      || (expectedResponsibilityRevision as number) < 1)) {
+    throw badRequest(
+      'expectedResponsibilityRevision must be null or a positive safe integer',
+      { field: 'expectedResponsibilityRevision' },
+    )
+  }
+  if (record.reason !== 'owner-project-responsibility-set') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    accountableMemberId: safeId(record.accountableMemberId, 'accountableMemberId'),
+    contributorMemberIds: Object.freeze(contributorMemberIds),
+    humanSponsorMemberId: sponsor as string | null,
+    expectedTeamRevision: nonNegativeRevision(
+      record.expectedTeamRevision,
+      'expectedTeamRevision',
+    ),
+    expectedResponsibilityRevision: expectedResponsibilityRevision as number | null,
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-responsibility-set',
+  })
+}
+
+function nonNegativeRevision(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw badRequest(`${field} must be a non-negative safe integer`, { field })
+  }
+  return value as number
+}
+
+function positiveRevision(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw badRequest(`${field} must be a positive safe integer`, { field })
+  }
+  return value as number
+}
+
 function exactRecord(
   value: unknown,
   label: string,
@@ -758,37 +1203,49 @@ function validateCommandKey(value: unknown, field: string): string {
 }
 
 function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivityFilter {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw badRequest('activity filter must be an object', { field: 'filter' })
-  }
-  const projectId: unknown = Reflect.get(value, 'projectId')
+  const record = exactRecord(value, 'activity filter', [], [
+    'projectId',
+    'objectType',
+    'objectId',
+    'action',
+    'beforeSequence',
+    'limit',
+  ])
+  const projectId: unknown = record.projectId
   if (projectId !== undefined && projectId !== null
     && (typeof projectId !== 'string' || !SAFE_FILTER_ID.test(projectId))) {
     throw badRequest('projectId must be null or a safe identifier', { field: 'projectId' })
   }
-  const objectType: unknown = Reflect.get(value, 'objectType')
-  if (objectType !== undefined && objectType !== 'workbench-status' && objectType !== 'project') {
+  const objectType: unknown = record.objectType
+  if (objectType !== undefined
+    && objectType !== 'workbench-status'
+    && objectType !== 'project'
+    && objectType !== 'project-member'
+    && objectType !== 'project-responsibility') {
     throw badRequest('objectType is not supported', { field: 'objectType' })
   }
-  const objectId: unknown = Reflect.get(value, 'objectId')
+  const objectId: unknown = record.objectId
   if (objectId !== undefined
     && (typeof objectId !== 'string' || !SAFE_FILTER_ID.test(objectId))) {
     throw badRequest('objectId must be a safe identifier', { field: 'objectId' })
   }
-  const action: unknown = Reflect.get(value, 'action')
+  const action: unknown = record.action
   if (action !== undefined
     && action !== 'workbench.status.updated'
-    && action !== 'workbench.project.created') {
+    && action !== 'workbench.project.created'
+    && action !== 'workbench.project-member.created'
+    && action !== 'workbench.project-member.status-changed'
+    && action !== 'workbench.project.responsibility-assigned') {
     throw badRequest('action is not supported', { field: 'action' })
   }
-  const beforeSequence: unknown = Reflect.get(value, 'beforeSequence')
+  const beforeSequence: unknown = record.beforeSequence
   if (beforeSequence !== undefined
     && (!Number.isSafeInteger(beforeSequence) || (beforeSequence as number) < 1)) {
     throw badRequest('beforeSequence must be a positive safe integer', {
       field: 'beforeSequence',
     })
   }
-  const requestedLimit: unknown = Reflect.get(value, 'limit')
+  const requestedLimit: unknown = record.limit
   if (requestedLimit !== undefined
     && (!Number.isSafeInteger(requestedLimit)
       || (requestedLimit as number) < 1
@@ -816,6 +1273,14 @@ function generatedId(value: string, kind: string): string {
     throw infrastructure(`Workbench id generator returned an invalid ${kind} id`)
   }
   return value
+}
+
+function commandInstant(clock: WorkbenchClock): string {
+  const now = clock.now()
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+    throw infrastructure('Workbench clock returned an invalid instant')
+  }
+  return now.toISOString()
 }
 
 function throwIfCancelled(signal: AbortSignal): void {

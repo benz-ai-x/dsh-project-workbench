@@ -12,6 +12,7 @@ import type { OwnerController, OwnerIssueCode } from './owner-controller.ts'
 import { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 import { ActivityPanel, type ActivityPanelCopy } from './ActivityPanel.tsx'
 import { ProjectsPanel } from './ProjectsPanel.tsx'
+import { ProjectTeamPanel } from './ProjectTeamPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -222,6 +223,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.access?.state === 'signed-in'
     && state.status !== null
     && state.projects !== null
+    && state.projectTeam !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -257,6 +259,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
         )}
         <WorkbenchStatusPage controller={state.status} t={t}>
           <ProjectsPanel controller={state.projects} t={t} />
+          <ProjectTeamPanel controller={state.projectTeam} t={t} />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
       </div>
@@ -357,11 +360,16 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectAll: t('activity.object.all'),
     objectStatus: t('activity.object.status'),
     objectProject: t('activity.object.project'),
+    objectProjectMember: t('activity.object.projectMember'),
+    objectProjectResponsibility: t('activity.object.projectResponsibility'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
     actionStatusUpdated: t('activity.action.statusUpdated'),
     actionProjectCreated: t('activity.action.projectCreated'),
+    actionProjectMemberCreated: t('activity.action.projectMemberCreated'),
+    actionProjectMemberStatusChanged: t('activity.action.projectMemberStatusChanged'),
+    actionProjectResponsibilityAssigned: t('activity.action.projectResponsibilityAssigned'),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -383,6 +391,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     integrityEmptyHead: t('activity.integrity.emptyHead'),
     summaryStatusCommitted: t('activity.summary.statusCommitted'),
     summaryProjectCreated: t('activity.summary.projectCreated'),
+    summaryProjectMemberCreated: t('activity.summary.projectMemberCreated'),
+    summaryProjectMemberStatusChanged: t('activity.summary.projectMemberStatusChanged'),
+    summaryProjectResponsibilityAssigned: t('activity.summary.projectResponsibilityAssigned'),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -391,6 +402,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonPrefix: t('activity.prefix.reason'),
     reasonOwnerStatusEdit: t('activity.reason.ownerEdit'),
     reasonOwnerProjectCreate: t('activity.reason.ownerProjectCreate'),
+    reasonOwnerProjectMemberAdd: t('activity.reason.ownerProjectMemberAdd'),
+    reasonOwnerProjectMemberStatusChange: t('activity.reason.ownerProjectMemberStatusChange'),
+    reasonOwnerProjectResponsibilitySet: t('activity.reason.ownerProjectResponsibilitySet'),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),

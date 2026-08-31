@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type {
   OwnerAccessProjection,
   OwnerAuthResponse,
+  ProjectDetailProjection,
   ProjectStartProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
@@ -88,6 +89,41 @@ function emptyProjectStart(): ProjectStartProjection {
   }
 }
 
+function projectDetail(): ProjectDetailProjection {
+  const template = emptyProjectStart().template
+  const project = {
+    projectId: 'project-1',
+    name: 'Evidence Project',
+    revision: 1,
+    catalogSequence: 1,
+    timezone: 'Asia/Shanghai',
+    createdAt: '2026-08-31T12:00:00.000Z',
+    primaryGoal: { goalId: 'goal-1', name: 'Improve evidence', revision: 1 },
+  }
+  return {
+    project,
+    primaryGoal: {
+      ...project.primaryGoal,
+      outcomes: [{
+        outcomeId: 'outcome-1',
+        name: 'Increase coverage',
+        revision: 1,
+        metric: {
+          metricName: 'Coverage', initialValue: 10, targetValue: 90, unit: '%', direction: 'increase',
+        },
+      }],
+    },
+    supportingGoals: [],
+    templateSnapshot: {
+      template: template.selection,
+      snapshotSchemaVersion: 1,
+      definition: template.definition,
+      snapshotDigest: template.selection.definitionDigest,
+      capturedAt: '2026-08-31T12:00:00.000Z',
+    },
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
@@ -142,6 +178,18 @@ async function bench(options: {
   const projectStartGate = vi.fn((_filter: unknown, signal?: AbortSignal) => {
     requestOrder.push('projects')
     return projectStartSource(signal)
+  })
+  const projectTeamGate = vi.fn((query: { projectId: string }) => {
+    requestOrder.push('team')
+    return Promise.resolve({
+      ok: true as const,
+      value: {
+        projectId: query.projectId,
+        teamRevision: 0,
+        members: [],
+        responsibility: null,
+      },
+    })
   })
   const authStateSource = options.authState ?? (() => Promise.resolve({
     ok: true as const,
@@ -216,7 +264,20 @@ async function bench(options: {
         error: { code: 'idempotency-conflict' as const, message: 'unused' },
       },
     })),
-    project: vi.fn(() => Promise.resolve({ ok: true as const, value: null })),
+    project: vi.fn(() => Promise.resolve({ ok: true as const, value: projectDetail() })),
+    projectTeam: projectTeamGate,
+    addProjectMember: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
+    setProjectMemberStatus: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
+    setProjectResponsibility: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -260,6 +321,7 @@ async function bench(options: {
     snapshotGate,
     activityGate,
     projectStartGate,
+    projectTeamGate,
     authStateGate,
     auth,
     disposeLayout,
@@ -360,6 +422,60 @@ describe('Project Workbench browser plugin lifecycle', () => {
     expect(b.activityGate).toHaveBeenCalledTimes(2)
     expect(b.projectStartGate).toHaveBeenCalledTimes(2)
     await b.fiber?.dispose()
+  })
+
+  it('preserves a same-Project Team draft across reconnect and clears it on Fiber disposal', async () => {
+    const b = await bench()
+    const entry = b.ctx.slots.entries('conversation')[0]
+    const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
+    await vi.waitFor(() => { expect(controller.getSnapshot().phase).toBe('authenticated') })
+    const projects = controller.getSnapshot().projects
+    const projectTeam = controller.getSnapshot().projectTeam
+    expect(projects).not.toBeNull()
+    expect(projectTeam).not.toBeNull()
+
+    await projects?.openProject('project-1')
+    await vi.waitFor(() => {
+      expect(projectTeam?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+      })
+    })
+    projectTeam?.setMemberKind('agent')
+    projectTeam?.setMemberDisplayName('Reconnect-safe Agent')
+    expect(projectTeam?.getSnapshot()).toMatchObject({
+      memberDraft: { kind: 'agent', displayName: 'Reconnect-safe Agent' },
+      memberDraftDirty: true,
+    })
+
+    b.disconnect()
+    expect(projectTeam?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      memberDraft: { kind: 'agent', displayName: 'Reconnect-safe Agent' },
+      memberDraftDirty: true,
+    })
+    b.requestOrder.length = 0
+    b.reconnect()
+    await vi.waitFor(() => {
+      expect(projectTeam?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1' },
+        memberDraft: { kind: 'agent', displayName: 'Reconnect-safe Agent' },
+        memberDraftDirty: true,
+      })
+    })
+    expect(b.requestOrder).toEqual(['auth', 'status', 'projects', 'team', 'activity'])
+    expect(b.projectTeamGate).toHaveBeenCalledTimes(2)
+
+    await b.fiber?.dispose()
+    expect(projectTeam?.getSnapshot()).toMatchObject({
+      phase: 'idle',
+      selection: null,
+      team: null,
+      memberDraft: { kind: 'human', displayName: '' },
+      memberDraftDirty: false,
+    })
+    expect(b.remote.disposeMount).toHaveBeenCalledOnce()
   })
 
   it('rechecks projected expiry on focus and removes the browser listener on disposal', async () => {

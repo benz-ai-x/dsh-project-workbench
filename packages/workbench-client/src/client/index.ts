@@ -28,6 +28,35 @@ export {
   MAX_PROJECT_UNIT_LENGTH,
   WorkbenchProjectController,
 } from './project-controller.ts'
+export {
+  INITIAL_WORKBENCH_PROJECT_TEAM_STATE,
+  MAX_EXTERNAL_CONTACT_LENGTH,
+  MAX_FEISHU_APP_ID_LENGTH,
+  MAX_FEISHU_OPEN_ID_LENGTH,
+  MAX_PROJECT_MEMBER_NAME_LENGTH,
+  MAX_PROJECT_TEAM_CONTRIBUTORS,
+  MAX_PROJECT_TEAM_MEMBERS,
+  requiresHumanSponsor,
+  WorkbenchProjectTeamController,
+} from './project-team-controller.ts'
+export type {
+  WorkbenchExternalContactMethod,
+  WorkbenchHumanIdentityDraft,
+  WorkbenchProjectMemberDraft,
+  WorkbenchProjectResponsibilityDraft,
+  WorkbenchProjectSelection,
+  WorkbenchProjectTeamClientState,
+  WorkbenchProjectTeamConflictCode,
+  WorkbenchProjectTeamConflictIssue,
+  WorkbenchProjectTeamControllerOptions,
+  WorkbenchProjectTeamInputIssue,
+  WorkbenchProjectTeamIssue,
+  WorkbenchProjectTeamOperation,
+  WorkbenchProjectTeamPhase,
+  WorkbenchProjectTeamRemote,
+  WorkbenchProjectTeamTransportCode,
+  WorkbenchProjectTeamTransportIssue,
+} from './project-team-controller.ts'
 export type {
   WorkbenchOutcomeDraft,
   WorkbenchProjectClientState,
@@ -68,6 +97,8 @@ export { ActivityPanel, DEFAULT_ACTIVITY_PANEL_COPY } from './ActivityPanel.tsx'
 export type { ActivityPanelCopy, ActivityPanelProps } from './ActivityPanel.tsx'
 export { ProjectsPanel } from './ProjectsPanel.tsx'
 export type { ProjectsPanelProps } from './ProjectsPanel.tsx'
+export { ProjectTeamPanel } from './ProjectTeamPanel.tsx'
+export type { ProjectTeamPanelProps } from './ProjectTeamPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

@@ -66,6 +66,35 @@ function projectItem(): WorkbenchActivityItem {
   }
 }
 
+function projectTeamItems(): readonly WorkbenchActivityItem[] {
+  return [
+    {
+      ...item(6, 'delivered'),
+      projectId: 'project-6',
+      action: 'workbench.project-member.created',
+      reason: 'owner-project-member-add',
+      object: { type: 'project-member', id: 'member-6', version: 1 },
+      summaryCode: 'project-member-created',
+    },
+    {
+      ...item(7, 'delivered'),
+      projectId: 'project-6',
+      action: 'workbench.project-member.status-changed',
+      reason: 'owner-project-member-status-change',
+      object: { type: 'project-member', id: 'member-6', version: 2 },
+      summaryCode: 'project-member-status-changed',
+    },
+    {
+      ...item(8, 'delivered'),
+      projectId: 'project-6',
+      action: 'workbench.project.responsibility-assigned',
+      reason: 'owner-project-responsibility-set',
+      object: { type: 'project-responsibility', id: 'project-6', version: 1 },
+      summaryCode: 'project-responsibility-assigned',
+    },
+  ]
+}
+
 function ready(
   items: readonly WorkbenchActivityItem[] = [],
   integrity: WorkbenchAuditIntegrityProjection = {
@@ -246,6 +275,31 @@ describe('ActivityPanel', () => {
     expect(controller.setFilter).toHaveBeenCalledWith({
       objectType: 'project',
       action: 'workbench.project.created',
+    })
+  })
+
+  it('renders and filters the allowlisted Project Team Activity vocabulary', () => {
+    const controller = new PanelController(ready(projectTeamItems()))
+    render(<ActivityPanel controller={controller} copy={DEFAULT_ACTIVITY_PANEL_COPY} />)
+
+    expect(screen.getByText('ProjectMember added')).toBeTruthy()
+    expect(screen.getByText('ProjectMember status changed')).toBeTruthy()
+    expect(screen.getByText('Project Responsibility replaced')).toBeTruthy()
+    expect(screen.getByText('Owner ProjectMember addition')).toBeTruthy()
+    expect(screen.getByText('Owner ProjectMember status change')).toBeTruthy()
+    expect(screen.getByText('Owner Project Responsibility assignment')).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText('Object type'), {
+      target: { value: 'project-responsibility' },
+    })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: 'workbench.project.responsibility-assigned' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }))
+
+    expect(controller.setFilter).toHaveBeenCalledWith({
+      objectType: 'project-responsibility',
+      action: 'workbench.project.responsibility-assigned',
     })
   })
 
