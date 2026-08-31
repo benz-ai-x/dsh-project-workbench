@@ -526,6 +526,341 @@ function verifyTypertFace(face, packageName, label) {
     )
   }
 
+  const risksQuery = projectRisks?.parameters?.find(parameter => parameter?.name === 'query')
+  const risksQueryShape = unwrapSchema(risksQuery?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(risksQuery?.codec?.schema), [
+      'activityLimit',
+      'actor',
+      'beforeActivitySequence',
+      'beforeHistorySequence',
+      'beforeRiskSequence',
+      'exposure',
+      'historyLimit',
+      'organizationId',
+      'projectId',
+      'reviewFrom',
+      'reviewTo',
+      'riskLimit',
+      'riskOwnerMemberId',
+      'selectedRiskId',
+      'status',
+      'teamId',
+      'triggerContains',
+      'triggerState',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(risksQueryShape?.[key])),
+    `${packageName}: ${label} Project Risks query exposes five closed filters and three independent cursors without caller authority`,
+  )
+  const completeRiskQuery = {
+    projectId: 'project-built-risk',
+    exposure: 'high',
+    status: 'accept',
+    riskOwnerMemberId: 'member-built-owner',
+    triggerState: 'met',
+    triggerContains: 'supplier response',
+    reviewFrom: '2026-09-01',
+    reviewTo: '2026-12-31',
+    selectedRiskId: 'risk-built-1',
+    beforeRiskSequence: 8,
+    riskLimit: 20,
+    beforeActivitySequence: 9,
+    activityLimit: 20,
+    beforeHistorySequence: 7,
+    historyLimit: 20,
+  }
+  check(
+    schemaAccepts(risksQuery?.codec?.schema, completeRiskQuery)
+      && schemaRejects(risksQuery?.codec?.schema, {
+        ...completeRiskQuery,
+        disposition: 'accept',
+      })
+      && schemaRejects(risksQuery?.codec?.schema, {
+        ...completeRiskQuery,
+        actor: 'owner-forged',
+      }),
+    `${packageName}: ${label} Project Risks carrier accepts public status/trigger filters and rejects disposition or authority aliases`,
+  )
+
+  const risksProjection = unwrapSchema(projectRisks?.result?.schema)
+  const risksProjectionShape = risksProjection?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(risksProjection), [
+      'activity',
+      'dependencyOptions',
+      'evidenceOptions',
+      'memberOptions',
+      'nextBeforeActivitySequence',
+      'nextBeforeRiskSequence',
+      'projectId',
+      'revision',
+      'risks',
+      'selectedRisk',
+      'taskOptions',
+      'taskRevision',
+      'teamRevision',
+    ]),
+    `${packageName}: ${label} Project Risks returns one detached register, activity page, selected history, and safe choices`,
+  )
+  const riskProjection = arrayElementSchema(risksProjectionShape?.risks)
+  const riskProjectionShape = unwrapSchema(riskProjection)?.def?.shape
+  const assessmentProjectionShape = unwrapSchema(
+    riskProjectionShape?.currentAssessment,
+  )?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(riskProjection), [
+      'closureReason',
+      'createdAt',
+      'currentAssessment',
+      'revision',
+      'riskId',
+      'sequence',
+      'status',
+      'treatmentTasks',
+      'updatedAt',
+    ])
+      && sameStrings(schemaLiteralTreeValues(riskProjectionShape?.status), [
+        'accept', 'closed', 'mitigate', 'research', 'watch',
+      ])
+      && !schemaObjectKeys(riskProjection).includes('disposition'),
+    `${packageName}: ${label} each current Risk exposes the exact public status vocabulary rather than a task/disposition alias`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(riskProjectionShape?.currentAssessment), [
+      'assessedAt',
+      'assessmentHorizonEnd',
+      'assessmentId',
+      'assumptions',
+      'category',
+      'confidence',
+      'confidenceRationale',
+      'contingencyTaskGuids',
+      'dependencies',
+      'digest',
+      'evidence',
+      'exposure',
+      'impact',
+      'mitigationTaskGuids',
+      'nextReviewOn',
+      'probability',
+      'responsibility',
+      'sequence',
+      'statement',
+      'trigger',
+    ])
+      && sameStrings(schemaObjectKeys(assessmentProjectionShape?.trigger), [
+        'observedAt', 'state', 'statement',
+      ])
+      && sameStrings(schemaLiteralTreeValues(
+        unwrapSchema(assessmentProjectionShape?.trigger)?.def?.shape?.state,
+      ), ['met', 'not-met', 'unknown'])
+      && sameStrings(schemaObjectKeys(assessmentProjectionShape?.exposure), [
+        'impactBand', 'level', 'likelihoodBand', 'policyVersion',
+      ]),
+    `${packageName}: ${label} immutable Risk assessments project Host trigger time, assessed time, digest, and deterministic exposure`,
+  )
+  const selectedRiskShape = unwrapSchema(risksProjectionShape?.selectedRisk)?.def?.shape
+  const historyEntry = arrayElementSchema(selectedRiskShape?.history)
+  check(
+    sameStrings(schemaObjectKeys(risksProjectionShape?.selectedRisk), [
+      'history', 'nextBeforeHistorySequence', 'risk',
+    ])
+      && unionOptions(historyEntry).length === 2
+      && unionOptions(historyEntry).every(option => sameStrings(schemaObjectKeys(option), [
+        'actor', 'assessment', 'causationId', 'kind', 'sequence', 'source', 'transition',
+      ])),
+    `${packageName}: ${label} selected Risk pages the closed complete assessment/transition history union independently`,
+  )
+
+  const createRiskRequest = createProjectRisk?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const createRiskShape = unwrapSchema(createRiskRequest?.codec?.schema)?.def?.shape
+  const riskAssessmentShape = unwrapSchema(createRiskShape?.assessment)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(createRiskRequest?.codec?.schema), [
+      'actor',
+      'assessment',
+      'causationId',
+      'expectedRiskRevision',
+      'expectedRisksRevision',
+      'expectedTaskRevision',
+      'expectedTeamRevision',
+      'idempotencyKey',
+      'organizationId',
+      'projectId',
+      'reason',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(createRiskShape?.[key]))
+      && sameStrings(schemaObjectKeys(createRiskShape?.assessment), [
+        'accountableMemberId',
+        'assessedAt',
+        'assessmentHorizonEnd',
+        'assessmentId',
+        'assumptions',
+        'category',
+        'confidence',
+        'confidenceRationale',
+        'contingencyTaskGuids',
+        'contributorMemberIds',
+        'dependencies',
+        'digest',
+        'evidence',
+        'exposure',
+        'humanSponsorMemberId',
+        'impact',
+        'mitigationTaskGuids',
+        'nextReviewOn',
+        'probability',
+        'sequence',
+        'statement',
+        'trigger',
+      ])
+      && ['assessedAt', 'assessmentId', 'digest', 'exposure', 'sequence']
+        .every(key => isOptionalNever(riskAssessmentShape?.[key])),
+    `${packageName}: ${label} Risk creation carries one complete assessment and exact aggregate/Team/Task CAS while fencing Host fields`,
+  )
+  const assessmentDraft = {
+    statement: {
+      condition: null,
+      event: 'A supplier response may arrive late',
+      consequence: 'The committed review window may be missed',
+    },
+    category: 'schedule',
+    trigger: { statement: 'No supplier response by the checkpoint', state: 'unknown' },
+    probability: { lowerBasisPoints: 500, upperBasisPoints: 2_000 },
+    impact: { lowerBand: 2, upperBand: 3 },
+    confidence: 'medium',
+    confidenceRationale: 'The current response history is incomplete.',
+    assessmentHorizonEnd: '2026-12-31',
+    nextReviewOn: '2026-09-15',
+    assumptions: [],
+    accountableMemberId: 'member-built-owner',
+    contributorMemberIds: [],
+    humanSponsorMemberId: null,
+    evidence: [],
+    dependencies: [],
+    mitigationTaskGuids: [],
+    contingencyTaskGuids: [],
+  }
+  const createRiskBase = {
+    projectId: 'project-built-risk',
+    assessment: assessmentDraft,
+    expectedRisksRevision: 0,
+    expectedRiskRevision: null,
+    expectedTeamRevision: 1,
+    expectedTaskRevision: 0,
+    idempotencyKey: 'built-risk-create-idempotency-0001',
+    causationId: 'built-risk-create-causation-0001',
+    reason: 'owner-project-risk-create',
+  }
+  check(
+    schemaAccepts(createRiskRequest?.codec?.schema, createRiskBase)
+      && schemaRejects(createRiskRequest?.codec?.schema, {
+        ...createRiskBase,
+        assessment: {
+          ...assessmentDraft,
+          exposure: { level: 'low' },
+        },
+      })
+      && schemaRejects(createRiskRequest?.codec?.schema, {
+        ...createRiskBase,
+        assessment: {
+          ...assessmentDraft,
+          trigger: { ...assessmentDraft.trigger, observedAt: '2026-09-01T00:00:00Z' },
+        },
+      }),
+    `${packageName}: ${label} Risk carrier accepts semantic assessment intent and rejects caller exposure or trigger time`,
+  )
+
+  const reviseRiskRequest = reviseProjectRisk?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(reviseRiskRequest?.codec?.schema), [
+      'actor',
+      'assessment',
+      'causationId',
+      'expectedRiskRevision',
+      'expectedRisksRevision',
+      'expectedTaskRevision',
+      'expectedTeamRevision',
+      'idempotencyKey',
+      'organizationId',
+      'projectId',
+      'reason',
+      'riskId',
+      'teamId',
+    ]),
+    `${packageName}: ${label} Risk revision carries the complete replacement plus aggregate/Risk/Team/Task CAS`,
+  )
+
+  const transitionRiskRequest = transitionProjectRisk?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const transitionOptions = unionOptions(transitionRiskRequest?.codec?.schema)
+  const activeTransition = {
+    projectId: 'project-built-risk',
+    riskId: 'risk-built-1',
+    status: 'watch',
+    rationale: 'The trigger remains observable and reviewable.',
+    expectedRisksRevision: 1,
+    expectedRiskRevision: 1,
+    expectedTaskRevision: 0,
+    idempotencyKey: 'built-risk-transition-idempotency-0001',
+    causationId: 'built-risk-transition-causation-0001',
+    reason: 'owner-project-risk-transition',
+  }
+  check(
+    transitionOptions.length === 2
+      && transitionOptions.every(option => sameStrings(schemaObjectKeys(option), [
+        'actor',
+        'causationId',
+        'closureReason',
+        'expectedRiskRevision',
+        'expectedRisksRevision',
+        'expectedTaskRevision',
+        'idempotencyKey',
+        'organizationId',
+        'projectId',
+        'rationale',
+        'reason',
+        'riskId',
+        'status',
+        'teamId',
+      ]))
+      && schemaAccepts(transitionRiskRequest?.codec?.schema, activeTransition)
+      && schemaAccepts(transitionRiskRequest?.codec?.schema, {
+        ...activeTransition,
+        status: 'closed',
+        closureReason: 'below-threshold',
+      })
+      && schemaRejects(transitionRiskRequest?.codec?.schema, {
+        ...activeTransition,
+        closureReason: 'below-threshold',
+      })
+      && schemaRejects(transitionRiskRequest?.codec?.schema, {
+        ...activeTransition,
+        status: 'closed',
+      }),
+    `${packageName}: ${label} Risk transition is a closed active/terminal union with mandatory close reason`,
+  )
+  for (const [invocation, commandLabel] of [
+    [createProjectRisk, 'create'],
+    [reviseProjectRisk, 'revise'],
+    [transitionProjectRisk, 'transition'],
+  ]) {
+    const success = unionOptions(invocation?.result?.schema)
+      .find(option => schemaObjectKeys(option).includes('receipt'))
+    check(
+      sameStrings(schemaObjectKeys(success), ['ok', 'receipt', 'risk', 'value']),
+      `${packageName}: ${label} Risk ${commandLabel} success returns detached current truth and one receipt`,
+    )
+  }
+
   const request = setStatus?.parameters?.find(parameter => parameter?.name === 'request')
   check(
     sameStrings(schemaObjectKeys(request?.codec?.schema), [
