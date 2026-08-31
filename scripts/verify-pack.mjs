@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T10 npm archives without touching publication.
+ * Create and inspect the real T11 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -30,6 +30,9 @@ const ARCHIVE_TIMEOUT_MS = 30_000
 const INSTALL_TIMEOUT_MS = 120_000
 const PROBE_TIMEOUT_MS = 45_000
 const PROCESS_MAX_BUFFER = 4 * 1024 * 1024
+// Node 22's loadable experimental SQLite builtin is absent from builtinModules;
+// the workspace engine floor already guarantees this one closed module exists.
+const engineSupportedBuiltins = new Set(['node:sqlite'])
 const packageSpecs = [
   {
     role: 'Host',
@@ -2000,6 +2003,7 @@ function packageNameFromSpecifier(specifier) {
 }
 
 function isBuiltin(specifier) {
+  if (engineSupportedBuiltins.has(specifier)) return true
   const plain = specifier.startsWith('node:') ? specifier.slice(5) : specifier
   return builtinModules.includes(plain) || builtinModules.includes(`node:${plain}`)
 }

@@ -24,6 +24,11 @@ const hostDir = resolve(root, 'packages/workbench-host')
 const clientDir = resolve(root, 'packages/workbench-client')
 const failures = []
 const passed = []
+// Node 22 can load the experimental SQLite builtin even though node:module's
+// builtinModules inventory does not list it until later runtimes. The workspace
+// engine floor (^22.19.0) is above SQLite's introduction, so keep this closed
+// compatibility allowance instead of misclassifying it as an undeclared npm package.
+const engineSupportedBuiltins = new Set(['node:sqlite'])
 
 const hostManifest = readManifest(hostDir)
 const clientManifest = readManifest(clientDir)
@@ -2596,6 +2601,7 @@ function packageNameFromSpecifier(specifier) {
 }
 
 function isBuiltin(specifier) {
+  if (engineSupportedBuiltins.has(specifier)) return true
   const plain = specifier.startsWith('node:') ? specifier.slice(5) : specifier
   return builtinModules.includes(plain) || builtinModules.includes(`node:${plain}`)
 }
