@@ -1471,6 +1471,9 @@ function evidenceSummaryKey(
     'deliverable-acceptance-approved': 'activity.summary.deliverableAcceptanceApproved',
     'deliverable-acceptance-rejected': 'activity.summary.deliverableAcceptanceRejected',
     'deliverable-acceptance-needs-changes': 'activity.summary.deliverableAcceptanceNeedsChanges',
+    'project-risk-created': 'activity.summary.projectRiskCreated',
+    'project-risk-revised': 'activity.summary.projectRiskRevised',
+    'project-risk-transitioned': 'activity.summary.projectRiskTransitioned',
   } satisfies Record<SuggestedChangeEvidenceProjection['summaryCode'], WorkbenchKey>
   return keys[summary]
 }

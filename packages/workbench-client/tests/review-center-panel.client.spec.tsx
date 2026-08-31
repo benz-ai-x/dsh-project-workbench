@@ -217,6 +217,40 @@ async function renderPanel(workbenchRemote: WorkbenchReviewRemote) {
 }
 
 describe('ReviewCenterPanel', () => {
+  it('renders all generic Project Risk audit summaries as typed Evidence labels', async () => {
+    const card: SuggestedChangeProjection = {
+      ...suggestion(),
+      evidence: [
+        {
+          kind: 'workbench-audit-event', auditEventId: 'audit-risk-created',
+          occurredAt: '2026-09-01T01:00:00.000Z',
+          action: 'workbench.project-risk.created', summaryCode: 'project-risk-created',
+          object: { type: 'project-risk', id: 'risk-1', version: 1 },
+        },
+        {
+          kind: 'workbench-audit-event', auditEventId: 'audit-risk-revised',
+          occurredAt: '2026-09-01T02:00:00.000Z',
+          action: 'workbench.project-risk.revised', summaryCode: 'project-risk-revised',
+          object: { type: 'project-risk', id: 'risk-1', version: 2 },
+        },
+        {
+          kind: 'workbench-audit-event', auditEventId: 'audit-risk-transitioned',
+          occurredAt: '2026-09-01T03:00:00.000Z',
+          action: 'workbench.project-risk.transitioned', summaryCode: 'project-risk-transitioned',
+          object: { type: 'project-risk', id: 'risk-1', version: 3 },
+        },
+      ],
+    }
+    const controller = await renderPanel(remote({
+      reviewCenter: vi.fn(() => Promise.resolve(ok(projection([card])))),
+    }))
+    const article = screen.getByRole('article', { name: '建议 #1' })
+    expect(within(article).getByText('已创建 Project Risk')).toBeTruthy()
+    expect(within(article).getByText('已修订 Project Risk 评估')).toBeTruthy()
+    expect(within(article).getByText('已迁移 Project Risk 状态')).toBeTruthy()
+    await controller.dispose()
+  })
+
   it('exposes stable semantic filters, typed diff/evidence/history, four decisions, and high-risk confirmation', async () => {
     const historical: SuggestedChangeProjection = {
       ...suggestion(),

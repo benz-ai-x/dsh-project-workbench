@@ -18,6 +18,7 @@ import {
   ActivityPanel,
   DEFAULT_ACTIVITY_PANEL_COPY,
 } from '../src/client/ActivityPanel.tsx'
+import { en, zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
 
@@ -131,6 +132,35 @@ function projectCalendarItems(): readonly WorkbenchActivityItem[] {
       reason: 'owner-project-milestone-date-update',
       object: { type: 'project-milestone', id: 'milestone-10', version: 2 },
       summaryCode: 'project-milestone-date-update-requested',
+    },
+  ]
+}
+
+function projectRiskItems(): readonly WorkbenchActivityItem[] {
+  return [
+    {
+      ...item(1, 'delivered'),
+      projectId: 'project-risk-scope',
+      action: 'workbench.project-risk.created',
+      reason: 'owner-project-risk-create',
+      object: { type: 'project-risk', id: 'risk-1', version: 1 },
+      summaryCode: 'project-risk-created',
+    },
+    {
+      ...item(2, 'delivered'),
+      projectId: 'project-risk-scope',
+      action: 'workbench.project-risk.revised',
+      reason: 'owner-project-risk-revise',
+      object: { type: 'project-risk', id: 'risk-1', version: 2 },
+      summaryCode: 'project-risk-revised',
+    },
+    {
+      ...item(3, 'delivered'),
+      projectId: 'project-risk-scope',
+      action: 'workbench.project-risk.transitioned',
+      reason: 'owner-project-risk-transition',
+      object: { type: 'project-risk', id: 'risk-1', version: 3 },
+      summaryCode: 'project-risk-transitioned',
     },
   ]
 }
@@ -396,6 +426,39 @@ describe('ActivityPanel', () => {
     expect(controller.setFilter).toHaveBeenCalledWith({
       objectType: 'project-milestone',
       action: 'workbench.project-milestone.date-update-requested',
+    })
+  })
+
+  it('renders and filters all generic Project Risk Activity vocabulary with typed zh/en copy', () => {
+    const controller = new PanelController(ready(projectRiskItems()))
+    render(<ActivityPanel controller={controller} copy={DEFAULT_ACTIVITY_PANEL_COPY} />)
+
+    expect(screen.getByRole('heading', { name: 'Project Risk created' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Project Risk assessment revised' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Project Risk status transitioned' })).toBeTruthy()
+    expect(screen.getByText('Owner Project Risk creation')).toBeTruthy()
+    expect(screen.getByText('Owner Project Risk assessment revision')).toBeTruthy()
+    expect(screen.getByText('Owner Project Risk status transition')).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Project Risk' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Project Risk transitioned' })).toBeTruthy()
+
+    expect(zh['activity.summary.projectRiskCreated']).toBe('已创建 Project Risk')
+    expect(zh['activity.summary.projectRiskRevised']).toBe('已修订 Project Risk 评估')
+    expect(zh['activity.summary.projectRiskTransitioned']).toBe('已迁移 Project Risk 状态')
+    expect(en['activity.summary.projectRiskCreated']).toBe('Project Risk created')
+    expect(en['activity.summary.projectRiskRevised']).toBe('Project Risk assessment revised')
+    expect(en['activity.summary.projectRiskTransitioned']).toBe('Project Risk status transitioned')
+
+    fireEvent.change(screen.getByLabelText('Object type'), {
+      target: { value: 'project-risk' },
+    })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: 'workbench.project-risk.transitioned' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }))
+    expect(controller.setFilter).toHaveBeenCalledWith({
+      objectType: 'project-risk',
+      action: 'workbench.project-risk.transitioned',
     })
   })
 

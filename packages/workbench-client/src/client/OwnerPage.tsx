@@ -403,6 +403,7 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectProjectMilestone: t('activity.object.projectMilestone'),
     objectProjectDeliverable: t('activity.object.projectDeliverable'),
     objectDeliverableAcceptanceRequest: t('activity.object.deliverableAcceptanceRequest'),
+    objectProjectRisk: t('activity.object.projectRisk'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
@@ -436,6 +437,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     actionDeliverableAcceptanceNeedsChanges: t(
       'activity.action.deliverableAcceptanceNeedsChanges',
     ),
+    actionProjectRiskCreated: t('activity.action.projectRiskCreated'),
+    actionProjectRiskRevised: t('activity.action.projectRiskRevised'),
+    actionProjectRiskTransitioned: t('activity.action.projectRiskTransitioned'),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -493,6 +497,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     summaryDeliverableAcceptanceNeedsChanges: t(
       'activity.summary.deliverableAcceptanceNeedsChanges',
     ),
+    summaryProjectRiskCreated: t('activity.summary.projectRiskCreated'),
+    summaryProjectRiskRevised: t('activity.summary.projectRiskRevised'),
+    summaryProjectRiskTransitioned: t('activity.summary.projectRiskTransitioned'),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -535,6 +542,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonOwnerDeliverableAcceptanceNeedsChanges: t(
       'activity.reason.ownerDeliverableAcceptanceNeedsChanges',
     ),
+    reasonOwnerProjectRiskCreate: t('activity.reason.ownerProjectRiskCreate'),
+    reasonOwnerProjectRiskRevise: t('activity.reason.ownerProjectRiskRevise'),
+    reasonOwnerProjectRiskTransition: t('activity.reason.ownerProjectRiskTransition'),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),

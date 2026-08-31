@@ -39,6 +39,7 @@ export interface ActivityPanelCopy {
   readonly objectProjectMilestone: string
   readonly objectProjectDeliverable: string
   readonly objectDeliverableAcceptanceRequest: string
+  readonly objectProjectRisk: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -68,6 +69,9 @@ export interface ActivityPanelCopy {
   readonly actionDeliverableAcceptanceApproved: string
   readonly actionDeliverableAcceptanceRejected: string
   readonly actionDeliverableAcceptanceNeedsChanges: string
+  readonly actionProjectRiskCreated: string
+  readonly actionProjectRiskRevised: string
+  readonly actionProjectRiskTransitioned: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -115,6 +119,9 @@ export interface ActivityPanelCopy {
   readonly summaryDeliverableAcceptanceApproved: string
   readonly summaryDeliverableAcceptanceRejected: string
   readonly summaryDeliverableAcceptanceNeedsChanges: string
+  readonly summaryProjectRiskCreated: string
+  readonly summaryProjectRiskRevised: string
+  readonly summaryProjectRiskTransitioned: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -147,6 +154,9 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerDeliverableAcceptanceApprove: string
   readonly reasonOwnerDeliverableAcceptanceReject: string
   readonly reasonOwnerDeliverableAcceptanceNeedsChanges: string
+  readonly reasonOwnerProjectRiskCreate: string
+  readonly reasonOwnerProjectRiskRevise: string
+  readonly reasonOwnerProjectRiskTransition: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -181,6 +191,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectProjectMilestone: 'Project Milestone',
   objectProjectDeliverable: 'Project Deliverable',
   objectDeliverableAcceptanceRequest: 'Deliverable Acceptance Request',
+  objectProjectRisk: 'Project Risk',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -210,6 +221,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionDeliverableAcceptanceApproved: 'Deliverable acceptance approved',
   actionDeliverableAcceptanceRejected: 'Deliverable acceptance rejected',
   actionDeliverableAcceptanceNeedsChanges: 'Deliverable acceptance needs changes',
+  actionProjectRiskCreated: 'Project Risk created',
+  actionProjectRiskRevised: 'Project Risk revised',
+  actionProjectRiskTransitioned: 'Project Risk transitioned',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -257,6 +271,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summaryDeliverableAcceptanceApproved: 'Deliverable acceptance approved',
   summaryDeliverableAcceptanceRejected: 'Deliverable acceptance rejected',
   summaryDeliverableAcceptanceNeedsChanges: 'Deliverable acceptance needs changes',
+  summaryProjectRiskCreated: 'Project Risk created',
+  summaryProjectRiskRevised: 'Project Risk assessment revised',
+  summaryProjectRiskTransitioned: 'Project Risk status transitioned',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -289,6 +306,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerDeliverableAcceptanceApprove: 'Owner Deliverable acceptance approval',
   reasonOwnerDeliverableAcceptanceReject: 'Owner Deliverable acceptance rejection',
   reasonOwnerDeliverableAcceptanceNeedsChanges: 'Owner Deliverable acceptance needs changes',
+  reasonOwnerProjectRiskCreate: 'Owner Project Risk creation',
+  reasonOwnerProjectRiskRevise: 'Owner Project Risk assessment revision',
+  reasonOwnerProjectRiskTransition: 'Owner Project Risk status transition',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -321,6 +341,7 @@ function isActivityObjectType(
     || value === 'project-milestone'
     || value === 'project-deliverable'
     || value === 'deliverable-acceptance-request'
+    || value === 'project-risk'
 }
 
 function isActivityAction(
@@ -352,6 +373,9 @@ function isActivityAction(
     || value === 'workbench.deliverable-acceptance.approved'
     || value === 'workbench.deliverable-acceptance.rejected'
     || value === 'workbench.deliverable-acceptance.needs-changes'
+    || value === 'workbench.project-risk.created'
+    || value === 'workbench.project-risk.revised'
+    || value === 'workbench.project-risk.transitioned'
 }
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
@@ -505,6 +529,7 @@ export function ActivityPanel({
                 <option value="deliverable-acceptance-request">
                   {copy.objectDeliverableAcceptanceRequest}
                 </option>
+                <option value="project-risk">{copy.objectProjectRisk}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -596,6 +621,15 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.deliverable-acceptance.needs-changes">
                   {copy.actionDeliverableAcceptanceNeedsChanges}
+                </option>
+                <option value="workbench.project-risk.created">
+                  {copy.actionProjectRiskCreated}
+                </option>
+                <option value="workbench.project-risk.revised">
+                  {copy.actionProjectRiskRevised}
+                </option>
+                <option value="workbench.project-risk.transitioned">
+                  {copy.actionProjectRiskTransitioned}
                 </option>
               </select>
             </label>
@@ -794,6 +828,9 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'deliverable-acceptance-needs-changes': {
       return copy.summaryDeliverableAcceptanceNeedsChanges
     }
+    case 'project-risk-created': return copy.summaryProjectRiskCreated
+    case 'project-risk-revised': return copy.summaryProjectRiskRevised
+    case 'project-risk-transitioned': return copy.summaryProjectRiskTransitioned
   }
 }
 
@@ -835,6 +872,9 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-deliverable-acceptance-needs-changes': {
       return copy.reasonOwnerDeliverableAcceptanceNeedsChanges
     }
+    case 'owner-project-risk-create': return copy.reasonOwnerProjectRiskCreate
+    case 'owner-project-risk-revise': return copy.reasonOwnerProjectRiskRevise
+    case 'owner-project-risk-transition': return copy.reasonOwnerProjectRiskTransition
   }
 }
 
@@ -853,6 +893,7 @@ function objectLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'project-milestone': return copy.objectProjectMilestone
     case 'project-deliverable': return copy.objectProjectDeliverable
     case 'deliverable-acceptance-request': return copy.objectDeliverableAcceptanceRequest
+    case 'project-risk': return copy.objectProjectRisk
   }
 }
 
