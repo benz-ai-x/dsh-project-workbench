@@ -12812,7 +12812,7 @@ function storedCalendarVocabulary(commandType: string): StoredCalendarVocabulary
       reason: 'owner-project-milestone-date-update',
       summaryCode: FEISHU_MILESTONE_DATE_SUMMARY,
       objectType: FEISHU_MILESTONE_OBJECT_TYPE,
-      changedFields: ['schedule'],
+      changedFields: ['schedule', 'effectState'],
       outboxTopic: FEISHU_MILESTONE_DATE_OUTBOX_TOPIC,
     }
     default: return null
@@ -16972,10 +16972,9 @@ function readProjectMilestonesProjection(
     effects: Object.freeze(readCalendarEffects(database, query.projectId).map(calendarEffectProjection)),
     recentChanges: readScheduleChanges(database, query.projectId),
   }
-  if ((binding === null) !== (head.sync_state === 'unbound' || head.sync_state === 'unknown')) {
-    if (binding === null || head.sync_state === 'unbound') {
-      throw new Error('Workbench Calendar binding and head state disagree')
-    }
+  if ((binding === null && head.sync_state === 'healthy')
+    || (binding !== null && head.sync_state === 'unbound')) {
+    throw new Error('Workbench Calendar binding and head state disagree')
   }
   return projectMilestonesProjection(projection)
 }
@@ -19216,6 +19215,21 @@ function reserveCalendarDateUpdate(
         }),
       })
     }
+    if (mutation.observed.status !== 'confirmed') {
+      database.exec('ROLLBACK')
+      began = false
+      return Object.freeze({
+        state: 'rejected',
+        result: calendarFailure<UpdateProjectMilestoneDateResult>(
+          'event-not-selectable',
+          'Calendar event is not eligible for a Milestone update',
+          {
+            current,
+            currentMilestone: milestoneProjectionFromRow(milestone),
+          },
+        ),
+      })
+    }
     const route = calendarRouteFromBinding(database, binding)
     const inserted = database.prepare(`
       INSERT INTO workbench_feishu_calendar_effect (
@@ -19267,7 +19281,7 @@ function reserveCalendarDateUpdate(
       objectId: mutation.milestoneId,
       objectVersion: mutation.expectedMilestoneRevision,
       projectId: mutation.projectId,
-      changedFields: ['schedule'],
+      changedFields: ['schedule', 'effectState'],
       outboxTopic: FEISHU_MILESTONE_DATE_OUTBOX_TOPIC,
     })
     const effect = readCalendarEffect(database, mutation.effectId)

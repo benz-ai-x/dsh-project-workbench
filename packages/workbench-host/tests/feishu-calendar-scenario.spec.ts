@@ -415,4 +415,118 @@ describe('T10 Feishu calendar scenario', () => {
     await expect(reopened.auditIntegrity(signal)).resolves.toMatchObject({ valid: true })
     await reopened.close()
   })
+
+  it('retains an unbound attention projection after a definitive Calendar-create rejection', async () => {
+    const { scenario, adapter } = await fixture()
+    vi.spyOn(adapter, 'createCalendar').mockResolvedValue(Object.freeze({
+      state: 'rejected',
+      issue: Object.freeze({
+        code: 'missing-app-scope',
+        recovery: 'grant-app-scope',
+        missingScopes: Object.freeze(['calendar:calendar:create']),
+        grantPlane: 'application',
+        retryAt: null,
+      }),
+    }))
+
+    await expect(scenario.bindProjectCalendar({
+      projectId: PROJECT_ID,
+      kind: 'bot',
+      mode: 'create',
+      summary: 'Rejected Project calendar',
+      description: null,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-rejected-0001',
+      causationId: 'feishu-calendar-bind-rejected-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, signal)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'remote-rejected',
+        current: {
+          binding: null,
+          revision: 1,
+          sync: { state: 'attention' },
+          effects: [{ operation: 'calendar-create', state: 'failed' }],
+        },
+      },
+    })
+    await expect(scenario.getProjectMilestones({ projectId: PROJECT_ID }, signal))
+      .resolves.toMatchObject({
+        binding: null,
+        revision: 1,
+        sync: { state: 'attention' },
+      })
+    await scenario.close()
+  })
+
+  it('never PATCHes a cancelled Milestone even after the cancelled authority is current', async () => {
+    const { scenario, adapter } = await fixture()
+    await scenario.bindProjectCalendar({
+      projectId: PROJECT_ID,
+      kind: 'bot',
+      mode: 'existing',
+      calendarId: CALENDAR_ID,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-cancelled-0001',
+      causationId: 'feishu-calendar-bind-cancelled-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, signal)
+    await scenario.createProjectMilestone({
+      projectId: PROJECT_ID,
+      mode: 'existing-event',
+      eventId: EVENT_ID,
+      expectedRevision: 1,
+      expectedMilestoneRevision: null,
+      name: 'Cancelled checkpoint',
+      description: null,
+      idempotencyKey: 'feishu-milestone-cancelled-0001',
+      causationId: 'feishu-milestone-cancelled-cause-0001',
+      reason: 'owner-project-milestone-create',
+    }, signal)
+
+    adapter.currentEvent = Object.freeze({
+      ...event(undefined, `sha256:${'3'.repeat(64)}`),
+      status: 'cancelled',
+    })
+    const stale = await scenario.updateProjectMilestoneDate({
+      projectId: PROJECT_ID,
+      milestoneId: 'milestone-calendar-scenario',
+      expectedRevision: 2,
+      expectedMilestoneRevision: 1,
+      expectedRemoteObservationVersion: `sha256:${'1'.repeat(64)}`,
+      schedule: allDay('2026-09-20', '2026-09-21'),
+      idempotencyKey: 'feishu-milestone-date-cancelled-0001',
+      causationId: 'feishu-milestone-date-cancelled-cause-0001',
+      reason: 'owner-project-milestone-date-update',
+    }, signal)
+    expect(stale).toMatchObject({
+      ok: false,
+      error: {
+        code: 'remote-version-changed',
+        current: { revision: 3, milestones: [{ revision: 2, remoteStatus: 'cancelled' }] },
+      },
+    })
+
+    await expect(scenario.updateProjectMilestoneDate({
+      projectId: PROJECT_ID,
+      milestoneId: 'milestone-calendar-scenario',
+      expectedRevision: 3,
+      expectedMilestoneRevision: 2,
+      expectedRemoteObservationVersion: `sha256:${'3'.repeat(64)}`,
+      schedule: allDay('2026-09-20', '2026-09-21'),
+      idempotencyKey: 'feishu-milestone-date-cancelled-0002',
+      causationId: 'feishu-milestone-date-cancelled-cause-0002',
+      reason: 'owner-project-milestone-date-update',
+    }, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'event-not-selectable' },
+    })
+    expect(adapter.updateCalls).toBe(0)
+    await scenario.close()
+  })
 })
