@@ -832,6 +832,58 @@ export class WorkbenchScenario {
       if (assessed.compatibility.state === 'blocked') {
         return workflowCompatibilityBlocked(assessed.compatibility)
       }
+      let configuredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      let command = taskCommand(
+        this.options.ids,
+        commandId,
+        scope,
+        normalized.idempotencyKey,
+        normalized.causationId,
+        normalized.reason,
+        configuredAt,
+      )
+      let operationId: string | undefined
+      if (normalized.mapping.mode !== 'existing') {
+        const reservation = await this.options.repository.reserveFeishuTaskWorkflowOperation(
+          Object.freeze({
+            operationId: commandId,
+            projectId: normalized.projectId,
+            expectedTaskRevision: normalized.expectedTaskRevision,
+            expectedWorkflowRevision: normalized.expectedWorkflowRevision,
+            definition: normalized.definition,
+            mapping: normalized.mapping,
+            preparedAt: configuredAt,
+            command,
+          }),
+          operationSignal,
+        )
+        if (reservation.state !== 'deliver') return reservation.result
+        operationId = reservation.operationId
+        command = reservation.command
+        configuredAt = command.occurredAt
+        if (!await this.options.repository.claimFeishuTaskWorkflowOperation(
+          operationId,
+          commandInstant(this.options.clock),
+          operationSignal,
+        )) {
+          const recovered = await this.options.repository.reserveFeishuTaskWorkflowOperation(
+            Object.freeze({
+              operationId,
+              projectId: normalized.projectId,
+              expectedTaskRevision: normalized.expectedTaskRevision,
+              expectedWorkflowRevision: normalized.expectedWorkflowRevision,
+              definition: normalized.definition,
+              mapping: normalized.mapping,
+              preparedAt: configuredAt,
+              command,
+            }),
+            operationSignal,
+          )
+          if (recovered.state !== 'deliver') return recovered.result
+          throw infrastructure('Workbench workflow provider operation lost its claim')
+        }
+      }
 
       let mappedField: WorkbenchFeishuTaskWorkflowMappedField
       if (normalized.mapping.mode === 'existing') {
@@ -857,21 +909,42 @@ export class WorkbenchScenario {
           }))
         }
         const create = requiredWorkflowFieldCreate(adapter)
-        const outcome = await create(
-          preflight.context.target.route,
-          Object.freeze({
-            taskListGuid: preflight.context.target.taskListGuid,
-            name: normalized.definition.fieldName,
-            options: Object.freeze(normalized.definition.states.map(state => Object.freeze({
-              name: state.name,
-              colorIndex: state.colorIndex,
-            }))),
-          }),
-          operationSignal,
-        )
+        let outcome: Awaited<ReturnType<typeof create>>
+        try {
+          outcome = await create(
+            preflight.context.target.route,
+            Object.freeze({
+              taskListGuid: preflight.context.target.taskListGuid,
+              name: normalized.definition.fieldName,
+              options: Object.freeze(normalized.definition.states.map(state => Object.freeze({
+                name: state.name,
+                colorIndex: state.colorIndex,
+              }))),
+            }),
+            operationSignal,
+          )
+        } catch {
+          return this.options.repository.settleFeishuTaskWorkflowOperation(
+            operationId as string,
+            Object.freeze({
+              state: 'unknown',
+              issue: ambiguousTaskTransportIssue(),
+              settledAt: commandInstant(this.options.clock),
+            }),
+            new AbortController().signal,
+          )
+        }
         throwIfCancelled(operationSignal)
         if (outcome.state !== 'ok') {
-          return workflowRemoteFailure(outcome.state, outcome.issue)
+          return this.options.repository.settleFeishuTaskWorkflowOperation(
+            operationId as string,
+            Object.freeze({
+              state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+              issue: outcome.issue,
+              settledAt: commandInstant(this.options.clock),
+            }),
+            new AbortController().signal,
+          )
         }
         mappedField = mappedWorkflowFieldFromWrite(normalized.definition, outcome.value)
       } else {
@@ -894,27 +967,58 @@ export class WorkbenchScenario {
         const currentByState = new Map(
           current.options.map(option => [option.stateId, option.optionGuid] as const),
         )
-        const outcome = await update(
-          preflight.context.target.route,
-          Object.freeze({
-            fieldGuid: current.field.fieldGuid,
-            expectedRemoteVersion: selected.remoteVersion,
-            name: normalized.definition.fieldName,
-            options: Object.freeze(normalized.definition.states.map(state => Object.freeze({
-              ...(currentByState.get(state.stateId) === undefined
-                ? {}
-                : { optionGuid: currentByState.get(state.stateId) as string }),
-              name: state.name,
-              colorIndex: state.colorIndex,
-            }))),
-          }),
-          operationSignal,
-        )
+        let outcome: Awaited<ReturnType<typeof update>>
+        try {
+          outcome = await update(
+            preflight.context.target.route,
+            Object.freeze({
+              fieldGuid: current.field.fieldGuid,
+              expectedRemoteVersion: selected.remoteVersion,
+              name: normalized.definition.fieldName,
+              options: Object.freeze(normalized.definition.states.map(state => Object.freeze({
+                ...(currentByState.get(state.stateId) === undefined
+                  ? {}
+                  : { optionGuid: currentByState.get(state.stateId) as string }),
+                name: state.name,
+                colorIndex: state.colorIndex,
+              }))),
+            }),
+            operationSignal,
+          )
+        } catch {
+          return this.options.repository.settleFeishuTaskWorkflowOperation(
+            operationId as string,
+            Object.freeze({
+              state: 'unknown',
+              issue: ambiguousTaskTransportIssue(),
+              settledAt: commandInstant(this.options.clock),
+            }),
+            new AbortController().signal,
+          )
+        }
         throwIfCancelled(operationSignal)
         if (outcome.state === 'conflict') {
-          return workflowCompatibilityBlocked(fieldVersionConflictCompatibility(current))
+          return this.options.repository.settleFeishuTaskWorkflowOperation(
+            operationId as string,
+            Object.freeze({
+              state: 'failed',
+              issue: workflowFieldConflictIssue(),
+              settledAt: commandInstant(this.options.clock),
+            }),
+            new AbortController().signal,
+          )
         }
-        if (outcome.state !== 'ok') return workflowRemoteFailure(outcome.state, outcome.issue)
+        if (outcome.state !== 'ok') {
+          return this.options.repository.settleFeishuTaskWorkflowOperation(
+            operationId as string,
+            Object.freeze({
+              state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+              issue: outcome.issue,
+              settledAt: commandInstant(this.options.clock),
+            }),
+            new AbortController().signal,
+          )
+        }
         mappedField = mappedWorkflowFieldFromWrite(normalized.definition, outcome.value, current)
       }
 
@@ -934,29 +1038,44 @@ export class WorkbenchScenario {
         taskValues: preflight.context.taskValues,
       })
       if (postflight.compatibility.state === 'blocked') {
+        if (operationId !== undefined) {
+          return this.options.repository.settleFeishuTaskWorkflowOperation(
+            operationId,
+            Object.freeze({
+              state: 'unknown',
+              issue: ambiguousTaskTransportIssue(),
+              settledAt: commandInstant(this.options.clock),
+            }),
+            new AbortController().signal,
+          )
+        }
         return workflowCompatibilityBlocked(postflight.compatibility)
       }
-      const configuredAt = commandInstant(this.options.clock)
-      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
-      return this.options.repository.commitFeishuTaskWorkflowConfiguration(Object.freeze({
-        projectId: normalized.projectId,
-        expectedTaskRevision: normalized.expectedTaskRevision,
-        expectedWorkflowRevision: normalized.expectedWorkflowRevision,
-        definition: normalized.definition,
-        mapping: normalized.mapping,
-        field: mappedField,
-        compatibility: postflight.compatibility,
-        configuredAt,
-        command: taskCommand(
-          this.options.ids,
-          commandId,
-          scope,
-          normalized.idempotencyKey,
-          normalized.causationId,
-          normalized.reason,
+      try {
+        return await this.options.repository.commitFeishuTaskWorkflowConfiguration(Object.freeze({
+          ...(operationId === undefined ? {} : { operationId }),
+          projectId: normalized.projectId,
+          expectedTaskRevision: normalized.expectedTaskRevision,
+          expectedWorkflowRevision: normalized.expectedWorkflowRevision,
+          definition: normalized.definition,
+          mapping: normalized.mapping,
+          field: mappedField,
+          compatibility: postflight.compatibility,
           configuredAt,
-        ),
-      }), operationSignal)
+          command,
+        }), operationSignal)
+      } catch (error: unknown) {
+        if (operationId === undefined) throw error
+        return this.options.repository.settleFeishuTaskWorkflowOperation(
+          operationId,
+          Object.freeze({
+            state: 'unknown',
+            issue: ambiguousTaskTransportIssue(),
+            settledAt: commandInstant(this.options.clock),
+          }),
+          new AbortController().signal,
+        )
+      }
     })
   }
 
@@ -3808,21 +3927,6 @@ function workflowCandidateFromMappedField(
   })
 }
 
-function fieldVersionConflictCompatibility(
-  current: ProjectTaskWorkflowProjection,
-): ProjectTaskWorkflowProjection['compatibility'] {
-  return Object.freeze({
-    state: 'blocked',
-    issues: Object.freeze([Object.freeze({
-      code: 'field-version-changed',
-      severity: 'blocked',
-      stateId: null,
-      taskGuid: null,
-      message: `Feishu workflow field changed after version ${current.field.remoteVersion}`,
-    })]),
-  })
-}
-
 function workflowCompatibilityBlocked(
   compatibility: ProjectTaskWorkflowProjection['compatibility'],
 ): ConfigureFeishuTaskWorkflowResult {
@@ -3832,22 +3936,6 @@ function workflowCompatibilityBlocked(
       code: 'workflow-compatibility-blocked',
       message: 'Workflow compatibility checks blocked configuration',
       compatibility,
-    }),
-  })
-}
-
-function workflowRemoteFailure(
-  state: 'rejected' | 'unknown',
-  issue: FeishuConnectionIssue,
-): ConfigureFeishuTaskWorkflowResult {
-  return Object.freeze({
-    ok: false,
-    error: Object.freeze({
-      code: state === 'unknown' ? 'remote-outcome-unknown' : 'remote-rejected',
-      message: state === 'unknown'
-        ? 'Feishu workflow-field write outcome is unknown'
-        : 'Feishu rejected the workflow-field write',
-      issue: detachedIssue(issue),
     }),
   })
 }
@@ -3985,6 +4073,16 @@ function unknownTaskUpdateResult(
 }
 
 function ambiguousTaskTransportIssue(): FeishuConnectionIssue {
+  return Object.freeze({
+    code: 'unknown-provider-error',
+    recovery: 'inspect-provider',
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+}
+
+function workflowFieldConflictIssue(): FeishuConnectionIssue {
   return Object.freeze({
     code: 'unknown-provider-error',
     recovery: 'inspect-provider',

@@ -4,6 +4,7 @@ import type {
   FeishuCredentialProjection,
   FeishuTaskListCandidateProjection,
   FeishuTaskWorkflowFieldCandidate,
+  ProjectTaskWorkflowDefinition,
   WorkbenchFeishuIdentityVerificationInput,
   WorkbenchFeishuIdentityVerificationResult,
   WorkbenchFeishuResourceVerificationObservation,
@@ -96,6 +97,7 @@ class FixtureTaskAdapter implements WorkbenchFeishuExternalAdapter, WorkbenchFei
   workflowFieldCalls = 0
   workflowCreateCalls = 0
   workflowUpdateCalls = 0
+  workflowCreateMode: 'delivered' | 'unknown' | 'throw' = 'delivered'
   workflowFields: readonly FeishuTaskWorkflowFieldCandidate[] = Object.freeze([
     Object.freeze({
       fieldGuid: 'field-project-status',
@@ -288,6 +290,19 @@ class FixtureTaskAdapter implements WorkbenchFeishuExternalAdapter, WorkbenchFei
     _signal: AbortSignal,
   ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite>> {
     this.workflowCreateCalls += 1
+    if (this.workflowCreateMode === 'throw') throw new Error('ambiguous workflow field transport')
+    if (this.workflowCreateMode === 'unknown') {
+      return Object.freeze({
+        state: 'unknown',
+        issue: Object.freeze({
+          code: 'provider-unavailable',
+          recovery: 'retry-later',
+          missingScopes: Object.freeze([]),
+          grantPlane: null,
+          retryAt: null,
+        }),
+      })
+    }
     return Object.freeze({
       state: 'ok',
       value: Object.freeze({
@@ -406,6 +421,28 @@ function projectRequest(): CreateProjectRequest {
     idempotencyKey: 'project-task-scenario-key-0001',
     causationId: 'project-task-scenario-cause-0001',
     reason: 'owner-project-create',
+  })
+}
+
+function workflowDefinition(): ProjectTaskWorkflowDefinition {
+  return Object.freeze({
+    fieldName: 'Project status',
+    initialStateId: 'planned',
+    terminalStateIds: Object.freeze(['done']),
+    states: Object.freeze([
+      Object.freeze({
+        stateId: 'planned', name: 'Planned', colorIndex: 1,
+        allowedNextStateIds: Object.freeze(['doing']),
+      }),
+      Object.freeze({
+        stateId: 'doing', name: 'Doing', colorIndex: 2,
+        allowedNextStateIds: Object.freeze(['done']),
+      }),
+      Object.freeze({
+        stateId: 'done', name: 'Done', colorIndex: 3,
+        allowedNextStateIds: Object.freeze([]),
+      }),
+    ]),
   })
 }
 
@@ -621,6 +658,39 @@ describe('T08 Feishu task scenario', () => {
     await scenario.close()
   })
 
+  it('does not redeliver a workflow-field create after an ambiguous response', async () => {
+    const { scenario, adapter } = await fixture()
+    adapter.workflowFields = Object.freeze([])
+    adapter.workflowCreateMode = 'throw'
+    await bind(scenario)
+    const request = Object.freeze({
+      projectId: PROJECT_ID,
+      expectedTaskRevision: 1,
+      expectedWorkflowRevision: null,
+      definition: workflowDefinition(),
+      mapping: Object.freeze({ mode: 'create' as const }),
+      idempotencyKey: 'feishu-workflow-create-unknown-0001',
+      causationId: 'feishu-workflow-create-unknown-cause-0001',
+      reason: 'owner-feishu-task-workflow-configure' as const,
+    })
+
+    await expect(scenario.configureFeishuTaskWorkflow(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    await expect(scenario.configureFeishuTaskWorkflow(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    expect(adapter.workflowCreateCalls).toBe(1)
+    expect(adapter.workflowFieldCalls).toBe(1)
+    await expect(scenario.projectTasks({ projectId: PROJECT_ID }, signal)).resolves.toMatchObject({
+      revision: 1,
+      workflow: null,
+    })
+    await scenario.close()
+  })
+
   it('maps a workflow, converges Feishu status, and requires explicit completion confirmation', async () => {
     const { scenario, adapter } = await fixture()
     adapter.snapshot = taskListSnapshot([task('task-primary', '100', {
@@ -631,25 +701,7 @@ describe('T08 Feishu task scenario', () => {
       })]),
     })])
     await bind(scenario)
-    const definition = Object.freeze({
-      fieldName: 'Project status',
-      initialStateId: 'planned',
-      terminalStateIds: Object.freeze(['done']),
-      states: Object.freeze([
-        Object.freeze({
-          stateId: 'planned', name: 'Planned', colorIndex: 1,
-          allowedNextStateIds: Object.freeze(['doing']),
-        }),
-        Object.freeze({
-          stateId: 'doing', name: 'Doing', colorIndex: 2,
-          allowedNextStateIds: Object.freeze(['done']),
-        }),
-        Object.freeze({
-          stateId: 'done', name: 'Done', colorIndex: 3,
-          allowedNextStateIds: Object.freeze([]),
-        }),
-      ]),
-    })
+    const definition = workflowDefinition()
     const mapping = Object.freeze({
       mode: 'existing' as const,
       fieldGuid: 'field-project-status',

@@ -88,6 +88,8 @@ function connection(workbench: SqliteWorkbenchRepository): DatabaseSync {
 
 function dropTaskFederationSchema(database: DatabaseSync): void {
   database.exec(`
+    DROP TRIGGER workbench_feishu_task_workflow_operation_no_delete;
+    DROP TRIGGER workbench_feishu_task_workflow_operation_intent_no_update;
     DROP TRIGGER workbench_feishu_task_workflow_version_no_delete;
     DROP TRIGGER workbench_feishu_task_workflow_version_no_update;
     DROP TRIGGER workbench_feishu_task_workflow_no_delete;
@@ -103,6 +105,7 @@ function dropTaskFederationSchema(database: DatabaseSync): void {
     DROP TRIGGER workbench_feishu_task_binding_no_delete;
     DROP TRIGGER workbench_feishu_task_binding_scope_no_update;
     DROP TABLE workbench_feishu_task_custom_value;
+    DROP TABLE workbench_feishu_task_workflow_operation;
     DROP TABLE workbench_feishu_task_workflow_version;
     DROP TABLE workbench_feishu_task_workflow;
     DROP TABLE workbench_feishu_task_effect;

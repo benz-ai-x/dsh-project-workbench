@@ -114,7 +114,7 @@ describe('T07 Feishu SQLite connection aggregate', () => {
     })
     await repository.open()
 
-    expect(WORKBENCH_SCHEMA_VERSION).toBe(7)
+    expect(WORKBENCH_SCHEMA_VERSION).toBe(8)
     await expect(repository.readFeishuConnection({
       organizationId: 'organization-feishu',
       teamId: 'team-feishu',

@@ -386,6 +386,8 @@ export interface WorkbenchFeishuTaskWorkflowMappedField {
 
 /** Exact authoritative field observation committed after create/map/migrate. */
 export interface WorkbenchFeishuTaskWorkflowConfigurationMutation {
+  /** Present only after a create/migrate provider write was durably reserved and claimed. */
+  readonly operationId?: string
   readonly projectId: string
   readonly expectedTaskRevision: number
   readonly expectedWorkflowRevision: number | null
@@ -398,6 +400,30 @@ export interface WorkbenchFeishuTaskWorkflowConfigurationMutation {
     readonly reason: 'owner-feishu-task-workflow-configure'
   }
 }
+
+/** Durable one-attempt reservation for non-idempotent workflow field create/PATCH. */
+export interface WorkbenchFeishuTaskWorkflowOperationMutation {
+  readonly operationId: string
+  readonly projectId: string
+  readonly expectedTaskRevision: number
+  readonly expectedWorkflowRevision: number | null
+  readonly definition: ProjectTaskWorkflowDefinition
+  readonly mapping: import('./client.ts').ConfigureFeishuTaskWorkflowMapping
+  readonly preparedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-feishu-task-workflow-configure'
+  }
+}
+
+export type WorkbenchFeishuTaskWorkflowOperationReservation =
+  | {
+    readonly state: 'deliver'
+    readonly operationId: string
+    /** Original reserved command identity, reused after a crash before provider delivery. */
+    readonly command: WorkbenchFeishuTaskWorkflowOperationMutation['command']
+  }
+  | { readonly state: 'replay'; readonly result: ConfigureFeishuTaskWorkflowResult }
+  | { readonly state: 'rejected'; readonly result: ConfigureFeishuTaskWorkflowResult }
 
 export interface WorkbenchFeishuTaskWorkflowReplayQuery {
   readonly organizationId: string
@@ -639,6 +665,25 @@ export interface WorkbenchRepository {
     query: WorkbenchFeishuTaskWorkflowReplayQuery,
     signal: AbortSignal,
   ): Promise<ConfigureFeishuTaskWorkflowResult | null>
+  /** Reserve a create/migrate field write before its single provider attempt. */
+  reserveFeishuTaskWorkflowOperation(
+    mutation: WorkbenchFeishuTaskWorkflowOperationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskWorkflowOperationReservation>
+  claimFeishuTaskWorkflowOperation(
+    operationId: string,
+    claimedAt: string,
+    signal: AbortSignal,
+  ): Promise<boolean>
+  settleFeishuTaskWorkflowOperation(
+    operationId: string,
+    settlement: Readonly<{
+      readonly state: 'unknown' | 'failed'
+      readonly issue: FeishuConnectionIssue
+      readonly settledAt: string
+    }>,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult>
   /** Atomically install a stable field/option mapping and its immutable version. */
   commitFeishuTaskWorkflowConfiguration(
     mutation: WorkbenchFeishuTaskWorkflowConfigurationMutation,
