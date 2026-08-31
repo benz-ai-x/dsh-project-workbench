@@ -3447,14 +3447,30 @@ describe('WorkbenchScenario', () => {
       action: 'workbench.suggested-change.edited-accepted',
       limit: 5,
     })
+    await scenario.activity({
+      projectId: 'project-safe',
+      objectType: 'feishu-task-workflow',
+      objectId: 'project-safe',
+      action: 'workbench.feishu-task-workflow.configured',
+      limit: 5,
+    })
+    expect(repository.lastActivityQuery?.filter).toEqual({
+      projectId: 'project-safe',
+      objectType: 'feishu-task-workflow',
+      objectId: 'project-safe',
+      action: 'workbench.feishu-task-workflow.configured',
+      limit: 5,
+    })
     await expect(scenario.auditIntegrity()).resolves.toMatchObject({ valid: true, eventCount: 0 })
     expect(required).toEqual([
+      'workbench.activity.read',
       'workbench.activity.read',
       'workbench.activity.read',
       'workbench.activity.read',
       'workbench.audit.verify',
     ])
     expect(filtered).toEqual([
+      'workbench.activity.read',
       'workbench.activity.read',
       'workbench.activity.read',
       'workbench.activity.read',
@@ -3465,7 +3481,7 @@ describe('WorkbenchScenario', () => {
       const error = await scenario.activity(filter as never).catch((reason: unknown) => reason)
       expect(failureCode(error)).toBe('bad-request')
     }
-    expect(repository.activityCalls).toBe(3)
+    expect(repository.activityCalls).toBe(4)
     await scenario.close()
   })
 
