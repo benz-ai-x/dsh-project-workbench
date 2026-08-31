@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   applyEntryPatches,
   entryListSchema,
@@ -129,5 +129,22 @@ describe('Workbench test profile', () => {
     expect(composed.find(row => row.id === 'workbench-client')).toMatchObject({
       name: '@benz-ai-x/dsh-project-workbench-client',
     })
+  })
+
+  it('resolves the generated T11 Deliverable Remote face through the materialized Profile closure', async () => {
+    const require = createRequire(import.meta.url)
+    const resolved = require.resolve('@benz-ai-x/dsh-project-workbench/remote')
+    const remote = await import(pathToFileURL(resolved).href) as {
+      TYPERT_REMOTE?: { descriptors?: readonly { method?: string }[] }
+    }
+    const methods = remote.TYPERT_REMOTE?.descriptors?.map(value => value.method) ?? []
+
+    expect(resolved).toMatch(/[/\\]packages[/\\]workbench-host[/\\]lib[/\\]typert\.remote-client\.js$/u)
+    expect(methods).toEqual(expect.arrayContaining([
+      'createProjectDeliverable',
+      'decideDeliverableAcceptance',
+      'projectDeliverables',
+      'requestDeliverableAcceptance',
+    ]))
   })
 })

@@ -95,7 +95,9 @@ const packageSpecs = [
     requiredFiles: [
       'lib/index.js',
       'lib/client.js',
+      'lib/types/client/ProjectDeliverablesPanel.d.ts',
       'lib/types/client/ProjectMilestonesPanel.d.ts',
+      'lib/types/client/project-deliverables-controller.d.ts',
       'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
       'lib/types/index.d.ts',
     ],
@@ -103,6 +105,7 @@ const packageSpecs = [
       'lib/types/client/ActivityPanel.d.ts',
       'lib/types/client/FeishuConnectionPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
+      'lib/types/client/ProjectDeliverablesPanel.d.ts',
       'lib/types/client/ProjectMilestonesPanel.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
       'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
@@ -120,6 +123,7 @@ const packageSpecs = [
       'lib/types/client/mount.d.ts',
       'lib/types/client/owner-controller.d.ts',
       'lib/types/client/project-controller.d.ts',
+      'lib/types/client/project-deliverables-controller.d.ts',
       'lib/types/client/project-team-controller.d.ts',
       'lib/types/client/review-controller.d.ts',
       'lib/types/client/style-lifecycle.d.ts',
@@ -712,8 +716,19 @@ export default class PackedCredentialsFixture extends CredentialProvider {
         === JSON.stringify(result?.finalIntegrity)
       && result?.teamRoundTripVerified === true
       && result?.reviewRoundTripVerified === true
+      && result?.deliverableRoundTripVerified === true
       && result?.feishuRoundTripVerified === true,
-    'clean consumer: installed Host recovers status, Project, Team, Review, Feishu, Activity, and integrity after restart',
+    'clean consumer: installed Host recovers status, Project, Team, typed Deliverables/Review, Feishu, Activity, and integrity after restart',
+  )
+  check(
+    result?.packedDeliverables?.projectId === result?.createdProject?.project?.projectId
+      && result?.packedDeliverables?.deliverables?.length === 0
+      && result?.packedDeliverables?.activity?.length === 0
+      && result?.packedDeliverableReview?.reviewKind === 'deliverable-acceptance'
+      && result?.packedDeliverableReview?.deliverablesRevision
+        === result?.packedDeliverables?.revision
+      && result?.packedDeliverableReview?.items?.length === 0,
+    'clean consumer: tgz-installed Host serves the typed T11 Deliverables workspace and Review target without File or Feishu credentials',
   )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
@@ -776,7 +791,7 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
-assert.equal(host.WORKBENCH_SCHEMA_VERSION, 9)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 10)
 assert.equal(typeof host.DshFeishuConnectionAdapter, 'function')
 assert.equal(host.FEISHU_CONNECTION_ADAPTER_ID, 'feishu-open-platform-v1')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.startIdentityVerification, 'function')
@@ -807,7 +822,9 @@ const remoteMethods = [
   'configureFeishuIdentityRoute',
   'configureFeishuTaskWorkflow',
   'createProject',
+  'createProjectDeliverable',
   'createProjectMilestone',
+  'decideDeliverableAcceptance',
   'decideSuggestedChange',
   'discoverFeishuCalendarEvents',
   'discoverFeishuCalendars',
@@ -817,6 +834,7 @@ const remoteMethods = [
   'getProjectMilestones',
   'previewFeishuTaskWorkflow',
   'project',
+  'projectDeliverables',
   'projectStart',
   'projectTasks',
   'projectTeam',
@@ -824,6 +842,7 @@ const remoteMethods = [
   'reconcileProjectCalendar',
   'reconcileProjectTasks',
   'referenceFeishuTask',
+  'requestDeliverableAcceptance',
   'reviewCenter',
   'setProjectMemberStatus',
   'setProjectResponsibility',
@@ -869,6 +888,9 @@ let teamActivity
 let teamRoundTripVerified = false
 let acceptedReview
 let reviewRoundTripVerified = false
+let packedDeliverables
+let packedDeliverableReview
+let deliverableRoundTripVerified = false
 let feishuConfiguration
 let configuredFeishuConnection
 let feishuVerification
@@ -1368,6 +1390,21 @@ try {
   assert.equal(acceptedReview.items[0].effectiveStatus, 'accepted')
   assert.equal(acceptedReview.items[0].decisions[0].mode, 'accepted')
   assert.equal(acceptedReview.items[0].decisions[0].appliedTeamRevision, 7)
+  packedDeliverables = await firstAuth.run(() => firstService.projectDeliverables({
+    projectId,
+    activityLimit: 10,
+  }, new AbortController().signal))
+  assert.equal(packedDeliverables.projectId, projectId)
+  assert.deepEqual(packedDeliverables.deliverables, [])
+  assert.deepEqual(packedDeliverables.activity, [])
+  packedDeliverableReview = await firstAuth.run(() => firstService.reviewCenter({
+    reviewKind: 'deliverable-acceptance',
+    projectId,
+    limit: 10,
+  }, new AbortController().signal))
+  assert.equal(packedDeliverableReview.reviewKind, 'deliverable-acceptance')
+  assert.equal(packedDeliverableReview.deliverablesRevision, packedDeliverables.revision)
+  assert.deepEqual(packedDeliverableReview.items, [])
   const acceptedReviewActivity = await firstAuth.run(() => firstService.activity({
     projectId,
     action: 'workbench.suggested-change.accepted',
@@ -1498,6 +1535,8 @@ let restartProject
 let restartProjectActivity
 let restartTeam
 let restartReview
+let restartDeliverables
+let restartDeliverableReview
 let restartFeishuConnection
 let restartFeishuActivity
 let feishuRoundTripVerified = false
@@ -1562,6 +1601,18 @@ try {
   }, new AbortController().signal))
   assert.deepEqual(restartReview, acceptedReview)
   reviewRoundTripVerified = true
+  restartDeliverables = await secondAuth.run(() => secondService.projectDeliverables({
+    projectId: createdProject.project.projectId,
+    activityLimit: 10,
+  }, new AbortController().signal))
+  restartDeliverableReview = await secondAuth.run(() => secondService.reviewCenter({
+    reviewKind: 'deliverable-acceptance',
+    projectId: createdProject.project.projectId,
+    limit: 10,
+  }, new AbortController().signal))
+  assert.deepEqual(restartDeliverables, packedDeliverables)
+  assert.deepEqual(restartDeliverableReview, packedDeliverableReview)
+  deliverableRoundTripVerified = true
   restartFeishuConnection = await secondAuth.run(() => secondService.feishuConnectionCenter(
     new AbortController().signal,
   ))
@@ -1609,6 +1660,9 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   teamRoundTripVerified,
   acceptedReview,
   reviewRoundTripVerified,
+  packedDeliverables,
+  packedDeliverableReview,
+  deliverableRoundTripVerified,
   feishuConfiguration,
   configuredFeishuConnection,
   feishuVerification,

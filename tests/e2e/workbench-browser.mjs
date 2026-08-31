@@ -68,6 +68,12 @@ const WORKBENCH_CREATE_PROJECT_MILESTONE_PATH = '/api/workbench/createProjectMil
 const WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH
   = '/api/workbench/updateProjectMilestoneDate'
 const WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH = '/api/workbench/reconcileProjectCalendar'
+const WORKBENCH_PROJECT_DELIVERABLES_PATH = '/api/workbench/projectDeliverables'
+const WORKBENCH_CREATE_PROJECT_DELIVERABLE_PATH = '/api/workbench/createProjectDeliverable'
+const WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH
+  = '/api/workbench/requestDeliverableAcceptance'
+const WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH
+  = '/api/workbench/decideDeliverableAcceptance'
 const PROJECT_MILESTONE_OPERATION_PATHS = Object.freeze([
   WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH,
   WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
@@ -80,6 +86,7 @@ const WORKBENCH_CLIENT_STYLE_IDS = Object.freeze([
   'ActivityPanel.module.css',
   'FeishuConnectionPanel.module.css',
   'OwnerPage.module.css',
+  'ProjectDeliverablesPanel.module.css',
   'ProjectMilestonesPanel.module.css',
   'ProjectTasksPanel.module.css',
   'ProjectTeamPanel.module.css',
@@ -778,6 +785,10 @@ function projectMilestonesPanel(page) {
   return page.locator('section[aria-labelledby="workbench-project-milestones-title"]')
 }
 
+function projectDeliverablesPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-project-deliverables-title"]')
+}
+
 async function assertProjectMilestonesUnbound(page, projectName) {
   const panel = projectMilestonesPanel(page)
   await panel.getByRole('heading', { name: 'Project Milestones', exact: true })
@@ -902,6 +913,576 @@ async function withProjectMilestonesProjection(page, projection, work) {
   } finally {
     await page.unroute(pattern, handler)
   }
+}
+
+function deliverableBrowserFixture(projectId, longToken) {
+  const occurredAt = '2026-09-01T08:00:00.000Z'
+  const digest = suffix => `sha256:${suffix.repeat(64)}`
+  const members = Object.freeze([
+    Object.freeze({
+      memberId: 'member-deliverable-accountable',
+      displayName: '浏览器 Deliverable Accountable',
+      kind: 'agent',
+      status: 'active',
+      requiresHumanSponsor: true,
+      canBeHumanSponsor: false,
+      canAccept: false,
+    }),
+    Object.freeze({
+      memberId: 'member-deliverable-sponsor',
+      displayName: '浏览器 Human Sponsor',
+      kind: 'human',
+      status: 'active',
+      requiresHumanSponsor: false,
+      canBeHumanSponsor: true,
+      canAccept: true,
+    }),
+    Object.freeze({
+      memberId: 'member-deliverable-acceptor',
+      displayName: '浏览器 Designated Acceptor',
+      kind: 'human',
+      status: 'active',
+      requiresHumanSponsor: false,
+      canBeHumanSponsor: true,
+      canAccept: true,
+    }),
+  ])
+  const task = Object.freeze({
+    taskGuid: 'task-guid-deliverable-browser',
+    taskId: 'task-deliverable-browser',
+    scope: 'primary-list',
+    parentTaskGuid: null,
+    summary: '完成 Deliverable 浏览器证据',
+    description: '',
+    assignees: [],
+    followers: [],
+    comments: [],
+    completed: false,
+    completedAt: null,
+    canonicalUrl: 'https://applink.feishu.cn/client/task/task-deliverable-browser',
+    remoteVersion: 'task-browser-version-1',
+    projectionRevision: 1,
+  })
+  const calendarBinding = Object.freeze({
+    calendarId: 'calendar-deliverable-browser',
+    summary: 'Deliverable 正式日历',
+    calendarType: 'shared',
+    role: 'owner',
+    identity: Object.freeze({
+      kind: 'bot',
+      routeGeneration: 1,
+      appId: 'cli_deliverable_browser',
+      openId: 'ou_deliverable_browser',
+      tenantKey: 'tenant-deliverable-browser',
+    }),
+    createdByWorkbench: false,
+    revision: 1,
+    boundAt: occurredAt,
+  })
+  const receipt = suffix => Object.freeze({
+    commandId: `command-deliverable-${suffix}`,
+    auditEventId: `audit-deliverable-${suffix}`,
+    outboxId: `outbox-deliverable-${suffix}`,
+  })
+  const memberSnapshot = memberId => {
+    const member = members.find(candidate => candidate.memberId === memberId)
+    assert.notEqual(member, undefined, `Deliverable fixture received unknown member ${memberId}`)
+    return Object.freeze({
+      memberId: member.memberId,
+      displayName: member.displayName,
+      kind: member.kind,
+    })
+  }
+  let deliverable = null
+  let revision = 3
+  let activity = []
+
+  const projection = () => ({
+    projectId,
+    revision,
+    teamRevision: 4,
+    taskRevision: 5,
+    scheduleRevision: 6,
+    calendarBinding,
+    memberOptions: members,
+    taskOptions: [task],
+    deliverables: deliverable === null ? [] : [deliverable],
+    activity,
+    nextBeforeActivitySequence: null,
+  })
+  const calendar = schedule => Object.freeze({
+    eventId: 'event-deliverable-browser',
+    eventAppLink: 'https://applink.feishu.cn/client/calendar/event/detail?eventId=event-deliverable-browser',
+    schedule,
+    remoteStatus: 'confirmed',
+    remoteObservationVersion: 'event-deliverable-observation-1',
+    syncState: 'healthy',
+    lastObservedAt: occurredAt,
+  })
+  const appendActivity = (action, deliverableRevision, acceptanceRequestId, decisionId) => {
+    const sequence = activity.length + 1
+    activity = [{
+      sequence,
+      activityId: `deliverable-activity-${String(sequence)}`,
+      deliverableId: 'deliverable-browser-1',
+      deliverableRevision,
+      action,
+      source: { kind: 'audit-event', auditEventId: `audit-deliverable-${String(sequence)}` },
+      planSnapshotId: 'deliverable-plan-browser-1',
+      acceptanceRequestId,
+      decisionId,
+      occurredAt,
+    }, ...activity]
+  }
+
+  return {
+    get projection() { return projection() },
+    create(request) {
+      assert.equal(request.reason, 'owner-project-deliverable-create')
+      assert.equal(request.expectedDeliverablesRevision, 3)
+      assert.equal(request.expectedDeliverableRevision, null)
+      assert.equal(request.expectedTeamRevision, 4)
+      assert.equal(request.expectedTaskRevision, 5)
+      assert.equal(request.expectedScheduleRevision, 6)
+      assert.equal(request.event.mode, 'create-event')
+      assert.equal(request.taskGuids.length, 1)
+      const plan = Object.freeze({
+        planSnapshotId: 'deliverable-plan-browser-1',
+        name: request.name,
+        description: request.description ?? null,
+        criteria: request.criteria.map((criterion, index) => Object.freeze({
+          criterionId: `criterion-browser-${String(index + 1)}`,
+          statement: criterion.statement,
+        })),
+        responsibility: Object.freeze({
+          accountable: memberSnapshot(request.accountableMemberId),
+          contributors: request.contributorMemberIds.map(memberSnapshot),
+          humanSponsor: request.humanSponsorMemberId === null
+            ? null
+            : memberSnapshot(request.humanSponsorMemberId),
+          acceptor: memberSnapshot(request.acceptorMemberId),
+        }),
+        taskGuids: [...request.taskGuids],
+        digest: digest('a'),
+        createdAt: occurredAt,
+      })
+      deliverable = {
+        deliverableId: 'deliverable-browser-1',
+        sequence: 1,
+        revision: 1,
+        state: 'planned',
+        plan,
+        calendar: calendar(request.event.schedule),
+        tasks: [{ taskGuid: task.taskGuid, availability: 'available', task }],
+        acceptanceRequests: [],
+        finalRelease: null,
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+      }
+      revision = 4
+      appendActivity('deliverable-created', 1, null, null)
+      return {
+        ok: true,
+        value: projection(),
+        deliverable,
+        effect: {
+          effectId: 'effect-deliverable-browser',
+          operation: 'event-create',
+          deliverableId: deliverable.deliverableId,
+          state: 'delivered',
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+        receipt: receipt('create'),
+      }
+    },
+    requestAcceptance(request) {
+      assert.notEqual(deliverable, null, 'acceptance was requested before Deliverable creation')
+      assert.equal(request.reason, 'owner-deliverable-acceptance-request')
+      assert.equal(request.expectedDeliverablesRevision, 4)
+      assert.equal(request.expectedDeliverableRevision, 1)
+      assert.equal(request.expectedTeamRevision, 4)
+      assert.equal(request.expectedTaskRevision, 5)
+      assert.equal(request.expectedScheduleRevision, 6)
+      assert.equal(request.expectedRemoteObservationVersion, 'event-deliverable-observation-1')
+      assert.equal(request.candidateVersions.length, 1)
+      assert.equal(request.candidateVersions[0].kind, 'declared-file-version')
+      assert.equal(request.candidateVersions[0].displayName, longToken)
+      const candidateVersions = request.candidateVersions.map(candidate => Object.freeze({
+        ...candidate,
+        referenceDigest: digest('b'),
+        resolution: 'declared',
+      }))
+      const acceptanceRequest = {
+        acceptanceRequestId: 'acceptance-request-browser-1',
+        sequence: 1,
+        revision: 1,
+        deliverableRevision: 2,
+        plan: deliverable.plan,
+        calendar: deliverable.calendar,
+        taskGuids: deliverable.plan.taskGuids,
+        candidateVersions,
+        candidatesDigest: digest('c'),
+        persistedState: 'pending',
+        effectiveStatus: 'pending',
+        decision: null,
+        allowedDecisions: ['approve', 'reject', 'request-changes'],
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+      }
+      deliverable = {
+        ...deliverable,
+        revision: 2,
+        state: 'in-review',
+        acceptanceRequests: [acceptanceRequest],
+        updatedAt: occurredAt,
+      }
+      revision = 5
+      appendActivity('acceptance-requested', 2, acceptanceRequest.acceptanceRequestId, null)
+      return { ok: true, value: projection(), request: acceptanceRequest, receipt: receipt('request') }
+    },
+    decide(request) {
+      assert.notEqual(deliverable, null, 'acceptance was decided before Deliverable creation')
+      assert.equal(request.mode, 'approve')
+      assert.equal(request.reason, 'owner-deliverable-acceptance-approve')
+      assert.equal(request.expectedDeliverablesRevision, 5)
+      assert.equal(request.expectedDeliverableRevision, 2)
+      assert.equal(request.expectedAcceptanceRequestRevision, 1)
+      assert.equal(Object.hasOwn(request, 'candidateVersions'), false)
+      assert.ok(request.criteria.every(criterion => criterion.outcome === 'met'))
+      assert.ok(request.feedback.trim().length > 0)
+      const pending = deliverable.acceptanceRequests[0]
+      assert.notEqual(pending, undefined)
+      const decision = {
+        decisionId: 'acceptance-decision-browser-1',
+        requestRevision: 2,
+        outcome: 'approved',
+        actor: { kind: 'owner', id: 'owner-browser-authenticated' },
+        designatedAcceptor: deliverable.plan.responsibility.acceptor,
+        criteria: request.criteria,
+        feedback: request.feedback,
+        causationId: request.causationId,
+        receipt: receipt('decision'),
+        decidedAt: occurredAt,
+      }
+      const approved = {
+        ...pending,
+        revision: 2,
+        persistedState: 'approved',
+        effectiveStatus: 'approved',
+        decision,
+        allowedDecisions: [],
+        updatedAt: occurredAt,
+      }
+      const finalRelease = {
+        finalReleaseId: 'final-release-browser-1',
+        acceptanceRequestId: pending.acceptanceRequestId,
+        versions: pending.candidateVersions,
+        versionsDigest: pending.candidatesDigest,
+        createdAt: occurredAt,
+      }
+      deliverable = {
+        ...deliverable,
+        revision: 3,
+        state: 'accepted',
+        acceptanceRequests: [approved],
+        finalRelease,
+        updatedAt: occurredAt,
+      }
+      revision = 6
+      appendActivity(
+        'acceptance-approved',
+        3,
+        pending.acceptanceRequestId,
+        decision.decisionId,
+      )
+      return {
+        ok: true,
+        value: projection(),
+        request: approved,
+        finalRelease,
+        receipt: receipt('decision'),
+      }
+    },
+    review() {
+      return {
+        reviewKind: 'deliverable-acceptance',
+        projectId,
+        deliverablesRevision: revision,
+        items: deliverable === null || deliverable.acceptanceRequests.length === 0
+          ? []
+          : [{
+              deliverableId: deliverable.deliverableId,
+              deliverableName: deliverable.plan.name,
+              currentDeliverableRevision: deliverable.revision,
+              currentState: deliverable.state,
+              currentCalendar: deliverable.calendar,
+              currentTasks: deliverable.tasks,
+              request: deliverable.acceptanceRequests[0],
+              finalRelease: deliverable.finalRelease,
+            }],
+        nextBeforeSequence: null,
+      }
+    },
+  }
+}
+
+async function installDeliverableBrowserFixture(page, fixture) {
+  // This same-origin Remote fixture proves the generated codec and real Client
+  // journey. Its in-memory state intentionally spans page/Host remounts, so it
+  // is not evidence that a Deliverable survived a SQLite process restart.
+  const calls = []
+  const handlers = []
+  const register = async (path, method, operation) => {
+    const pattern = `**${path}`
+    const handler = async route => {
+      const envelope = route.request().postDataJSON()
+      assert.equal(envelope?.type, 'client-request')
+      assert.equal(envelope?.method, method)
+      calls.push({ path, args: envelope?.payload?.args })
+      const value = await operation(route, envelope?.payload?.args ?? {})
+      if (value === undefined) return
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers: { 'cache-control': 'no-store' },
+        body: JSON.stringify({
+          type: 'server-response',
+          rpcId: envelope.rpcId,
+          result: { ok: true, value },
+        }),
+      })
+    }
+    handlers.push({ pattern, handler })
+    await page.route(pattern, handler)
+  }
+  await register(
+    WORKBENCH_PROJECT_DELIVERABLES_PATH,
+    'workbench/projectDeliverables',
+    (_route, args) => {
+      assert.equal(args.query.projectId, fixture.projection.projectId)
+      return fixture.projection
+    },
+  )
+  await register(
+    WORKBENCH_CREATE_PROJECT_DELIVERABLE_PATH,
+    'workbench/createProjectDeliverable',
+    (_route, args) => fixture.create(args.request),
+  )
+  await register(
+    WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH,
+    'workbench/requestDeliverableAcceptance',
+    (_route, args) => fixture.requestAcceptance(args.request),
+  )
+  await register(
+    WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH,
+    'workbench/decideDeliverableAcceptance',
+    (_route, args) => fixture.decide(args.request),
+  )
+  await register(
+    WORKBENCH_REVIEW_CENTER_PATH,
+    'workbench/reviewCenter',
+    async (route, args) => {
+      if (args.filter?.reviewKind !== 'deliverable-acceptance') {
+        await route.fallback()
+        return undefined
+      }
+      return fixture.review()
+    },
+  )
+  return {
+    calls,
+    async dispose() {
+      await Promise.all(handlers.map(({ pattern, handler }) => page.unroute(pattern, handler)))
+    },
+  }
+}
+
+async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
+  const panel = projectDeliverablesPanel(page)
+  await panel.getByRole('heading', { name: 'Project Deliverables', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByText(
+    '正式决定由当前已验证的 Owner 实际记录；Plan 中指定的 Acceptor 作为独立责任快照显示。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  const createForm = panel.getByRole('form').first()
+  const name = createForm.getByLabel(/Deliverable.*名称|Deliverable name/iu)
+  const criterion = createForm.getByLabel(/验收标准.*1|Acceptance criterion.*1/iu)
+  const accountable = createForm.getByRole('combobox', { name: 'Accountable', exact: true })
+  const sponsor = createForm.getByRole('combobox', { name: 'Human Sponsor', exact: true })
+  const acceptor = createForm.getByRole('combobox', { name: 'Acceptor', exact: true })
+  const task = createForm.getByRole('checkbox', {
+    name: '完成 Deliverable 浏览器证据',
+    exact: true,
+  })
+  const startDate = createForm.getByLabel(/开始日期|Start date/iu)
+  const endDate = createForm.getByLabel(/结束日期|End date/iu)
+  for (const [control, label] of [
+    [name, 'Deliverable name'],
+    [criterion, 'Deliverable acceptance criterion'],
+    [accountable, 'Deliverable Accountable'],
+    [acceptor, 'Deliverable Acceptor'],
+    [task, 'Deliverable Feishu Task'],
+    [startDate, 'Deliverable start date'],
+    [endDate, 'Deliverable end date'],
+  ]) await assertVisibleKeyboardFocus(control, label)
+
+  const advanced = createForm.locator('details').filter({
+    has: createForm.getByLabel(/使用已有飞书事件|existing Feishu event/iu),
+  })
+  const advancedSummary = advanced.locator('summary')
+  await advancedSummary.waitFor({ state: 'visible' })
+  assert.equal(await advanced.getAttribute('open'), null, 'advanced Deliverable schedule opened by default')
+  await assertVisibleKeyboardFocus(advancedSummary, 'Deliverable schedule disclosure')
+  await advancedSummary.press('Enter')
+  await advanced.evaluate(element => {
+    if (!element.open) throw new Error('Enter did not open native Deliverable schedule disclosure')
+  })
+  await advancedSummary.press('Space')
+  await advanced.evaluate(element => {
+    if (element.open) throw new Error('Space did not close native Deliverable schedule disclosure')
+  })
+
+  await name.fill(expected.name)
+  await criterion.fill(expected.criterion)
+  await accountable.selectOption('member-deliverable-accountable')
+  await sponsor.waitFor({ state: 'visible' })
+  await assertVisibleKeyboardFocus(sponsor, 'Deliverable Human Sponsor')
+  await sponsor.selectOption('member-deliverable-sponsor')
+  await acceptor.selectOption('member-deliverable-acceptor')
+  await task.check()
+  await startDate.fill('2026-09-08')
+  await endDate.fill('2026-09-09')
+  await createForm.getByRole('button', { name: /创建 Deliverable|Create Deliverable/iu }).click()
+
+  const card = panel.getByRole('article', { name: expected.name, exact: true })
+  await card.waitFor({ state: 'visible' })
+  await card.getByText('浏览器 Deliverable Accountable', { exact: true }).waitFor({ state: 'visible' })
+  await card.getByText('浏览器 Designated Acceptor', { exact: true }).waitFor({ state: 'visible' })
+  await card.getByText(/不可变|immutable/iu).waitFor({ state: 'visible' })
+  const source = card.getByLabel(/版本来源|Artifact source|来源/iu)
+  const resourceId = card.getByLabel(/资源 ID|Resource ID/iu)
+  const versionId = card.getByLabel(/版本 ID|Version ID/iu)
+  const displayName = card.getByLabel(/显示名称|Display name/iu)
+  await source.selectOption('local')
+  await resourceId.fill('reports/evidence.md')
+  await versionId.fill('git-sha-browser-1')
+  await displayName.fill(expected.longToken)
+  await card.getByRole('button', { name: /添加(?:声明)?版本|Add (?:declared )?version/iu }).click()
+  await card.getByText('声明版本（未验证）', { exact: true }).waitFor({ state: 'visible' })
+  const longToken = card.getByText(expected.longToken, { exact: true })
+  await longToken.waitFor({ state: 'visible' })
+  assert.equal(
+    await longToken.evaluate(element => getComputedStyle(element).overflowWrap),
+    'anywhere',
+    'declared artifact long token is not safely wrapped',
+  )
+  await card.getByRole('button', { name: /申请验收|Request acceptance/iu }).click()
+
+  const review = reviewCenterPanel(page)
+  await review.getByRole('button', { name: 'Deliverable Acceptance', exact: true }).click()
+  const acceptanceCard = review.locator('article').filter({ hasText: expected.name }).first()
+  await acceptanceCard.waitFor({ state: 'visible' })
+  await acceptanceCard.getByText(
+    /当前已验证(?:的)? Owner.*记录.*(?:designated )?Acceptor.*(?:计划快照|责任快照)/iu,
+  ).waitFor({ state: 'visible' })
+  const approve = acceptanceCard.getByRole('button', { name: /批准|Approve/iu })
+  const reject = acceptanceCard.getByRole('button', { name: /拒绝|Reject/iu })
+  const requestChanges = acceptanceCard.getByRole('button', {
+    name: /要求修改|需要修改|Request changes/iu,
+  })
+  await Promise.all([
+    approve.waitFor({ state: 'visible' }),
+    reject.waitFor({ state: 'visible' }),
+    requestChanges.waitFor({ state: 'visible' }),
+  ])
+  const criterionDecision = acceptanceCard.getByRole('group', {
+    name: expected.criterion,
+    exact: true,
+  })
+  const met = criterionDecision.getByRole('radio', { name: /满足|Met/iu })
+  const notMet = criterionDecision.getByRole('radio', { name: /未满足|Not met/iu })
+  const feedback = acceptanceCard.getByLabel(/反馈|Feedback/iu)
+  await Promise.all([
+    met.waitFor({ state: 'visible' }),
+    notMet.waitFor({ state: 'visible' }),
+    feedback.waitFor({ state: 'visible' }),
+  ])
+  await assertVisibleKeyboardFocus(met, 'Deliverable criterion met outcome')
+  await assertVisibleKeyboardFocus(notMet, 'Deliverable criterion not-met outcome')
+  await assertVisibleKeyboardFocus(feedback, 'Deliverable acceptance feedback')
+  await met.check()
+  await feedback.fill(expected.feedback)
+  assert.equal(await approve.isEnabled(), true, 'valid Deliverable approval stayed disabled')
+  await assertVisibleKeyboardFocus(approve, 'Deliverable approve outcome')
+  await approve.click()
+  await waitForCondition(
+    () => fixture.projection.deliverables[0]?.state === 'accepted',
+    PAGE_TIMEOUT_MS,
+    'Deliverable Review Center approval',
+  )
+  await acceptanceCard.getByText(expected.feedback, { exact: true })
+    .waitFor({ state: 'visible' })
+  assert.equal(
+    fixture.projection.deliverables[0].finalRelease.versions[0].displayName,
+    expected.longToken,
+  )
+}
+
+async function assertAcceptedDeliverableBrowserProjection(page, expected) {
+  const panel = projectDeliverablesPanel(page)
+  await panel.getByRole('heading', { name: 'Project Deliverables', exact: true })
+    .waitFor({ state: 'visible' })
+  const card = panel.getByRole('article', { name: expected.name, exact: true })
+  await card.waitFor({ state: 'visible' })
+  await card.getByText(/已接受|Accepted/iu).first().waitFor({ state: 'visible' })
+  await card.getByText(/Final Release/iu).waitFor({ state: 'visible' })
+  await card.getByText('声明版本（未验证）', { exact: true }).first().waitFor({ state: 'visible' })
+  await card.getByText(expected.longToken, { exact: true }).first().waitFor({ state: 'visible' })
+  await card.getByText('浏览器 Deliverable Accountable', { exact: true }).first()
+    .waitFor({ state: 'visible' })
+  await card.getByText('浏览器 Designated Acceptor', { exact: true }).first()
+    .waitFor({ state: 'visible' })
+  const responsibilityChain = panel.locator(
+    'section[aria-labelledby="workbench-deliverables-activity-title"]',
+  )
+  await responsibilityChain.getByRole('heading', { name: '可重放责任链', exact: true })
+    .waitFor({ state: 'visible' })
+  const activityEntries = await responsibilityChain.locator('ol > li').allTextContents()
+  assert.equal(activityEntries.length, 3, 'Deliverable responsibility chain is incomplete')
+  for (const [entry, expectedValues] of [
+    [activityEntries[0], [
+      'acceptance-approved',
+      'deliverable-plan-browser-1',
+      'acceptance-request-browser-1',
+      'acceptance-decision-browser-1',
+      'audit-deliverable-3',
+    ]],
+    [activityEntries[1], [
+      'acceptance-requested',
+      'deliverable-plan-browser-1',
+      'acceptance-request-browser-1',
+      'audit-deliverable-2',
+    ]],
+    [activityEntries[2], [
+      'deliverable-created',
+      'deliverable-plan-browser-1',
+      'audit-deliverable-1',
+    ]],
+  ]) {
+    for (const value of expectedValues) {
+      assert.ok(entry.includes(value), `Deliverable responsibility chain omitted ${value}`)
+    }
+  }
+  await assertNoInternalHorizontalOverflow(card, 'accepted Deliverable card')
+  return { card, panel }
+}
+
+async function reloadAuthenticatedWorkbench(page) {
+  await page.reload({ waitUntil: 'load' })
+  await dismissHarnessOnboarding(page)
+  await page.locator('main[data-workbench-phase="value"]').waitFor({ state: 'visible' })
 }
 
 async function assertProjectMilestonesBound(page) {
@@ -1739,6 +2320,10 @@ async function main() {
   const editedAcceptedFeedback = 'T06 edited candidate accepted with original high risk retained'
   const elevatedEditedAcceptedFeedback = 'T06 low proposal edited into high risk and explicitly confirmed'
   const finalDeferredFeedback = 'T06 final low proposal deferred after all target writes'
+  const deliverableName = 'T11 browser acceptance evidence'
+  const deliverableCriterion = '每个声明版本与验收证据均可检查'
+  const deliverableDecisionFeedback = 'Owner 已检查全部冻结候选并记录正式批准。'
+  const deliverableLongToken = `declared-version-${'x'.repeat(180)}`
   const expectedHttpError = /(?:401|Unauthorized)/u
 
   // Fresh browser: setup is visible, but the protected projection is neither
@@ -1778,11 +2363,16 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_MILESTONE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_DELIVERABLES_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_DELIVERABLE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-tasks-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-milestones-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-deliverables-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
   await captureVisual(firstJourney.page, '01-setup-desktop')
@@ -1945,6 +2535,9 @@ async function main() {
   await assertFeishuConnectionCenter(firstJourney.page)
   await assertProjectTasksUnbound(firstJourney.page)
   await assertProjectMilestonesUnbound(firstJourney.page)
+  await projectDeliverablesPanel(firstJourney.page)
+    .getByRole('heading', { name: 'Project Deliverables', exact: true })
+    .waitFor({ state: 'visible' })
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
@@ -1964,6 +2557,11 @@ async function main() {
     countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH),
     0,
     'Project Tasks queried Host before a Project was selected',
+  )
+  assert.equal(
+    countRequestsToPath(firstJourney, WORKBENCH_PROJECT_DELIVERABLES_PATH),
+    0,
+    'Project Deliverables queried Host before a Project was selected',
   )
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_GET_PROJECT_MILESTONES_PATH),
@@ -2692,6 +3290,40 @@ async function main() {
     return panel
   }
 
+  const deliverableFixture = deliverableBrowserFixture(projectId, deliverableLongToken)
+  const firstDeliverableRoutes = await installDeliverableBrowserFixture(
+    firstJourney.page,
+    deliverableFixture,
+  )
+  await reloadAuthenticatedWorkbench(firstJourney.page)
+  await reopenProject(firstJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  })
+  await exerciseDeliverableBrowserJourney(firstJourney.page, deliverableFixture, {
+    name: deliverableName,
+    criterion: deliverableCriterion,
+    feedback: deliverableDecisionFeedback,
+    longToken: deliverableLongToken,
+  })
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_DELIVERABLES_PATH) > 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_DELIVERABLE_PATH) > 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH) > 0)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH) > 0)
+  await reloadAuthenticatedWorkbench(firstJourney.page)
+  await reopenProject(firstJourney.page, {
+    projectName,
+    primaryGoalName,
+    outcomeName,
+    metricName,
+  })
+  await assertAcceptedDeliverableBrowserProjection(firstJourney.page, {
+    name: deliverableName,
+    longToken: deliverableLongToken,
+  })
+
   const reviewRequestsBeforeHmr = countRequestsToPath(firstJourney, WORKBENCH_REVIEW_CENTER_PATH)
   const milestoneRequestsBeforeHmr = projectMilestoneRemoteCounts(firstJourney)
   await exerciseClientHmr(
@@ -2717,6 +3349,10 @@ async function main() {
   })
   await assertProjectTeam(firstJourney.page, expectedTeam)
   await assertRecoveredReview(firstJourney.page)
+  await assertAcceptedDeliverableBrowserProjection(firstJourney.page, {
+    name: deliverableName,
+    longToken: deliverableLongToken,
+  })
   await configureAndVerifyMissingFeishuBot(firstJourney.page, {
     botAppId: feishuAppId,
     credentialRef: feishuCredentialRef,
@@ -2761,6 +3397,10 @@ async function main() {
         const mobileTeam = await assertProjectTeam(firstJourney.page, expectedTeam)
         const mobileReview = await assertRecoveredReview(firstJourney.page)
         const mobileMilestones = await assertProjectMilestonesBound(firstJourney.page)
+        const mobileDeliverables = await assertAcceptedDeliverableBrowserProjection(
+          firstJourney.page,
+          { name: deliverableName, longToken: deliverableLongToken },
+        )
         const mobileCreateSection = mobileMilestones.locator(
           'section[aria-labelledby="workbench-milestone-create-title"]',
         )
@@ -2878,7 +3518,15 @@ async function main() {
           mobileChanges,
           'mobile Project Milestone recent changes',
         )
-        await assertNoHorizontalOverflow(firstJourney.page, 'authenticated mobile Project Milestones')
+        await assertNoInternalHorizontalOverflow(
+          mobileDeliverables.panel,
+          'mobile Project Deliverables panel',
+        )
+        await assertNoInternalHorizontalOverflow(
+          mobileDeliverables.card,
+          'mobile accepted Deliverable card with long declared version',
+        )
+        await assertNoHorizontalOverflow(firstJourney.page, 'authenticated mobile Project surfaces')
         const layout = await firstJourney.page.evaluate(() => {
           const session = document.querySelector('header[aria-label]')
           const status = document.querySelector('main[data-workbench-phase]')
@@ -2905,6 +3553,7 @@ async function main() {
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-milestones-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-deliverables-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-review-center-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-feishu-connection-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
@@ -2915,6 +3564,7 @@ async function main() {
     0,
     'logout did not clear the browser Owner cookie',
   )
+  await firstDeliverableRoutes.dispose()
   await firstJourney.context.close()
 
   // A genuinely separate browser context sees login, never setup. A rejected
@@ -2937,6 +3587,10 @@ async function main() {
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_REVIEW_CENTER_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROPOSE_RESPONSIBILITY_CHANGE_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_PROJECT_DELIVERABLES_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_CREATE_PROJECT_DELIVERABLE_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH), 0)
+  assert.equal(countRequestsToPath(separateJourney, WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_FEISHU_CONNECTION_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
   assert.equal(countRequestsToPath(separateJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
@@ -3019,6 +3673,10 @@ async function main() {
   const secondJourney = await openCheckedPage(second.readyUrl, 'credential and data restart boot')
   await dismissHarnessOnboarding(secondJourney.page)
   const secondNetwork = await installNetworkEvidence(secondJourney.page)
+  const restartedDeliverableRoutes = await installDeliverableBrowserFixture(
+    secondJourney.page,
+    deliverableFixture,
+  )
   const secondLogin = secondJourney.page.locator('#workbench-login-password')
   await secondLogin.waitFor({ state: 'visible' })
   assert.equal(await secondJourney.page.locator('#workbench-owner-password').count(), 0)
@@ -3044,6 +3702,11 @@ async function main() {
     0,
     'a restarted Host queried Review before the Owner selected a Project',
   )
+  assert.equal(
+    countRequestsToPath(secondJourney, WORKBENCH_PROJECT_DELIVERABLES_PATH),
+    0,
+    'a restarted Client queried Project Deliverables before Project selection',
+  )
   assertProjectMilestoneRemotesSilent(
     secondJourney,
     emptyProjectMilestoneRemoteCounts(),
@@ -3057,6 +3720,10 @@ async function main() {
   })
   await assertProjectTeam(secondJourney.page, expectedTeam)
   await assertRecoveredReview(secondJourney.page)
+  await assertAcceptedDeliverableBrowserProjection(secondJourney.page, {
+    name: deliverableName,
+    longToken: deliverableLongToken,
+  })
   await assertActivityProjection(
     secondJourney.page,
     24,
@@ -3197,6 +3864,10 @@ async function main() {
   })
   await assertProjectTeam(postRecoveryJourney.page, expectedTeam)
   await assertRecoveredReview(postRecoveryJourney.page)
+  await assertAcceptedDeliverableBrowserProjection(postRecoveryJourney.page, {
+    name: deliverableName,
+    longToken: deliverableLongToken,
+  })
   await assertActivityProjection(
     postRecoveryJourney.page,
     24,
@@ -3212,16 +3883,18 @@ async function main() {
     ...reviewPrivateValues,
   )
   await assertNoBrowserErrors(postRecoveryJourney, [expectedHttpError])
+  await restartedDeliverableRoutes.dispose()
   await postRecoveryJourney.context.close()
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS T10 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
+    'PASS T11 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
       + '-> explicit Feishu Bot configure/verify without actor fallback '
       + '-> Project Tasks selection boundary and verified-route gate '
       + '-> T09 workflow Remote authorization/selection gate and Activity vocabulary '
       + '-> Project Milestones selection/route/mobile boundary and seven protected Remotes '
+      + '-> Deliverable mock-Remote create/request/approve/remount, declared versions, Owner/Acceptor truth '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',

@@ -58,7 +58,9 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'configureFeishuIdentityRoute',
   'configureFeishuTaskWorkflow',
   'createProject',
+  'createProjectDeliverable',
   'createProjectMilestone',
+  'decideDeliverableAcceptance',
   'decideSuggestedChange',
   'discoverFeishuCalendarEvents',
   'discoverFeishuCalendars',
@@ -68,6 +70,7 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'getProjectMilestones',
   'previewFeishuTaskWorkflow',
   'project',
+  'projectDeliverables',
   'projectStart',
   'projectTasks',
   'projectTeam',
@@ -75,6 +78,7 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'reconcileProjectCalendar',
   'reconcileProjectTasks',
   'referenceFeishuTask',
+  'requestDeliverableAcceptance',
   'reviewCenter',
   'setProjectMemberStatus',
   'setProjectResponsibility',
@@ -84,6 +88,28 @@ const WORKBENCH_REMOTE_METHODS = Object.freeze([
   'updateProjectMilestoneDate',
   'verifyFeishuIdentityRoute',
 ])
+const DELIVERABLE_REMOTE_METHODS = Object.freeze([
+  'createProjectDeliverable',
+  'decideDeliverableAcceptance',
+  'projectDeliverables',
+  'requestDeliverableAcceptance',
+])
+
+function expectDeliverableRemoteSurface(service: WorkbenchService): void {
+  expect(DELIVERABLE_REMOTE_METHODS.filter(
+    method => typeof Reflect.get(service, method) === 'function',
+  )).toEqual(DELIVERABLE_REMOTE_METHODS)
+}
+
+function callDeliverableRemote(
+  service: WorkbenchService,
+  method: string,
+  value: unknown,
+): Promise<unknown> {
+  const remote = Reflect.get(service, method)
+  if (typeof remote !== 'function') throw new TypeError(`${method} is not a Remote method`)
+  return Reflect.apply(remote, service, [value, new AbortController().signal]) as Promise<unknown>
+}
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(async context => {
@@ -262,6 +288,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
     expect(WORKBENCH_REMOTE_METHODS.filter(
       method => typeof Reflect.get(firstService, method) === 'function',
     )).toEqual(WORKBENCH_REMOTE_METHODS)
+    expectDeliverableRemoteSurface(firstService)
     await expect(firstService.snapshot(new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })
@@ -277,6 +304,16 @@ describe('built Workbench Host through the real DSH Loader', () => {
       { projectId: 'project-secret' },
       new AbortController().signal,
     )).rejects.toMatchObject({ failure: { code: 'unauthorized' } })
+    for (const [method, value] of [
+      ['projectDeliverables', { projectId: 'project-secret', activityLimit: 10 }],
+      ['createProjectDeliverable', {}],
+      ['requestDeliverableAcceptance', {}],
+      ['decideDeliverableAcceptance', {}],
+    ] as const) {
+      await expect(callDeliverableRemote(firstService, method, value)).rejects.toMatchObject({
+        failure: { code: 'unauthorized' },
+      })
+    }
     await expect(first.workbenchAuth.run(() =>
       firstService.snapshot(new AbortController().signal))).resolves.toBeNull()
     const initialProjects: ProjectStartProjection = await first.workbenchAuth.run(() =>
@@ -1106,6 +1143,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
       .find(candidate => candidate.options.id === 'workbench-host')
     if (entry === undefined) throw new Error('real Loader did not publish workbench-host entry')
     const firstService = context.workbench
+    expectDeliverableRemoteSurface(firstService)
     const committed = await context.workbenchAuth.run(() => firstService.setStatus(
       statusRequest(
         'same-process HMR status',
@@ -1128,6 +1166,7 @@ describe('built Workbench Host through the real DSH Loader', () => {
     expect(entry.fiber).toBeDefined()
     expect(context.get('workbench')).toBeDefined()
     expect(context.workbench).not.toBe(firstService)
+    expectDeliverableRemoteSurface(context.workbench)
     await expect(context.workbenchAuth.run(() =>
       context.workbench.snapshot(new AbortController().signal))).resolves.toEqual(committed.value)
     const remountedActivity = await context.workbenchAuth.run(() => context.workbench.activity(

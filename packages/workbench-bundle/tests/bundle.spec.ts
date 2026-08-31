@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
@@ -76,5 +77,33 @@ describe('Project Workbench bundle', () => {
         name: '@benz-ai-x/dsh-project-workbench-client',
       },
     ])
+    expect(rows.some(row => /file/iu.test(`${row.id ?? ''} ${row.name ?? ''}`))).toBe(false)
+  })
+
+  it('resolves the four generated T11 Deliverable Remotes from the bundled Host', async () => {
+    const require = createRequire(import.meta.url)
+    const hostFace = await import(pathToFileURL(
+      require.resolve('@benz-ai-x/dsh-project-workbench/typert'),
+    ).href) as {
+      TYPERT?: { invocations?: readonly { method?: string }[] }
+    }
+    const remoteFace = await import(pathToFileURL(
+      require.resolve('@benz-ai-x/dsh-project-workbench/remote'),
+    ).href) as {
+      TYPERT_REMOTE?: { descriptors?: readonly { method?: string }[] }
+    }
+    const deliverableMethods = [
+      'createProjectDeliverable',
+      'decideDeliverableAcceptance',
+      'projectDeliverables',
+      'requestDeliverableAcceptance',
+    ]
+
+    expect(hostFace.TYPERT?.invocations?.map(value => value.method)
+      .filter(method => deliverableMethods.includes(method ?? ''))
+      .sort()).toEqual(deliverableMethods)
+    expect(remoteFace.TYPERT_REMOTE?.descriptors?.map(value => value.method)
+      .filter(method => deliverableMethods.includes(method ?? ''))
+      .sort()).toEqual(deliverableMethods)
   })
 })

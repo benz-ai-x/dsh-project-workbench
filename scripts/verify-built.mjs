@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T08 actually loads.
+ * Verify the executable artifacts that T11 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -84,7 +84,7 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
-    check(main.WORKBENCH_SCHEMA_VERSION === 9, `${packageName}: built SQLite authority exports Schema v9`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 10, `${packageName}: built SQLite authority exports Schema v10`)
     check(typeof main.DshFeishuConnectionAdapter === 'function', `${packageName}: production Feishu adapter is a packed main export`)
     check(main.FEISHU_CONNECTION_ADAPTER_ID === 'feishu-open-platform-v1', `${packageName}: Feishu adapter exports its stable identity`)
     check(
@@ -317,7 +317,9 @@ function verifyTypertFace(face, packageName, label) {
     'configureFeishuIdentityRoute',
     'configureFeishuTaskWorkflow',
     'createProject',
+    'createProjectDeliverable',
     'createProjectMilestone',
+    'decideDeliverableAcceptance',
     'decideSuggestedChange',
     'discoverFeishuCalendarEvents',
     'discoverFeishuCalendars',
@@ -326,6 +328,7 @@ function verifyTypertFace(face, packageName, label) {
     'feishuConnectionCenter',
     'getProjectMilestones',
     'project',
+    'projectDeliverables',
     'projectStart',
     'projectTasks',
     'projectTeam',
@@ -334,6 +337,7 @@ function verifyTypertFace(face, packageName, label) {
     'reconcileProjectCalendar',
     'reconcileProjectTasks',
     'referenceFeishuTask',
+    'requestDeliverableAcceptance',
     'reviewCenter',
     'setProjectMemberStatus',
     'setProjectResponsibility',
@@ -345,7 +349,7 @@ function verifyTypertFace(face, packageName, label) {
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the thirty-three T10 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the thirty-seven T11 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -361,8 +365,14 @@ function verifyTypertFace(face, packageName, label) {
     invocation => invocation?.method === 'bindProjectCalendar',
   )
   const createProject = invocations.find(invocation => invocation?.method === 'createProject')
+  const createProjectDeliverable = invocations.find(
+    invocation => invocation?.method === 'createProjectDeliverable',
+  )
   const createProjectMilestone = invocations.find(
     invocation => invocation?.method === 'createProjectMilestone',
+  )
+  const decideDeliverableAcceptance = invocations.find(
+    invocation => invocation?.method === 'decideDeliverableAcceptance',
   )
   const configureFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'configureFeishuIdentityRoute',
@@ -386,6 +396,9 @@ function verifyTypertFace(face, packageName, label) {
     invocation => invocation?.method === 'discoverFeishuTaskWorkflowFields',
   )
   const project = invocations.find(invocation => invocation?.method === 'project')
+  const projectDeliverables = invocations.find(
+    invocation => invocation?.method === 'projectDeliverables',
+  )
   const getProjectMilestones = invocations.find(
     invocation => invocation?.method === 'getProjectMilestones',
   )
@@ -399,6 +412,9 @@ function verifyTypertFace(face, packageName, label) {
     invocation => invocation?.method === 'proposeProjectResponsibilityChange',
   )
   const reviewCenter = invocations.find(invocation => invocation?.method === 'reviewCenter')
+  const requestDeliverableAcceptance = invocations.find(
+    invocation => invocation?.method === 'requestDeliverableAcceptance',
+  )
   const reconcileProjectTasks = invocations.find(
     invocation => invocation?.method === 'reconcileProjectTasks',
   )
@@ -435,7 +451,9 @@ function verifyTypertFace(face, packageName, label) {
     configureFeishuIdentityRoute,
     configureFeishuTaskWorkflow,
     createProject,
+    createProjectDeliverable,
     createProjectMilestone,
+    decideDeliverableAcceptance,
     discoverFeishuCalendarEvents,
     discoverFeishuCalendars,
     discoverFeishuTaskLists,
@@ -443,6 +461,7 @@ function verifyTypertFace(face, packageName, label) {
     feishuConnectionCenter,
     getProjectMilestones,
     project,
+    projectDeliverables,
     projectStart,
     projectTasks,
     projectTeam,
@@ -451,6 +470,7 @@ function verifyTypertFace(face, packageName, label) {
     reconcileProjectCalendar,
     reconcileProjectTasks,
     referenceFeishuTask,
+    requestDeliverableAcceptance,
     reviewCenter,
     decideSuggestedChange,
     setProjectMemberStatus,
@@ -1413,15 +1433,278 @@ function verifyTypertFace(face, packageName, label) {
     `${packageName}: ${label} responsibility carrier rejects caller committed revision`,
   )
 
-  const reviewFilter = reviewCenter?.parameters?.find(parameter => parameter?.name === 'filter')
-  const reviewFilterShape = unwrapSchema(reviewFilter?.codec?.schema)?.def?.shape
+  const deliverablesQuery = projectDeliverables?.parameters?.find(
+    parameter => parameter?.name === 'query',
+  )
+  const deliverablesQueryShape = unwrapSchema(deliverablesQuery?.codec?.schema)?.def?.shape
+  const deliverablesProjection = unionOptions(projectDeliverables?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('deliverables'))
+    ?? projectDeliverables?.result?.schema
+  const deliverablesProjectionShape = unwrapSchema(deliverablesProjection)?.def?.shape
   check(
-    sameStrings(schemaObjectKeys(reviewFilter?.codec?.schema), [
+    sameStrings(schemaObjectKeys(deliverablesQuery?.codec?.schema), [
+      'activityLimit',
+      'actor',
+      'beforeActivitySequence',
+      'organizationId',
+      'projectId',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(deliverablesQueryShape?.[key])),
+    `${packageName}: ${label} Project Deliverables query exposes only Project identity, bounded Activity paging, and Host authority`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(deliverablesProjection), [
+      'activity',
+      'calendarBinding',
+      'deliverables',
+      'memberOptions',
+      'nextBeforeActivitySequence',
+      'projectId',
+      'revision',
+      'scheduleRevision',
+      'taskOptions',
+      'taskRevision',
+      'teamRevision',
+    ]),
+    `${packageName}: ${label} Project Deliverables returns one complete planning and replay workspace`,
+  )
+  const deliverableProjection = arrayElementSchema(deliverablesProjectionShape?.deliverables)
+  const deliverableProjectionShape = unwrapSchema(deliverableProjection)?.def?.shape
+  const deliverablePlanShape = unwrapSchema(deliverableProjectionShape?.plan)?.def?.shape
+  const deliverableResponsibilityShape = unwrapSchema(
+    deliverablePlanShape?.responsibility,
+  )?.def?.shape
+  const acceptanceRound = arrayElementSchema(deliverableProjectionShape?.acceptanceRequests)
+  const acceptanceRoundShape = unwrapSchema(acceptanceRound)?.def?.shape
+  const projectedCandidate = arrayElementSchema(acceptanceRoundShape?.candidateVersions)
+  const finalRelease = unionOptions(deliverableProjectionShape?.finalRelease)
+    .find(option => schemaObjectKeys(option).includes('versions'))
+    ?? deliverableProjectionShape?.finalRelease
+  const finalReleaseShape = unwrapSchema(finalRelease)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(deliverableProjection), [
+      'acceptanceRequests',
+      'calendar',
+      'createdAt',
+      'deliverableId',
+      'finalRelease',
+      'plan',
+      'revision',
+      'sequence',
+      'state',
+      'tasks',
+      'updatedAt',
+    ])
+      && sameStrings(schemaObjectKeys(deliverableProjectionShape?.plan), [
+        'createdAt',
+        'criteria',
+        'description',
+        'digest',
+        'name',
+        'planSnapshotId',
+        'responsibility',
+        'taskGuids',
+      ])
+      && sameStrings(schemaObjectKeys(deliverableResponsibilityShape), [
+        'acceptor',
+        'accountable',
+        'contributors',
+        'humanSponsor',
+      ]),
+    `${packageName}: ${label} each Deliverable retains one immutable Plan and complete responsibility snapshot`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(projectedCandidate), [
+      'canonicalUrl',
+      'contentDigest',
+      'displayName',
+      'kind',
+      'referenceDigest',
+      'resolution',
+      'resourceId',
+      'source',
+      'versionId',
+    ])
+      && sameStrings(schemaObjectKeys(finalRelease), [
+        'acceptanceRequestId',
+        'createdAt',
+        'finalReleaseId',
+        'versions',
+        'versionsDigest',
+      ])
+      && sameStrings(
+        schemaObjectKeys(arrayElementSchema(finalReleaseShape?.versions)),
+        schemaObjectKeys(projectedCandidate),
+      ),
+    `${packageName}: ${label} frozen Acceptance candidates and Final Release share the immutable version projection`,
+  )
+  const deliverableActivity = arrayElementSchema(deliverablesProjectionShape?.activity)
+  const deliverableActivityShape = unwrapSchema(deliverableActivity)?.def?.shape
+  const deliverableActivitySources = unionOptions(deliverableActivityShape?.source)
+  check(
+    sameStrings(schemaObjectKeys(deliverableActivity), [
+      'acceptanceRequestId',
+      'action',
+      'activityId',
+      'decisionId',
+      'deliverableId',
+      'deliverableRevision',
+      'occurredAt',
+      'planSnapshotId',
+      'sequence',
+      'source',
+    ])
+      && sameStrings(schemaLiteralTreeValues(deliverableActivityShape?.action), [
+        'acceptance-approved',
+        'acceptance-needs-changes',
+        'acceptance-rejected',
+        'acceptance-requested',
+        'calendar-observed',
+        'deliverable-created',
+      ])
+      && deliverableActivitySources.length === 2
+      && deliverableActivitySources.some(option => sameStrings(schemaObjectKeys(option), [
+        'auditEventId',
+        'kind',
+      ]))
+      && deliverableActivitySources.some(option => sameStrings(schemaObjectKeys(option), [
+        'kind',
+        'scheduleChangeId',
+      ])),
+    `${packageName}: ${label} Deliverable Activity exposes a replayable responsibility chain with authorized sources`,
+  )
+
+  const createDeliverableRequest = createProjectDeliverable?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const createDeliverableShape = unwrapSchema(createDeliverableRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(createDeliverableRequest?.codec?.schema), [
+      'acceptorMemberId',
+      'accountableMemberId',
+      'actor',
+      'causationId',
+      'contributorMemberIds',
+      'criteria',
+      'description',
+      'event',
+      'expectedDeliverableRevision',
+      'expectedDeliverablesRevision',
+      'expectedScheduleRevision',
+      'expectedTaskRevision',
+      'expectedTeamRevision',
+      'humanSponsorMemberId',
+      'idempotencyKey',
+      'name',
+      'organizationId',
+      'projectId',
+      'reason',
+      'taskGuids',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(createDeliverableShape?.[key])),
+    `${packageName}: ${label} Deliverable creation carries immutable plan, responsibility, Task, Calendar, and CAS inputs`,
+  )
+
+  const acceptanceRequest = requestDeliverableAcceptance?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const acceptanceRequestShape = unwrapSchema(acceptanceRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(acceptanceRequest?.codec?.schema), [
+      'actor',
+      'candidateVersions',
+      'causationId',
+      'deliverableId',
+      'expectedDeliverableRevision',
+      'expectedDeliverablesRevision',
+      'expectedRemoteObservationVersion',
+      'expectedScheduleRevision',
+      'expectedTaskRevision',
+      'expectedTeamRevision',
+      'idempotencyKey',
+      'organizationId',
+      'projectId',
+      'reason',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(acceptanceRequestShape?.[key])),
+    `${packageName}: ${label} Acceptance Request freezes declared candidate versions and every authority revision`,
+  )
+  const candidateVersion = arrayElementSchema(acceptanceRequestShape?.candidateVersions)
+  check(
+    sameStrings(schemaObjectKeys(candidateVersion), [
+      'canonicalUrl',
+      'contentDigest',
+      'displayName',
+      'kind',
+      'resourceId',
+      'source',
+      'versionId',
+    ]),
+    `${packageName}: ${label} artifact candidates are exact declared file-version values with no fabricated verification`,
+  )
+
+  const acceptanceDecision = decideDeliverableAcceptance?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const acceptanceDecisionOptions = unionOptions(acceptanceDecision?.codec?.schema)
+  check(
+    acceptanceDecisionOptions.length === 3
+      && acceptanceDecisionOptions.every(option => sameStrings(schemaObjectKeys(option), [
+        'acceptanceRequestId',
+        'actor',
+        'candidateVersions',
+        'causationId',
+        'criteria',
+        'deliverableId',
+        'expectedAcceptanceRequestRevision',
+        'expectedDeliverableRevision',
+        'expectedDeliverablesRevision',
+        'feedback',
+        'idempotencyKey',
+        'mode',
+        'organizationId',
+        'projectId',
+        'reason',
+        'teamId',
+      ]))
+      && sameStrings(
+        acceptanceDecisionOptions.flatMap(option => schemaLiteralTreeValues(
+          schemaObjectProperty(option, 'mode'),
+        )),
+        ['approve', 'reject', 'request-changes'],
+      ),
+    `${packageName}: ${label} acceptance decision is a closed approve/reject/needs-changes command with no candidate replacement`,
+  )
+
+  const reviewFilter = reviewCenter?.parameters?.find(parameter => parameter?.name === 'filter')
+  const reviewFilterOptions = unionOptions(reviewFilter?.codec?.schema)
+  const suggestedReviewFilter = reviewFilterOptions.find(
+    option => schemaAccepts(option, {
+      reviewKind: 'suggested-change',
+      projectId: 'project-built-artifact',
+    }),
+  )
+  const deliverableReviewFilter = reviewFilterOptions.find(
+    option => schemaAccepts(option, {
+      reviewKind: 'deliverable-acceptance',
+      projectId: 'project-built-artifact',
+    }),
+  )
+  const reviewFilterShape = unwrapSchema(suggestedReviewFilter)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(suggestedReviewFilter), [
       'actor',
       'beforeSequence',
       'limit',
       'organizationId',
       'projectId',
+      'reviewKind',
       'riskLevel',
       'status',
       'teamId',
@@ -1431,25 +1714,55 @@ function verifyTypertFace(face, packageName, label) {
     `${packageName}: ${label} Review Center filter exposes five states, risk, paging, and no caller authority`,
   )
   check(
-    schemaAccepts(reviewFilter?.codec?.schema, {
+    schemaAccepts(suggestedReviewFilter, {
       projectId: 'project-built-artifact',
       status: 'stale',
       riskLevel: 'high',
       beforeSequence: 9,
       limit: 5,
     })
-      && schemaRejects(reviewFilter?.codec?.schema, {
+      && schemaRejects(suggestedReviewFilter, {
         projectId: 'project-built-artifact',
         status: 'pending',
         actor: 'caller-forged-owner',
       })
-      && schemaRejects(reviewFilter?.codec?.schema, {
+      && schemaRejects(suggestedReviewFilter, {
         projectId: 'project-built-artifact',
         status: 'disconnected',
       }),
     `${packageName}: ${label} Review Center carrier accepts stale and rejects authority or transport-state forgery`,
   )
-  const reviewProjection = unionOptions(reviewCenter?.result?.schema)
+  const deliverableReviewShape = unwrapSchema(deliverableReviewFilter)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(deliverableReviewFilter), [
+      'actor',
+      'beforeSequence',
+      'limit',
+      'organizationId',
+      'projectId',
+      'reviewKind',
+      'riskLevel',
+      'status',
+      'teamId',
+    ])
+      && ['actor', 'organizationId', 'riskLevel', 'teamId']
+        .every(key => isOptionalNever(deliverableReviewShape?.[key]))
+      && schemaAccepts(deliverableReviewFilter, {
+        reviewKind: 'deliverable-acceptance',
+        projectId: 'project-built-artifact',
+        status: 'needs_changes',
+        beforeSequence: 9,
+        limit: 5,
+      })
+      && schemaRejects(deliverableReviewFilter, {
+        reviewKind: 'deliverable-acceptance',
+        projectId: 'project-built-artifact',
+        riskLevel: 'high',
+      }),
+    `${packageName}: ${label} Review Center exposes a typed Deliverable Acceptance query without SuggestedChange risk fields`,
+  )
+  const reviewResultOptions = unionOptions(reviewCenter?.result?.schema)
+  const reviewProjection = reviewResultOptions
     .find(option => schemaObjectKeys(option).includes('proposalBuilder'))
     ?? reviewCenter?.result?.schema
   const reviewProjectionShape = unwrapSchema(reviewProjection)?.def?.shape
@@ -1459,6 +1772,7 @@ function verifyTypertFace(face, packageName, label) {
       'nextBeforeSequence',
       'projectId',
       'proposalBuilder',
+      'reviewKind',
     ])
       && sameStrings(schemaObjectKeys(reviewProjectionShape?.proposalBuilder), [
         'base',
@@ -1469,6 +1783,20 @@ function verifyTypertFace(face, packageName, label) {
         'teamRevision',
       ]),
     `${packageName}: ${label} Review Center returns one-round-trip proposal context and a stable page`,
+  )
+  const deliverableReviewProjection = reviewResultOptions.find(
+    option => !schemaObjectKeys(option).includes('proposalBuilder')
+      && schemaObjectKeys(option).includes('reviewKind'),
+  )
+  check(
+    sameStrings(schemaObjectKeys(deliverableReviewProjection), [
+      'deliverablesRevision',
+      'items',
+      'nextBeforeSequence',
+      'projectId',
+      'reviewKind',
+    ]),
+    `${packageName}: ${label} Review Center returns target-specific Deliverable Acceptance cards`,
   )
   const reviewMemberOption = arrayElementSchema(
     unwrapSchema(reviewProjectionShape?.proposalBuilder)?.def?.shape?.memberOptions,
@@ -2065,6 +2393,15 @@ function schemaObjectKeys(value) {
   return shape !== null && typeof shape === 'object' && !Array.isArray(shape)
     ? Object.keys(shape).sort()
     : []
+}
+
+function schemaObjectProperty(value, key) {
+  const unwrapped = unwrapSchema(value)
+  if (unwrapped?.def?.type === 'intersection') {
+    return schemaObjectProperty(unwrapped.def.left, key)
+      ?? schemaObjectProperty(unwrapped.def.right, key)
+  }
+  return unwrapped?.def?.shape?.[key]
 }
 
 function arrayElementSchema(value) {
