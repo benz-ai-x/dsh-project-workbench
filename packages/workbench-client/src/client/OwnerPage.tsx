@@ -18,6 +18,7 @@ import {
   FeishuConnectionPanel,
   type FeishuConnectionPanelCopy,
 } from './FeishuConnectionPanel.tsx'
+import { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -231,6 +232,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.projectTeam !== null
     && state.review !== null
     && state.feishuConnection !== null
+    && state.projectTasks !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -271,6 +273,11 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
           <FeishuConnectionPanel
             controller={state.feishuConnection}
             copy={feishuConnectionCopy(t)}
+          />
+          <ProjectTasksPanel
+            controller={state.projectTasks}
+            connectionController={state.feishuConnection}
+            t={t}
           />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
@@ -376,6 +383,8 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectProjectResponsibility: t('activity.object.projectResponsibility'),
     objectSuggestedChange: t('activity.object.suggestedChange'),
     objectFeishuConnection: t('activity.object.feishuConnection'),
+    objectFeishuTaskListBinding: t('activity.object.feishuTaskListBinding'),
+    objectFeishuTask: t('activity.object.feishuTask'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
@@ -393,6 +402,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     actionFeishuRouteReset: t('activity.action.feishuRouteReset'),
     actionFeishuRouteDisabled: t('activity.action.feishuRouteDisabled'),
     actionFeishuRouteVerificationRecorded: t('activity.action.feishuRouteVerificationRecorded'),
+    actionFeishuTaskListBound: t('activity.action.feishuTaskListBound'),
+    actionFeishuTaskReferenced: t('activity.action.feishuTaskReferenced'),
+    actionFeishuTaskUpdateRequested: t('activity.action.feishuTaskUpdateRequested'),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -428,6 +440,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     summaryFeishuVerificationHealthy: t('activity.summary.feishuVerificationHealthy'),
     summaryFeishuVerificationAttention: t('activity.summary.feishuVerificationAttention'),
     summaryFeishuVerificationFailed: t('activity.summary.feishuVerificationFailed'),
+    summaryFeishuTaskListBound: t('activity.summary.feishuTaskListBound'),
+    summaryFeishuTaskReferenced: t('activity.summary.feishuTaskReferenced'),
+    summaryFeishuTaskUpdateRequested: t('activity.summary.feishuTaskUpdateRequested'),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -448,6 +463,9 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonOwnerFeishuRouteReset: t('activity.reason.ownerFeishuRouteReset'),
     reasonOwnerFeishuRouteDisable: t('activity.reason.ownerFeishuRouteDisable'),
     reasonOwnerFeishuRouteVerify: t('activity.reason.ownerFeishuRouteVerify'),
+    reasonOwnerFeishuTaskListBind: t('activity.reason.ownerFeishuTaskListBind'),
+    reasonOwnerFeishuTaskReference: t('activity.reason.ownerFeishuTaskReference'),
+    reasonOwnerFeishuTaskUpdate: t('activity.reason.ownerFeishuTaskUpdate'),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),

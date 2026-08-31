@@ -1051,6 +1051,9 @@ function evidenceSummaryKey(
     'feishu-route-verification-healthy': 'activity.summary.feishuVerificationHealthy',
     'feishu-route-verification-attention': 'activity.summary.feishuVerificationAttention',
     'feishu-route-verification-failed': 'activity.summary.feishuVerificationFailed',
+    'feishu-task-list-bound': 'activity.summary.feishuTaskListBound',
+    'feishu-task-referenced': 'activity.summary.feishuTaskReferenced',
+    'feishu-task-update-requested': 'activity.summary.feishuTaskUpdateRequested',
   } satisfies Record<SuggestedChangeEvidenceProjection['summaryCode'], WorkbenchKey>
   return keys[summary]
 }

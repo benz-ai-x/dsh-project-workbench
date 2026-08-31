@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Create and inspect the real T07 npm archives without touching publication.
+ * Create and inspect the real T08 npm archives without touching publication.
  *
  * Archives and extraction roots live under one mkdtemp-owned directory and
  * are removed in `finally`.  Publication readiness is kept separate from
@@ -53,6 +53,7 @@ const packageSpecs = [
       'lib/types/index.d.ts',
       'lib/types/client.d.ts',
       'lib/types/feishu-connection-adapter.d.ts',
+      'lib/types/feishu-task-federation.d.ts',
       'lib/types/owner-auth-service.d.ts',
       'lib/types/recovery.d.ts',
       'lib/typert.host.js',
@@ -67,6 +68,7 @@ const packageSpecs = [
       'lib/types/authorization.d.ts',
       'lib/types/client.d.ts',
       'lib/types/feishu-connection-adapter.d.ts',
+      'lib/types/feishu-task-federation.d.ts',
       'lib/types/http-bridge.d.ts',
       'lib/types/index.d.ts',
       'lib/types/owner-access.d.ts',
@@ -92,6 +94,7 @@ const packageSpecs = [
       'lib/types/client/FeishuConnectionPanel.d.ts',
       'lib/types/client/OwnerPage.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
+      'lib/types/client/ProjectTasksPanel.d.ts',
       'lib/types/client/ProjectsPanel.d.ts',
       'lib/types/client/ReviewCenterPanel.d.ts',
       'lib/types/client/WorkbenchStatusPage.d.ts',
@@ -107,6 +110,7 @@ const packageSpecs = [
       'lib/types/client/project-team-controller.d.ts',
       'lib/types/client/review-controller.d.ts',
       'lib/types/client/style-lifecycle.d.ts',
+      'lib/types/client/task-controller.d.ts',
       'lib/types/index.d.ts',
     ],
   },
@@ -759,10 +763,12 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
-assert.equal(host.WORKBENCH_SCHEMA_VERSION, 6)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 7)
 assert.equal(typeof host.DshFeishuConnectionAdapter, 'function')
 assert.equal(host.FEISHU_CONNECTION_ADAPTER_ID, 'feishu-open-platform-v1')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.startIdentityVerification, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.readTaskList, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.updateTask, 'function')
 assert.equal(Object.hasOwn(host.DshFeishuConnectionAdapter.prototype, 'verify'), false)
 assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
 assert.ok(!('default' in hostContract))
@@ -773,19 +779,25 @@ const remoteMethods = [
   'activity',
   'addProjectMember',
   'auditIntegrity',
+  'bindFeishuTaskList',
   'configureFeishuIdentityRoute',
   'createProject',
   'decideSuggestedChange',
+  'discoverFeishuTaskLists',
   'feishuConnectionCenter',
   'project',
   'projectStart',
+  'projectTasks',
   'projectTeam',
   'proposeProjectResponsibilityChange',
+  'reconcileProjectTasks',
+  'referenceFeishuTask',
   'reviewCenter',
   'setProjectMemberStatus',
   'setProjectResponsibility',
   'setStatus',
   'snapshot',
+  'updateFeishuTask',
   'verifyFeishuIdentityRoute',
 ]
 assert.deepEqual(hostTypert.TYPERT.invocations.map(value => value.method).sort(), remoteMethods)

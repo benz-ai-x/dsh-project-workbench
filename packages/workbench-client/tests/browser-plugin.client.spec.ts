@@ -13,6 +13,7 @@ import type {
   OwnerAuthResponse,
   ProjectDetailProjection,
   ProjectStartProjection,
+  ProjectTasksProjection,
   ReviewCenterProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
@@ -167,6 +168,19 @@ function emptyReviewCenter(projectId: string): ReviewCenterProjection {
   }
 }
 
+function unboundProjectTasks(projectId: string): ProjectTasksProjection {
+  return {
+    projectId,
+    revision: 0,
+    binding: null,
+    tasks: [],
+    sync: {
+      state: 'unbound', lastEventAt: null, lastReconciledAt: null, lastAttemptAt: null, issue: null,
+    },
+    effects: [],
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
@@ -239,6 +253,13 @@ async function bench(options: {
     return Promise.resolve({
       ok: true as const,
       value: emptyReviewCenter(filter.projectId),
+    })
+  })
+  const projectTasksGate = vi.fn((query: { projectId: string }) => {
+    requestOrder.push('tasks')
+    return Promise.resolve({
+      ok: true as const,
+      value: unboundProjectTasks(query.projectId),
     })
   })
   const feishuConnectionCenterGate = vi.fn((_signal?: AbortSignal) => {
@@ -353,6 +374,30 @@ async function bench(options: {
       ok: true as const,
       value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
     })),
+    projectTasks: projectTasksGate,
+    discoverFeishuTaskLists: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: {
+        projectId: 'project-1', connectionRevision: 0, kind: 'bot' as const,
+        routeGeneration: 1, items: [],
+      },
+    })),
+    bindFeishuTaskList: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
+    reconcileProjectTasks: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'task-list-unbound' as const, message: 'unused' } },
+    })),
+    referenceFeishuTask: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
+    updateFeishuTask: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'idempotency-conflict' as const, message: 'unused' } },
+    })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -398,6 +443,7 @@ async function bench(options: {
     projectStartGate,
     projectTeamGate,
     reviewCenterGate,
+    projectTasksGate,
     feishuConnectionCenterGate,
     authStateGate,
     auth,
@@ -518,7 +564,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     await b.fiber?.dispose()
   })
 
-  it('preserves same-Project Team/Review drafts across reconnect and clears them on Fiber disposal', async () => {
+  it('preserves same-Project Team/Review/Task state across reconnect and clears it on Fiber disposal', async () => {
     const b = await bench()
     const entry = b.ctx.slots.entries('conversation')[0]
     const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
@@ -526,9 +572,11 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const projects = controller.getSnapshot().projects
     const projectTeam = controller.getSnapshot().projectTeam
     const review = controller.getSnapshot().review
+    const projectTasks = controller.getSnapshot().projectTasks
     expect(projects).not.toBeNull()
     expect(projectTeam).not.toBeNull()
     expect(review).not.toBeNull()
+    expect(projectTasks).not.toBeNull()
 
     await projects?.openProject('project-1')
     await vi.waitFor(() => {
@@ -539,6 +587,11 @@ describe('Project Workbench browser plugin lifecycle', () => {
       expect(review?.getSnapshot()).toMatchObject({
         phase: 'ready',
         selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+      })
+      expect(projectTasks?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+        projection: { projectId: 'project-1', binding: null },
       })
     })
     projectTeam?.setMemberKind('agent')
@@ -564,6 +617,10 @@ describe('Project Workbench browser plugin lifecycle', () => {
       proposalDraft: { accountableMemberId: 'protected-member' },
       proposalDraftDirty: true,
     })
+    expect(projectTasks?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      projection: { projectId: 'project-1', binding: null },
+    })
     b.requestOrder.length = 0
     b.reconnect()
     await vi.waitFor(() => {
@@ -578,12 +635,18 @@ describe('Project Workbench browser plugin lifecycle', () => {
         proposalDraft: { accountableMemberId: 'protected-member' },
         proposalDraftDirty: true,
       })
+      expect(projectTasks?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1' },
+        projection: { projectId: 'project-1', binding: null },
+      })
     })
     expect(b.requestOrder).toEqual([
-      'auth', 'status', 'projects', 'team', 'review', 'feishu', 'activity',
+      'auth', 'status', 'projects', 'team', 'review', 'feishu', 'tasks', 'activity',
     ])
     expect(b.projectTeamGate).toHaveBeenCalledTimes(2)
     expect(b.reviewCenterGate).toHaveBeenCalledTimes(2)
+    expect(b.projectTasksGate).toHaveBeenCalledTimes(2)
 
     await b.fiber?.dispose()
     expect(projectTeam?.getSnapshot()).toMatchObject({
@@ -599,6 +662,9 @@ describe('Project Workbench browser plugin lifecycle', () => {
       review: null,
       proposalDraftDirty: false,
       decisionDrafts: {},
+    })
+    expect(projectTasks?.getSnapshot()).toMatchObject({
+      phase: 'idle', selection: null, projection: null,
     })
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
   })

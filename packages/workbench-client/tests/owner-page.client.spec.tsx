@@ -7,6 +7,7 @@ import type {
   OwnerAccessProjection,
   OwnerAuthResponse,
   ProjectStartProjection,
+  ProjectTasksProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
 } from '@benz-ai-x/dsh-project-workbench/client'
@@ -17,6 +18,7 @@ import type { OwnerAuthHttp } from '../src/client/auth-http.ts'
 import type { WorkbenchRemote } from '../src/client/controller.ts'
 import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
 import type { WorkbenchFeishuConnectionRemote } from '../src/client/feishu-connection-controller.ts'
+import type { WorkbenchProjectTasksRemote } from '../src/client/task-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 import { OwnerPage } from '../src/client/OwnerPage.tsx'
 import { zh, type WorkbenchKey } from '../src/client/locales.ts'
@@ -72,6 +74,19 @@ function activityProjection(): WorkbenchActivityProjection {
       headHash: '',
       issue: null,
     },
+  }
+}
+
+function unboundProjectTasks(projectId: string): ProjectTasksProjection {
+  return {
+    projectId,
+    revision: 0,
+    binding: null,
+    tasks: [],
+    sync: {
+      state: 'unbound', lastEventAt: null, lastReconciledAt: null, lastAttemptAt: null, issue: null,
+    },
+    effects: [],
   }
 }
 
@@ -137,6 +152,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
 }
 
 type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchFeishuConnectionRemote
+  & WorkbenchProjectTasksRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -176,6 +192,32 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
         ok: false as const,
         error: { code: 'idempotency-conflict' as const, message: 'unused' },
       }))),
+    projectTasks: overrides.projectTasks
+      ?? vi.fn(query => Promise.resolve(remoteOk(unboundProjectTasks(query.projectId)))),
+    discoverFeishuTaskLists: overrides.discoverFeishuTaskLists
+      ?? vi.fn(request => Promise.resolve(remoteOk({
+        projectId: request.projectId,
+        connectionRevision: request.expectedConnectionRevision,
+        kind: request.kind,
+        routeGeneration: request.expectedRouteGeneration,
+        items: [],
+      }))),
+    bindFeishuTaskList: overrides.bindFeishuTaskList ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    reconcileProjectTasks: overrides.reconcileProjectTasks ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'task-list-unbound' as const, message: 'unused' },
+    }))),
+    referenceFeishuTask: overrides.referenceFeishuTask ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    updateFeishuTask: overrides.updateFeishuTask ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
   }
 }
 

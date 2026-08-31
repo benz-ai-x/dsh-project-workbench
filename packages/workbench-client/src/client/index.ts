@@ -67,6 +67,27 @@ export type {
   WorkbenchFeishuConnectionTransportIssue,
   WorkbenchFeishuIdentityDraft,
 } from './feishu-connection-controller.ts'
+export {
+  INITIAL_WORKBENCH_PROJECT_TASKS_STATE,
+  MAX_FEISHU_TASK_LIST_NAME_LENGTH,
+  MAX_FEISHU_TASK_RESOURCE_ID_LENGTH,
+  MAX_FEISHU_TASK_TEXT_LENGTH,
+  WorkbenchProjectTasksController,
+} from './task-controller.ts'
+export type {
+  WorkbenchProjectTasksClientState,
+  WorkbenchProjectTasksConflictCode,
+  WorkbenchProjectTasksConflictIssue,
+  WorkbenchProjectTasksControllerOptions,
+  WorkbenchProjectTasksInputIssue,
+  WorkbenchProjectTasksIssue,
+  WorkbenchProjectTasksOperation,
+  WorkbenchProjectTasksPhase,
+  WorkbenchProjectTasksRemote,
+  WorkbenchProjectTasksSelection,
+  WorkbenchProjectTasksTransportCode,
+  WorkbenchProjectTasksTransportIssue,
+} from './task-controller.ts'
 export type {
   WorkbenchReviewClientState,
   WorkbenchReviewConflictCode,
@@ -151,6 +172,8 @@ export type {
   FeishuConnectionPanelCopy,
   FeishuConnectionPanelProps,
 } from './FeishuConnectionPanel.tsx'
+export { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
+export type { ProjectTasksPanelProps } from './ProjectTasksPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

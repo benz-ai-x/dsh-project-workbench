@@ -6,12 +6,20 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type {
   AddProjectMemberResult,
+  BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteResult,
   CreateProjectResult,
   DecideSuggestedChangeResult,
   FEISHU_CONNECTION_ID,
   FeishuConnectionIssue,
   FeishuIdentityKind,
+  FeishuTaskCommentProjection,
+  FeishuTaskEventResult,
+  FeishuTaskMemberProjection,
+  FeishuTaskMutationEffectProjection,
+  ProjectTaskListBindingProjection,
+  ProjectTaskProjection,
+  ProjectTasksProjection,
   FeishuResourceProbeProjection,
   FeishuScopeObservation,
   FeishuVerificationProjection,
@@ -34,11 +42,14 @@ import type {
   ProjectTemplateSelection,
   ProjectTemplateSnapshotProjection,
   ProposeProjectResponsibilityChangeResult,
+  ReconcileProjectTasksResult,
+  ReferenceFeishuTaskResult,
   ReviewCenterProjection,
   SetStatusResult,
   SetProjectMemberStatusResult,
   SetProjectResponsibilityResult,
   VerifyFeishuIdentityRouteResult,
+  UpdateFeishuTaskResult,
   SuggestedChangeDecisionMode,
   SuggestedChangeEvidenceProjection,
   SuggestedChangePersistedState,
@@ -74,6 +85,7 @@ import {
 import {
   projectTeamCommandResult,
   projectTeamProjection,
+  projectTasksProjection,
   reviewCenterProjection,
   statusResult,
   statusSnapshot,
@@ -84,6 +96,16 @@ import {
   type WorkbenchFeishuVerificationMutation,
   type WorkbenchFeishuVerificationObservation,
   type WorkbenchFeishuVerificationReplayQuery,
+  type WorkbenchFeishuTaskEventMutation,
+  type WorkbenchFeishuTaskListBindingMutation,
+  type WorkbenchFeishuTaskListBindingReplayQuery,
+  type WorkbenchFeishuTaskReconciliationFailureMutation,
+  type WorkbenchFeishuTaskReconciliationMutation,
+  type WorkbenchFeishuTaskReconciliationTarget,
+  type WorkbenchFeishuTaskReferenceMutation,
+  type WorkbenchFeishuTaskUpdateReservation,
+  type WorkbenchFeishuTaskUpdateReservationMutation,
+  type WorkbenchFeishuTaskUpdateSettlement,
   type WorkbenchStoredFeishuConnectionProjection,
   type WorkbenchOutboxClaim,
   type WorkbenchOutboxClaimRequest,
@@ -92,6 +114,7 @@ import {
   type WorkbenchProjectMemberMutation,
   type WorkbenchProjectMemberStatusMutation,
   type WorkbenchProjectReadQuery,
+  type WorkbenchProjectTasksReadQuery,
   type WorkbenchProjectResponsibilityMutation,
   type WorkbenchProjectStartQuery,
   type WorkbenchProjectTeamReadQuery,
@@ -101,8 +124,14 @@ import {
   type WorkbenchSuggestedChangeDecisionMutation,
   type WorkbenchSuggestedChangeProposalMutation,
 } from './repository.ts'
+import type {
+  WorkbenchFeishuTaskPatch,
+  WorkbenchFeishuTaskRoute,
+  WorkbenchFeishuTaskListSnapshot,
+  WorkbenchFeishuTaskSnapshot,
+} from './feishu-task-federation.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 6
+export const WORKBENCH_SCHEMA_VERSION = 7
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -183,6 +212,23 @@ const FEISHU_VERIFY_ATTENTION_SUMMARY = 'feishu-route-verification-attention'
 const FEISHU_VERIFY_FAILED_SUMMARY = 'feishu-route-verification-failed'
 const FEISHU_ROUTE_OUTBOX_TOPIC = 'workbench.feishu-route.changed.v1'
 const FEISHU_VERIFY_OUTBOX_TOPIC = 'workbench.feishu-route.verified.v1'
+const FEISHU_TASK_LIST_BIND_COMMAND_TYPE = 'workbench.feishu-task-list.bind'
+const FEISHU_TASK_REFERENCE_COMMAND_TYPE = 'workbench.feishu-task.reference'
+const FEISHU_TASK_UPDATE_COMMAND_TYPE = 'workbench.feishu-task.update'
+const FEISHU_TASK_LIST_BIND_AUDIT_ACTION = 'workbench.feishu-task-list.bound'
+const FEISHU_TASK_REFERENCE_AUDIT_ACTION = 'workbench.feishu-task.referenced'
+const FEISHU_TASK_UPDATE_AUDIT_ACTION = 'workbench.feishu-task.update-requested'
+const FEISHU_TASK_LIST_BIND_REASON = 'owner-feishu-task-list-bind'
+const FEISHU_TASK_REFERENCE_REASON = 'owner-feishu-task-reference'
+const FEISHU_TASK_UPDATE_REASON = 'owner-feishu-task-update'
+const FEISHU_TASK_LIST_BIND_SUMMARY = 'feishu-task-list-bound'
+const FEISHU_TASK_REFERENCE_SUMMARY = 'feishu-task-referenced'
+const FEISHU_TASK_UPDATE_SUMMARY = 'feishu-task-update-requested'
+const FEISHU_TASK_LIST_BIND_OBJECT_TYPE = 'feishu-task-list-binding'
+const FEISHU_TASK_OBJECT_TYPE = 'feishu-task'
+const FEISHU_TASK_LIST_BIND_OUTBOX_TOPIC = 'workbench.feishu-task-list.bound.v1'
+const FEISHU_TASK_REFERENCE_OUTBOX_TOPIC = 'workbench.feishu-task.referenced.v1'
+const FEISHU_TASK_UPDATE_OUTBOX_TOPIC = 'workbench.feishu-task.update.v1'
 const MAX_REVIEW_CENTER_LIMIT = 50
 const MAX_SUGGESTED_CHANGE_EVIDENCE = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
@@ -203,6 +249,10 @@ const MAX_EXTERNAL_CONTACT_LENGTH = 320
 const MAX_FEISHU_CREDENTIAL_REF_LENGTH = 128
 const MAX_FEISHU_DISPLAY_LABEL_LENGTH = 200
 const MAX_FEISHU_RESOURCE_ID_LENGTH = 256
+const MAX_FEISHU_TASKS_PER_PROJECT = 1_000
+const MAX_FEISHU_TASK_COMMENTS = 500
+const MAX_FEISHU_TASK_TEXT_LENGTH = 3_000
+const MAX_FEISHU_TASK_MEMBER_NAME_LENGTH = 200
 
 export type WorkbenchJournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
@@ -378,6 +428,76 @@ interface FeishuVerificationRow {
   readonly resource_probe_json: string
   readonly command_id: string
   readonly checked_at: string
+}
+
+interface FeishuTaskBindingRow {
+  readonly project_id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly revision: number
+  readonly tasklist_guid: string
+  readonly tasklist_name: string
+  readonly canonical_url: string
+  readonly route_kind: string
+  readonly route_generation: number
+  readonly app_id: string
+  readonly open_id: string
+  readonly tenant_key: string | null
+  readonly created_by_workbench: number
+  readonly remote_version: string
+  readonly sync_state: string
+  readonly sync_issue_json: string | null
+  readonly last_event_at: string | null
+  readonly last_reconciled_at: string | null
+  readonly last_attempt_at: string | null
+  readonly reconcile_generation: number
+  readonly bound_at: string
+  readonly updated_at: string
+}
+
+interface FeishuTaskProjectionRow {
+  readonly project_id: string
+  readonly task_guid: string
+  readonly scope: string
+  readonly visible: number
+  readonly parent_task_guid: string | null
+  readonly task_id: string | null
+  readonly summary: string
+  readonly description: string
+  readonly assignees_json: string
+  readonly followers_json: string
+  readonly comments_json: string
+  readonly completed: number
+  readonly completed_at: string | null
+  readonly canonical_url: string
+  readonly remote_version: string
+  readonly projection_revision: number
+  readonly reconcile_generation: number
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface FeishuTaskEffectRow {
+  readonly id: string
+  readonly project_id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly actor_id: string
+  readonly task_guid: string
+  readonly expected_project_revision: number
+  readonly expected_remote_version: string
+  readonly changes_json: string
+  readonly request_hash: string
+  readonly idempotency_key_hash: string
+  readonly state: string
+  readonly issue_json: string | null
+  readonly current_remote_version: string | null
+  readonly attempt_count: number
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly outbox_id: string
+  readonly created_at: string
+  readonly updated_at: string
 }
 
 interface TemplateVersionRow {
@@ -599,6 +719,16 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_feishu_binding_no_delete',
   'workbench_feishu_verification_no_update',
   'workbench_feishu_verification_no_delete',
+  'workbench_feishu_task_binding_scope_no_update',
+  'workbench_feishu_task_binding_no_delete',
+  'workbench_feishu_task_reference_no_update',
+  'workbench_feishu_task_reference_no_delete',
+  'workbench_feishu_task_inbox_no_update',
+  'workbench_feishu_task_inbox_no_delete',
+  'workbench_feishu_task_reconciliation_no_update',
+  'workbench_feishu_task_reconciliation_no_delete',
+  'workbench_feishu_task_effect_intent_no_update',
+  'workbench_feishu_task_effect_no_delete',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -2265,6 +2395,980 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       database.exec('COMMIT')
       began = false
       return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async readProjectTasks(
+    query: WorkbenchProjectTasksReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTasksProjection | null> {
+    throwIfAborted(signal)
+    validateProjectTasksReadQuery(query)
+    const projection = readProjectTasksProjection(this.requireDatabase(), query)
+    throwIfAborted(signal)
+    return projection === null ? null : projectTasksProjection(projection)
+  }
+
+  async readFeishuTaskReconciliationTarget(
+    query: WorkbenchProjectTasksReadQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskReconciliationTarget | null> {
+    throwIfAborted(signal)
+    validateProjectTasksReadQuery(query)
+    const database = this.requireDatabase()
+    const project = readProjectScopeRow(
+      database,
+      query.organizationId,
+      query.teamId,
+      query.projectId,
+    )
+    if (project === null) return null
+    const binding = readTaskBindingRow(database, query.projectId)
+    if (binding === null) return null
+    const target = Object.freeze({
+      projectId: binding.project_id,
+      revision: binding.revision,
+      taskListGuid: binding.tasklist_guid,
+      route: taskRouteFromBinding(database, binding.project_id),
+    })
+    throwIfAborted(signal)
+    return target
+  }
+
+  async replayFeishuTaskListBinding(
+    query: WorkbenchFeishuTaskListBindingReplayQuery,
+    signal: AbortSignal,
+  ): Promise<BindFeishuTaskListResult | null> {
+    throwIfAborted(signal)
+    validateTaskListBindingReplayQuery(query)
+    const database = this.requireDatabase()
+    const command: WorkbenchCommandMetadata = {
+      commandId: 'replay-placeholder-command',
+      auditEventId: 'replay-placeholder-audit',
+      outboxId: 'replay-placeholder-outbox',
+      idempotencyKey: query.idempotencyKey,
+      causationId: query.causationId,
+      reason: query.reason,
+      actor: {
+        kind: 'owner',
+        id: query.actorId,
+        organizationId: query.organizationId,
+        teamId: query.teamId,
+      },
+      occurredAt: '1970-01-01T00:00:00.000Z',
+    }
+    const receipt = findFeishuReceipt(database, command, idempotencyKeyHash(query.idempotencyKey))
+    if (receipt === undefined) return null
+    if (receipt.command_type !== FEISHU_TASK_LIST_BIND_COMMAND_TYPE
+      || receipt.request_hash !== taskListBindingRequestHash(query)) {
+      return taskIdempotencyConflict()
+    }
+    assertValidLedger(database)
+    throwIfAborted(signal)
+    return decodeTaskListBindingResult(receipt.result_json, receipt)
+  }
+
+  async listFeishuTaskReconciliationTargets(
+    signal: AbortSignal,
+  ): Promise<readonly WorkbenchFeishuTaskReconciliationTarget[]> {
+    throwIfAborted(signal)
+    const database = this.requireDatabase()
+    const rows = database.prepare(`
+      SELECT project_id FROM workbench_feishu_task_binding
+      ORDER BY project_id LIMIT ${MAX_FEISHU_TASKS_PER_PROJECT + 1}
+    `).all() as unknown as Array<{ readonly project_id: string }>
+    if (rows.length > MAX_FEISHU_TASKS_PER_PROJECT) {
+      throw new Error('Workbench task-list bindings exceed the periodic repair bound')
+    }
+    const targets = rows.map(({ project_id: projectId }) => {
+      const binding = readTaskBindingRow(database, projectId)
+      if (binding === null) throw new Error('Workbench task-list target disappeared')
+      return Object.freeze({
+        projectId,
+        revision: binding.revision,
+        taskListGuid: binding.tasklist_guid,
+        route: taskRouteFromBinding(database, projectId),
+      })
+    })
+    throwIfAborted(signal)
+    return Object.freeze(targets)
+  }
+
+  async commitFeishuTaskListBinding(
+    mutation: WorkbenchFeishuTaskListBindingMutation,
+    signal: AbortSignal,
+  ): Promise<BindFeishuTaskListResult> {
+    throwIfAborted(signal)
+    validateTaskListBindingMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = taskListBindingRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== FEISHU_TASK_LIST_BIND_COMMAND_TYPE
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return taskIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeTaskListBindingResult(receipt.result_json, receipt)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+      assertValidLedger(database)
+      const project = readProjectScopeRow(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.projectId,
+      )
+      if (project === null) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskProjectNotFound(mutation.projectId)
+      }
+      const existing = readTaskBindingRow(database, mutation.projectId)
+      if (existing !== null) {
+        const current = readProjectTasksProjection(database, {
+          organizationId: mutation.command.actor.organizationId,
+          teamId: mutation.command.actor.teamId,
+          projectId: mutation.projectId,
+        })
+        if (current === null) throw new Error('Workbench task binding escaped its Project')
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          ok: false,
+          error: Object.freeze({
+            code: 'task-list-already-bound',
+            message: 'Project already has a primary Feishu task list',
+            current,
+          }),
+        })
+      }
+      const connection = readFeishuConnectionRow(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+      )
+      const currentConnectionRevision = connection?.revision ?? 0
+      if (currentConnectionRevision !== mutation.expectedConnectionRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskConnectionRevisionConflict(
+          mutation.expectedConnectionRevision,
+          currentConnectionRevision,
+        )
+      }
+      const route = readCurrentFeishuRoute(
+        database,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.route.kind,
+      )
+      const routeFailure = validateTaskRouteForCommit(database, route, mutation.route)
+      if (routeFailure !== null) {
+        database.exec('ROLLBACK')
+        began = false
+        return routeFailure
+      }
+      const inserted = database.prepare(`
+        INSERT INTO workbench_feishu_task_binding (
+          project_id, organization_id, team_id, revision, tasklist_guid,
+          tasklist_name, canonical_url, route_kind, route_generation, app_id,
+          open_id, tenant_key, created_by_workbench, remote_version, sync_state,
+          sync_issue_json, last_event_at, last_reconciled_at, last_attempt_at,
+          reconcile_generation, bound_at, updated_at
+        ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'healthy',
+          NULL, NULL, ?, ?, 1, ?, ?)
+      `).run(
+        mutation.projectId,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.snapshot.taskList.taskListGuid,
+        mutation.snapshot.taskList.name,
+        mutation.snapshot.taskList.canonicalUrl,
+        mutation.route.kind,
+        mutation.route.routeGeneration,
+        mutation.route.appId,
+        mutation.route.actor.openId,
+        mutation.route.actor.tenantKey,
+        mutation.createdByWorkbench ? 1 : 0,
+        mutation.snapshot.taskList.remoteVersion,
+        mutation.snapshot.observedAt,
+        mutation.snapshot.observedAt,
+        mutation.boundAt,
+        mutation.boundAt,
+      )
+      if (inserted.changes !== 1) {
+        throw new Error('Workbench Feishu task-list binding was not inserted exactly once')
+      }
+      for (const task of mutation.snapshot.tasks) {
+        upsertTaskProjection(database, mutation.projectId, task, 'primary-list', 1, 1, mutation.boundAt)
+      }
+      insertTaskReconciliation(database, {
+        projectId: mutation.projectId,
+        bindingRevision: 1,
+        generation: 1,
+        outcome: 'healthy',
+        issue: null,
+        taskCount: mutation.snapshot.tasks.length,
+        snapshotDigest: taskListSnapshotDigest(mutation.snapshot),
+        attemptedAt: mutation.snapshot.observedAt,
+      })
+      const value = readProjectTasksProjection(database, {
+        organizationId: mutation.command.actor.organizationId,
+        teamId: mutation.command.actor.teamId,
+        projectId: mutation.projectId,
+      })
+      if (value === null) throw new Error('Workbench task binding projection disappeared')
+      const committed = Object.freeze({
+        ok: true,
+        value,
+        receipt: taskReceipt(mutation.command),
+      }) satisfies Extract<BindFeishuTaskListResult, { readonly ok: true }>
+      appendFeishuTaskLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: FEISHU_TASK_LIST_BIND_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_LIST_BIND_AUDIT_ACTION,
+        summaryCode: FEISHU_TASK_LIST_BIND_SUMMARY,
+        objectType: FEISHU_TASK_LIST_BIND_OBJECT_TYPE,
+        objectId: mutation.projectId,
+        objectVersion: 1,
+        changedFields: ['taskList', 'tasks', 'sync'],
+        outboxTopic: FEISHU_TASK_LIST_BIND_OUTBOX_TOPIC,
+        result: committed,
+      })
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitFeishuTaskReconciliation(
+    mutation: WorkbenchFeishuTaskReconciliationMutation,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult> {
+    throwIfAborted(signal)
+    validateTaskReconciliationMutation(mutation)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const binding = readTaskBindingRow(database, mutation.projectId)
+      if (binding === null) {
+        const project = readProjectById(database, mutation.projectId)
+        database.exec('ROLLBACK')
+        began = false
+        return project === null
+          ? taskProjectNotFound(mutation.projectId)
+          : taskListUnbound()
+      }
+      if (binding.revision !== mutation.expectedRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskProjectionRevisionConflict(mutation.expectedRevision, binding.revision)
+      }
+      if (binding.tasklist_guid !== mutation.snapshot.taskList.taskListGuid) {
+        throw new Error('Workbench reconciliation snapshot escaped its bound task list')
+      }
+      const nextRevision = incrementRevision(binding.revision, 'Feishu task projection')
+      const nextGeneration = incrementRevision(binding.reconcile_generation, 'Feishu reconciliation')
+      database.prepare(`
+        UPDATE workbench_feishu_task_projection
+        SET visible = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM workbench_feishu_task_reference AS reference
+            WHERE reference.project_id = workbench_feishu_task_projection.project_id
+              AND reference.task_guid = workbench_feishu_task_projection.task_guid
+          ) THEN 1 ELSE 0 END,
+          scope = CASE
+            WHEN EXISTS (
+              SELECT 1 FROM workbench_feishu_task_reference AS reference
+              WHERE reference.project_id = workbench_feishu_task_projection.project_id
+                AND reference.task_guid = workbench_feishu_task_projection.task_guid
+            ) THEN 'explicit-reference' ELSE scope END,
+          updated_at = ?
+        WHERE project_id = ? AND scope = 'primary-list'
+      `).run(mutation.attemptedAt, mutation.projectId)
+      for (const task of mutation.snapshot.tasks) {
+        const referenced = taskReferenceExists(database, mutation.projectId, task.taskGuid)
+        upsertTaskProjection(
+          database,
+          mutation.projectId,
+          task,
+          referenced ? 'explicit-reference' : 'primary-list',
+          nextRevision,
+          nextGeneration,
+          mutation.attemptedAt,
+        )
+      }
+      const advanced = database.prepare(`
+        UPDATE workbench_feishu_task_binding SET
+          revision = ?, tasklist_name = ?, canonical_url = ?, remote_version = ?,
+          sync_state = 'healthy', sync_issue_json = NULL,
+          last_reconciled_at = ?, last_attempt_at = ?, reconcile_generation = ?, updated_at = ?
+        WHERE project_id = ? AND revision = ?
+      `).run(
+        nextRevision,
+        mutation.snapshot.taskList.name,
+        mutation.snapshot.taskList.canonicalUrl,
+        mutation.snapshot.taskList.remoteVersion,
+        mutation.snapshot.observedAt,
+        mutation.attemptedAt,
+        nextGeneration,
+        mutation.attemptedAt,
+        mutation.projectId,
+        binding.revision,
+      )
+      if (advanced.changes !== 1) throw new Error('Workbench task reconciliation lost its CAS')
+      insertTaskReconciliation(database, {
+        projectId: mutation.projectId,
+        bindingRevision: nextRevision,
+        generation: nextGeneration,
+        outcome: 'healthy',
+        issue: null,
+        taskCount: mutation.snapshot.tasks.length,
+        snapshotDigest: taskListSnapshotDigest(mutation.snapshot),
+        attemptedAt: mutation.attemptedAt,
+      })
+      const value = readProjectTasksProjection(database, {
+        organizationId: binding.organization_id,
+        teamId: binding.team_id,
+        projectId: binding.project_id,
+      })
+      if (value === null) throw new Error('Workbench reconciled projection disappeared')
+      database.exec('COMMIT')
+      began = false
+      return Object.freeze({ ok: true, value })
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitFeishuTaskReconciliationFailure(
+    mutation: WorkbenchFeishuTaskReconciliationFailureMutation,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult> {
+    throwIfAborted(signal)
+    validateTaskReconciliationFailureMutation(mutation)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const binding = readTaskBindingRow(database, mutation.projectId)
+      if (binding === null) {
+        const project = readProjectById(database, mutation.projectId)
+        database.exec('ROLLBACK')
+        began = false
+        return project === null ? taskProjectNotFound(mutation.projectId) : taskListUnbound()
+      }
+      if (binding.revision !== mutation.expectedRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskProjectionRevisionConflict(mutation.expectedRevision, binding.revision)
+      }
+      const nextRevision = incrementRevision(binding.revision, 'Feishu task projection')
+      const nextGeneration = incrementRevision(binding.reconcile_generation, 'Feishu reconciliation')
+      const issueJson = canonicalizeJson(mutation.issue)
+      const advanced = database.prepare(`
+        UPDATE workbench_feishu_task_binding SET revision = ?, sync_state = 'attention',
+          sync_issue_json = ?, last_attempt_at = ?, reconcile_generation = ?, updated_at = ?
+        WHERE project_id = ? AND revision = ?
+      `).run(
+        nextRevision,
+        issueJson,
+        mutation.attemptedAt,
+        nextGeneration,
+        mutation.attemptedAt,
+        mutation.projectId,
+        binding.revision,
+      )
+      if (advanced.changes !== 1) throw new Error('Workbench task failure fact lost its CAS')
+      insertTaskReconciliation(database, {
+        projectId: mutation.projectId,
+        bindingRevision: nextRevision,
+        generation: nextGeneration,
+        outcome: 'attention',
+        issue: mutation.issue,
+        taskCount: 0,
+        snapshotDigest: null,
+        attemptedAt: mutation.attemptedAt,
+      })
+      const value = readProjectTasksProjection(database, {
+        organizationId: binding.organization_id,
+        teamId: binding.team_id,
+        projectId: binding.project_id,
+      })
+      if (value === null) throw new Error('Workbench failed reconciliation projection disappeared')
+      database.exec('COMMIT')
+      began = false
+      return Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'remote-rejected',
+          message: 'Feishu task reconciliation was rejected',
+          issue: cloneFeishuIssue(mutation.issue),
+        }),
+      })
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitFeishuTaskReference(
+    mutation: WorkbenchFeishuTaskReferenceMutation,
+    signal: AbortSignal,
+  ): Promise<ReferenceFeishuTaskResult> {
+    throwIfAborted(signal)
+    validateTaskReferenceMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = taskReferenceRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== FEISHU_TASK_REFERENCE_COMMAND_TYPE
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return taskIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeTaskReferenceResult(receipt.result_json, receipt)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+      assertValidLedger(database)
+      const binding = readTaskBindingRow(database, mutation.projectId)
+      if (binding === null) {
+        const project = readProjectScopeRow(
+          database,
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          mutation.projectId,
+        )
+        database.exec('ROLLBACK')
+        began = false
+        return project === null ? taskProjectNotFound(mutation.projectId) : taskListUnbound()
+      }
+      if (binding.revision !== mutation.expectedRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskProjectionRevisionConflict(mutation.expectedRevision, binding.revision)
+      }
+      const current = readTaskProjectionRow(database, mutation.projectId, mutation.task.taskGuid)
+      if (current?.visible === 1) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskAlreadyInProject(mutation.task.taskGuid)
+      }
+      const nextRevision = incrementRevision(binding.revision, 'Feishu task projection')
+      upsertTaskProjection(
+        database,
+        mutation.projectId,
+        mutation.task,
+        'explicit-reference',
+        nextRevision,
+        binding.reconcile_generation,
+        mutation.referencedAt,
+      )
+      const referenced = database.prepare(`
+        INSERT INTO workbench_feishu_task_reference (
+          project_id, task_guid, command_id, referenced_at
+        ) VALUES (?, ?, ?, ?)
+      `).run(
+        mutation.projectId,
+        mutation.task.taskGuid,
+        mutation.command.commandId,
+        mutation.referencedAt,
+      )
+      if (referenced.changes !== 1) throw new Error('Workbench task reference was not inserted')
+      advanceTaskBindingRevision(database, binding, nextRevision, mutation.referencedAt)
+      const value = readProjectTasksProjection(database, {
+        organizationId: binding.organization_id,
+        teamId: binding.team_id,
+        projectId: binding.project_id,
+      })
+      if (value === null) throw new Error('Workbench task reference projection disappeared')
+      const committed = Object.freeze({
+        ok: true,
+        value,
+        receipt: taskReceipt(mutation.command),
+      }) satisfies Extract<ReferenceFeishuTaskResult, { readonly ok: true }>
+      appendFeishuTaskLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: FEISHU_TASK_REFERENCE_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_REFERENCE_AUDIT_ACTION,
+        summaryCode: FEISHU_TASK_REFERENCE_SUMMARY,
+        objectType: FEISHU_TASK_OBJECT_TYPE,
+        objectId: mutation.task.taskGuid,
+        objectVersion: nextRevision,
+        changedFields: ['scope', 'task'],
+        outboxTopic: FEISHU_TASK_REFERENCE_OUTBOX_TOPIC,
+        result: committed,
+      })
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async commitFeishuTaskEvent(
+    mutation: WorkbenchFeishuTaskEventMutation,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskEventResult> {
+    throwIfAborted(signal)
+    validateTaskEventMutation(mutation)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const duplicate = database.prepare(`
+        SELECT project_id, outcome, projection_revision
+        FROM workbench_feishu_task_inbox WHERE event_id = ?
+      `).get(mutation.event.eventId) as {
+        readonly project_id: string
+        readonly outcome: string
+        readonly projection_revision: number | null
+      } | undefined
+      if (duplicate !== undefined) {
+        database.exec('COMMIT')
+        began = false
+        return Object.freeze({
+          outcome: 'duplicate',
+          projectId: duplicate.project_id,
+          projectionRevision: duplicate.projection_revision,
+        })
+      }
+      const binding = database.prepare(`
+        SELECT project_id, organization_id, team_id, revision, tasklist_guid,
+          tasklist_name, canonical_url, route_kind, route_generation, app_id,
+          open_id, tenant_key, created_by_workbench, remote_version, sync_state,
+          sync_issue_json, last_event_at, last_reconciled_at, last_attempt_at,
+          reconcile_generation, bound_at, updated_at
+        FROM workbench_feishu_task_binding WHERE tasklist_guid = ?
+      `).get(mutation.event.taskListGuid) as FeishuTaskBindingRow | undefined
+      if (binding === undefined) {
+        database.exec('COMMIT')
+        began = false
+        return Object.freeze({ outcome: 'ignored', projectId: null, projectionRevision: null })
+      }
+      const current = readTaskProjectionRow(database, binding.project_id, mutation.event.taskGuid)
+      const stale = current !== null
+        && compareRemoteVersion(mutation.event.remoteVersion, current.remote_version) <= 0
+      let outcome: 'applied' | 'stale' = stale ? 'stale' : 'applied'
+      let projectionRevision: number | null = null
+      if (!stale) {
+        const nextRevision = incrementRevision(binding.revision, 'Feishu task projection')
+        if (mutation.event.kind === 'upsert') {
+          if (mutation.task === null || mutation.task.taskGuid !== mutation.event.taskGuid
+            || mutation.task.remoteVersion !== mutation.event.remoteVersion) {
+            throw new Error('Workbench Feishu upsert event lacks its exact task observation')
+          }
+          const referenced = taskReferenceExists(database, binding.project_id, mutation.event.taskGuid)
+          upsertTaskProjection(
+            database,
+            binding.project_id,
+            mutation.task,
+            referenced ? 'explicit-reference' : 'primary-list',
+            nextRevision,
+            binding.reconcile_generation,
+            mutation.receivedAt,
+          )
+        } else if (current !== null) {
+          const referenced = taskReferenceExists(database, binding.project_id, mutation.event.taskGuid)
+          database.prepare(`
+            UPDATE workbench_feishu_task_projection SET visible = ?, scope = ?,
+              remote_version = ?, projection_revision = ?, updated_at = ?
+            WHERE project_id = ? AND task_guid = ?
+          `).run(
+            referenced ? 1 : 0,
+            referenced ? 'explicit-reference' : current.scope,
+            mutation.event.remoteVersion,
+            nextRevision,
+            mutation.receivedAt,
+            binding.project_id,
+            mutation.event.taskGuid,
+          )
+        }
+        database.prepare(`
+          UPDATE workbench_feishu_task_binding SET revision = ?, sync_state = 'healthy',
+            sync_issue_json = NULL, last_event_at = ?, updated_at = ?
+          WHERE project_id = ? AND revision = ?
+        `).run(
+          nextRevision,
+          mutation.event.occurredAt,
+          mutation.receivedAt,
+          binding.project_id,
+          binding.revision,
+        )
+        projectionRevision = nextRevision
+      }
+      const inserted = database.prepare(`
+        INSERT INTO workbench_feishu_task_inbox (
+          event_id, project_id, tasklist_guid, task_guid, event_kind,
+          remote_version, outcome, occurred_at, received_at, projection_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        mutation.event.eventId,
+        binding.project_id,
+        mutation.event.taskListGuid,
+        mutation.event.taskGuid,
+        mutation.event.kind,
+        mutation.event.remoteVersion,
+        outcome,
+        mutation.event.occurredAt,
+        mutation.receivedAt,
+        projectionRevision,
+      )
+      if (inserted.changes !== 1) throw new Error('Workbench Feishu task event was not inserted')
+      database.exec('COMMIT')
+      began = false
+      return Object.freeze({ outcome, projectId: binding.project_id, projectionRevision })
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async reserveFeishuTaskUpdate(
+    mutation: WorkbenchFeishuTaskUpdateReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskUpdateReservation> {
+    throwIfAborted(signal)
+    validateTaskUpdateReservationMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = taskUpdateRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== FEISHU_TASK_UPDATE_COMMAND_TYPE
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return Object.freeze({ state: 'rejected', result: taskIdempotencyConflict() })
+        }
+        assertValidLedger(database)
+        let effect = readTaskEffectByCommand(database, receipt.command_id)
+        if (effect === null) throw new Error('Workbench task update receipt lacks its effect')
+        if (effect.state === 'prepared') {
+          const route = taskRouteFromBinding(database, effect.project_id)
+          database.exec('COMMIT')
+          began = false
+          return Object.freeze({
+            state: 'deliver',
+            route,
+            effect: taskEffectProjection(effect),
+            receipt: taskReceiptFromRow(effect),
+          })
+        }
+        if (effect.state === 'inflight') {
+          markInflightTaskEffectUnknown(database, effect, mutation.preparedAt)
+          effect = readTaskEffect(database, effect.id)
+          if (effect === null || effect.state !== 'unknown') {
+            throw new Error('Workbench ambiguous task effect was not durably recovered')
+          }
+        }
+        const result = taskUpdateResultFromEffect(database, effect)
+        database.exec('COMMIT')
+        began = false
+        return Object.freeze({ state: 'replay', result })
+      }
+      assertValidLedger(database)
+      const binding = readTaskBindingRow(database, mutation.projectId)
+      if (binding === null) {
+        const project = readProjectScopeRow(
+          database,
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          mutation.projectId,
+        )
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          state: 'rejected',
+          result: project === null ? taskProjectNotFound(mutation.projectId) : taskUpdateListUnbound(),
+        })
+      }
+      if (binding.revision !== mutation.expectedRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          state: 'rejected',
+          result: taskUpdateProjectionRevisionConflict(mutation.expectedRevision, binding.revision),
+        })
+      }
+      const task = readTaskProjectionRow(database, mutation.projectId, mutation.taskGuid)
+      if (task === null || task.visible !== 1) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({ state: 'rejected', result: taskNotInProject(mutation.taskGuid) })
+      }
+      if (task.remote_version !== mutation.expectedRemoteVersion) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          state: 'rejected',
+          result: taskRemoteVersionConflict(
+            mutation.taskGuid,
+            mutation.expectedRemoteVersion,
+            task.remote_version,
+          ),
+        })
+      }
+      const route = taskRouteFromBinding(database, mutation.projectId)
+      const inserted = database.prepare(`
+        INSERT INTO workbench_feishu_task_effect (
+          id, project_id, organization_id, team_id, actor_id, task_guid,
+          expected_project_revision, expected_remote_version, changes_json,
+          request_hash, idempotency_key_hash, state, issue_json,
+          current_remote_version, attempt_count, command_id, audit_event_id,
+          outbox_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, 0, ?, ?, ?, ?, ?)
+      `).run(
+        mutation.effectId,
+        mutation.projectId,
+        mutation.command.actor.organizationId,
+        mutation.command.actor.teamId,
+        mutation.command.actor.id,
+        mutation.taskGuid,
+        mutation.expectedRevision,
+        mutation.expectedRemoteVersion,
+        canonicalizeJson(mutation.changes),
+        requestHash,
+        keyHash,
+        mutation.command.commandId,
+        mutation.command.auditEventId,
+        mutation.command.outboxId,
+        mutation.preparedAt,
+        mutation.preparedAt,
+      )
+      if (inserted.changes !== 1) throw new Error('Workbench task effect was not reserved')
+      const effect: FeishuTaskMutationEffectProjection = Object.freeze({
+        effectId: mutation.effectId,
+        taskGuid: mutation.taskGuid,
+        state: 'prepared',
+        expectedRemoteVersion: mutation.expectedRemoteVersion,
+        createdAt: mutation.preparedAt,
+        updatedAt: mutation.preparedAt,
+      })
+      const accepted = Object.freeze({
+        ok: true,
+        value: effect,
+        receipt: taskReceipt(mutation.command),
+      })
+      appendFeishuTaskLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: FEISHU_TASK_UPDATE_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_UPDATE_AUDIT_ACTION,
+        summaryCode: FEISHU_TASK_UPDATE_SUMMARY,
+        objectType: FEISHU_TASK_OBJECT_TYPE,
+        objectId: mutation.taskGuid,
+        objectVersion: mutation.expectedRevision,
+        changedFields: ['remoteVersion', 'changes', 'effectState'],
+        outboxTopic: FEISHU_TASK_UPDATE_OUTBOX_TOPIC,
+        result: accepted,
+      })
+      database.exec('COMMIT')
+      began = false
+      return Object.freeze({
+        state: 'deliver',
+        route,
+        effect,
+        receipt: taskReceipt(mutation.command),
+      })
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async claimFeishuTaskUpdate(
+    effectId: string,
+    claimedAt: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    throwIfAborted(signal)
+    validateReference(effectId, 'Feishu task effect id')
+    canonicalInstant(claimedAt, 'Feishu task effect claimedAt')
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const effect = readTaskEffect(database, effectId)
+      if (effect === null || effect.state !== 'prepared') {
+        database.exec('COMMIT')
+        began = false
+        return false
+      }
+      const claimed = database.prepare(`
+        UPDATE workbench_feishu_task_effect
+        SET state = 'inflight', attempt_count = 1, updated_at = ?
+        WHERE id = ? AND state = 'prepared' AND attempt_count = 0
+      `).run(claimedAt, effectId)
+      if (claimed.changes !== 1) throw new Error('Workbench task effect claim lost its CAS')
+      const outbox = database.prepare(`
+        UPDATE workbench_outbox SET attempt_count = 1, updated_at = ?
+        WHERE id = ? AND state = 'pending' AND attempt_count = 0
+      `).run(claimedAt, effect.outbox_id)
+      if (outbox.changes !== 1) throw new Error('Workbench task effect Outbox was not claimed')
+      database.exec('COMMIT')
+      began = false
+      return true
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
+  async settleFeishuTaskUpdate(
+    effectId: string,
+    settlement: WorkbenchFeishuTaskUpdateSettlement,
+    signal: AbortSignal,
+  ): Promise<UpdateFeishuTaskResult> {
+    throwIfAborted(signal)
+    validateReference(effectId, 'Feishu task effect id')
+    validateTaskUpdateSettlement(settlement)
+    const database = this.requireDatabase()
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const effect = readTaskEffect(database, effectId)
+      if (effect === null) throw new Error('Workbench task effect does not exist')
+      if (effect.state !== 'inflight') {
+        const replay = effect.state === 'prepared'
+          ? taskInflightUnknown(effect)
+          : taskUpdateResultFromEffect(database, effect)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+      const binding = readTaskBindingRow(database, effect.project_id)
+      if (binding === null) throw new Error('Workbench task effect lost its binding')
+      const nextRevision = incrementRevision(binding.revision, 'Feishu task projection')
+      let nextState: FeishuTaskEffectRow['state']
+      let issue: FeishuConnectionIssue | null = null
+      let currentRemoteVersion: string | null = null
+      let outboxState: 'delivered' | 'unknown' | 'failed'
+      let outboxError: WorkbenchOutboxErrorCode | null
+      if (settlement.state === 'delivered') {
+        if (settlement.task.taskGuid !== effect.task_guid) {
+          throw new Error('Workbench task effect settlement changed task identity')
+        }
+        const current = readTaskProjectionRow(database, effect.project_id, effect.task_guid)
+        if (current === null) throw new Error('Workbench delivered task projection is missing')
+        upsertTaskProjection(
+          database,
+          effect.project_id,
+          settlement.task,
+          current.scope === 'explicit-reference' ? 'explicit-reference' : 'primary-list',
+          nextRevision,
+          binding.reconcile_generation,
+          settlement.settledAt,
+        )
+        nextState = 'delivered'
+        outboxState = 'delivered'
+        outboxError = null
+      } else if (settlement.state === 'conflict') {
+        if (settlement.current.taskGuid !== effect.task_guid) {
+          throw new Error('Workbench task conflict changed task identity')
+        }
+        const current = readTaskProjectionRow(database, effect.project_id, effect.task_guid)
+        if (current === null) throw new Error('Workbench conflicted task projection is missing')
+        upsertTaskProjection(
+          database,
+          effect.project_id,
+          settlement.current,
+          current.scope === 'explicit-reference' ? 'explicit-reference' : 'primary-list',
+          nextRevision,
+          binding.reconcile_generation,
+          settlement.settledAt,
+        )
+        nextState = 'conflict'
+        currentRemoteVersion = settlement.current.remoteVersion
+        outboxState = 'failed'
+        outboxError = 'definitive-rejection'
+      } else {
+        nextState = settlement.state
+        issue = cloneFeishuIssue(settlement.issue)
+        outboxState = settlement.state === 'unknown' ? 'unknown' : 'failed'
+        outboxError = settlement.state === 'unknown'
+          ? 'transport-ambiguous'
+          : 'definitive-rejection'
+      }
+      const settled = database.prepare(`
+        UPDATE workbench_feishu_task_effect SET state = ?, issue_json = ?,
+          current_remote_version = ?, updated_at = ?
+        WHERE id = ? AND state = 'inflight' AND attempt_count = 1
+      `).run(
+        nextState,
+        issue === null ? null : canonicalizeJson(issue),
+        currentRemoteVersion,
+        settlement.settledAt,
+        effectId,
+      )
+      if (settled.changes !== 1) throw new Error('Workbench task effect settlement lost its CAS')
+      const outbox = database.prepare(`
+        UPDATE workbench_outbox SET state = ?, error_code = ?, claim_token = NULL,
+          claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND state = 'pending'
+      `).run(outboxState, outboxError, settlement.settledAt, effect.outbox_id)
+      if (outbox.changes !== 1) throw new Error('Workbench task effect Outbox was not settled')
+      database.prepare(`
+        UPDATE workbench_feishu_task_binding SET revision = ?,
+          sync_state = CASE WHEN ? = 'unknown' THEN 'unknown' ELSE sync_state END,
+          sync_issue_json = CASE WHEN ? = 'unknown' THEN ? ELSE sync_issue_json END,
+          updated_at = ? WHERE project_id = ? AND revision = ?
+      `).run(
+        nextRevision,
+        nextState,
+        nextState,
+        issue === null ? null : canonicalizeJson(issue),
+        settlement.settledAt,
+        effect.project_id,
+        binding.revision,
+      )
+      const updated = readTaskEffect(database, effectId)
+      if (updated === null) throw new Error('Workbench settled task effect disappeared')
+      const result = taskUpdateResultFromEffect(database, updated)
+      database.exec('COMMIT')
+      began = false
+      return result
     } catch (error: unknown) {
       if (began) this.rollbackAfterFailure(database, error)
       throw error
@@ -4525,6 +5629,182 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     `)
     return
   }
+  if (targetVersion === 7) {
+    database.exec(`
+      CREATE TABLE workbench_feishu_task_binding (
+        project_id TEXT PRIMARY KEY CHECK (length(project_id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        tasklist_guid TEXT NOT NULL CHECK (length(tasklist_guid) BETWEEN 1 AND 256),
+        tasklist_name TEXT NOT NULL CHECK (length(tasklist_name) BETWEEN 1 AND 100),
+        canonical_url TEXT NOT NULL CHECK (length(canonical_url) BETWEEN 1 AND 2048),
+        route_kind TEXT NOT NULL CHECK (route_kind IN ('bot', 'user')),
+        route_generation INTEGER NOT NULL CHECK (route_generation > 0),
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND ${MAX_FEISHU_APP_ID_LENGTH}),
+        open_id TEXT NOT NULL CHECK (length(open_id) BETWEEN 1 AND ${MAX_FEISHU_OPEN_ID_LENGTH}),
+        tenant_key TEXT CHECK (tenant_key IS NULL OR length(tenant_key) BETWEEN 1 AND 128),
+        created_by_workbench INTEGER NOT NULL CHECK (created_by_workbench IN (0, 1)),
+        remote_version TEXT NOT NULL CHECK (length(remote_version) BETWEEN 1 AND 64),
+        sync_state TEXT NOT NULL CHECK (sync_state IN ('healthy', 'attention', 'unknown')),
+        sync_issue_json TEXT,
+        last_event_at TEXT,
+        last_reconciled_at TEXT,
+        last_attempt_at TEXT,
+        reconcile_generation INTEGER NOT NULL CHECK (reconcile_generation >= 0),
+        bound_at TEXT NOT NULL CHECK (length(bound_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (tasklist_guid),
+        UNIQUE (project_id, organization_id, team_id),
+        FOREIGN KEY (project_id, organization_id, team_id)
+          REFERENCES workbench_project (id, organization_id, team_id),
+        FOREIGN KEY (organization_id, team_id, route_kind, route_generation, app_id)
+          REFERENCES workbench_feishu_route_version (
+            organization_id, team_id, kind, generation, app_id
+          )
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_projection (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        task_guid TEXT NOT NULL CHECK (length(task_guid) BETWEEN 1 AND 256),
+        scope TEXT NOT NULL CHECK (scope IN ('primary-list', 'explicit-reference')),
+        visible INTEGER NOT NULL CHECK (visible IN (0, 1)),
+        parent_task_guid TEXT CHECK (parent_task_guid IS NULL OR length(parent_task_guid) BETWEEN 1 AND 256),
+        task_id TEXT CHECK (task_id IS NULL OR length(task_id) BETWEEN 1 AND 256),
+        summary TEXT NOT NULL CHECK (length(summary) BETWEEN 1 AND ${MAX_FEISHU_TASK_TEXT_LENGTH}),
+        description TEXT NOT NULL CHECK (length(description) <= ${MAX_FEISHU_TASK_TEXT_LENGTH}),
+        assignees_json TEXT NOT NULL CHECK (length(assignees_json) > 0),
+        followers_json TEXT NOT NULL CHECK (length(followers_json) > 0),
+        comments_json TEXT NOT NULL CHECK (length(comments_json) > 0),
+        completed INTEGER NOT NULL CHECK (completed IN (0, 1)),
+        completed_at TEXT,
+        canonical_url TEXT NOT NULL CHECK (length(canonical_url) BETWEEN 1 AND 2048),
+        remote_version TEXT NOT NULL CHECK (length(remote_version) BETWEEN 1 AND 64),
+        projection_revision INTEGER NOT NULL CHECK (projection_revision > 0),
+        reconcile_generation INTEGER NOT NULL CHECK (reconcile_generation >= 0),
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        PRIMARY KEY (project_id, task_guid),
+        FOREIGN KEY (project_id) REFERENCES workbench_feishu_task_binding (project_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_reference (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        task_guid TEXT NOT NULL CHECK (length(task_guid) BETWEEN 1 AND 256),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        referenced_at TEXT NOT NULL CHECK (length(referenced_at) > 0),
+        PRIMARY KEY (project_id, task_guid),
+        FOREIGN KEY (project_id, task_guid)
+          REFERENCES workbench_feishu_task_projection (project_id, task_guid)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_inbox (
+        event_id TEXT PRIMARY KEY CHECK (length(event_id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        tasklist_guid TEXT NOT NULL CHECK (length(tasklist_guid) BETWEEN 1 AND 256),
+        task_guid TEXT NOT NULL CHECK (length(task_guid) BETWEEN 1 AND 256),
+        event_kind TEXT NOT NULL CHECK (event_kind IN ('upsert', 'removed')),
+        remote_version TEXT NOT NULL CHECK (length(remote_version) BETWEEN 1 AND 64),
+        outcome TEXT NOT NULL CHECK (outcome IN ('applied', 'stale', 'ignored')),
+        occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
+        received_at TEXT NOT NULL CHECK (length(received_at) > 0),
+        projection_revision INTEGER CHECK (projection_revision IS NULL OR projection_revision > 0),
+        FOREIGN KEY (project_id) REFERENCES workbench_feishu_task_binding (project_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_reconciliation (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence > 0),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        binding_revision INTEGER NOT NULL CHECK (binding_revision > 0),
+        reconcile_generation INTEGER NOT NULL CHECK (reconcile_generation > 0),
+        outcome TEXT NOT NULL CHECK (outcome IN ('healthy', 'attention')),
+        issue_json TEXT,
+        task_count INTEGER NOT NULL CHECK (task_count BETWEEN 0 AND ${MAX_FEISHU_TASKS_PER_PROJECT}),
+        snapshot_digest TEXT,
+        attempted_at TEXT NOT NULL CHECK (length(attempted_at) > 0),
+        UNIQUE (project_id, reconcile_generation),
+        FOREIGN KEY (project_id) REFERENCES workbench_feishu_task_binding (project_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_effect (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        task_guid TEXT NOT NULL CHECK (length(task_guid) BETWEEN 1 AND 256),
+        expected_project_revision INTEGER NOT NULL CHECK (expected_project_revision > 0),
+        expected_remote_version TEXT NOT NULL CHECK (length(expected_remote_version) BETWEEN 1 AND 64),
+        changes_json TEXT NOT NULL CHECK (length(changes_json) > 0),
+        request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+        idempotency_key_hash TEXT NOT NULL CHECK (length(idempotency_key_hash) = 64),
+        state TEXT NOT NULL CHECK (state IN (
+          'prepared', 'inflight', 'delivered', 'unknown', 'failed', 'conflict'
+        )),
+        issue_json TEXT,
+        current_remote_version TEXT,
+        attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 1),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        audit_event_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        outbox_id TEXT NOT NULL UNIQUE REFERENCES workbench_outbox (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (organization_id, actor_id, idempotency_key_hash),
+        UNIQUE (project_id, task_guid, id),
+        FOREIGN KEY (project_id, task_guid)
+          REFERENCES workbench_feishu_task_projection (project_id, task_guid)
+      ) STRICT;
+
+      CREATE INDEX workbench_feishu_task_projection_visible
+        ON workbench_feishu_task_projection (project_id, visible, task_guid);
+      CREATE INDEX workbench_feishu_task_effect_project
+        ON workbench_feishu_task_effect (project_id, created_at DESC, id);
+      CREATE INDEX workbench_feishu_task_inbox_project
+        ON workbench_feishu_task_inbox (project_id, received_at, event_id);
+
+      CREATE TRIGGER workbench_feishu_task_binding_scope_no_update BEFORE UPDATE OF
+        project_id, organization_id, team_id, tasklist_guid, route_kind,
+        route_generation, app_id, open_id, tenant_key, created_by_workbench, bound_at
+        ON workbench_feishu_task_binding
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task-list binding scope is immutable'); END;
+      CREATE TRIGGER workbench_feishu_task_binding_no_delete
+        BEFORE DELETE ON workbench_feishu_task_binding
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task-list bindings cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_task_reference_no_update
+        BEFORE UPDATE ON workbench_feishu_task_reference
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task references are immutable'); END;
+      CREATE TRIGGER workbench_feishu_task_reference_no_delete
+        BEFORE DELETE ON workbench_feishu_task_reference
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task references cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_task_inbox_no_update
+        BEFORE UPDATE ON workbench_feishu_task_inbox
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task Inbox is append-only'); END;
+      CREATE TRIGGER workbench_feishu_task_inbox_no_delete
+        BEFORE DELETE ON workbench_feishu_task_inbox
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task Inbox cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_task_reconciliation_no_update
+        BEFORE UPDATE ON workbench_feishu_task_reconciliation
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task reconciliations are append-only'); END;
+      CREATE TRIGGER workbench_feishu_task_reconciliation_no_delete
+        BEFORE DELETE ON workbench_feishu_task_reconciliation
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task reconciliations cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_task_effect_intent_no_update BEFORE UPDATE OF
+        id, project_id, organization_id, team_id, actor_id, task_guid,
+        expected_project_revision, expected_remote_version, changes_json,
+        request_hash, idempotency_key_hash, command_id, audit_event_id,
+        outbox_id, created_at ON workbench_feishu_task_effect
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task effect intent is immutable'); END;
+      CREATE TRIGGER workbench_feishu_task_effect_no_delete
+        BEFORE DELETE ON workbench_feishu_task_effect
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu task effects cannot be deleted'); END
+    `)
+    return
+  }
   throw new Error(`missing Workbench migration ${targetVersion}`)
 }
 
@@ -4603,6 +5883,31 @@ function validateSchema(database: DatabaseSync): void {
       route_generation, identity_epoch, connection_revision, result,
       requested_resource_probe_json, checked_at
     FROM workbench_feishu_verification LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, organization_id, team_id, revision, tasklist_guid,
+      route_kind, route_generation, sync_state, reconcile_generation
+    FROM workbench_feishu_task_binding LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, task_guid, scope, visible, remote_version, projection_revision
+    FROM workbench_feishu_task_projection LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, task_guid, command_id, referenced_at
+    FROM workbench_feishu_task_reference LIMIT 1
+  `)
+  database.prepare(`
+    SELECT event_id, project_id, task_guid, event_kind, outcome
+    FROM workbench_feishu_task_inbox LIMIT 1
+  `)
+  database.prepare(`
+    SELECT sequence, project_id, reconcile_generation, outcome
+    FROM workbench_feishu_task_reconciliation LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, project_id, task_guid, state, attempt_count, command_id
+    FROM workbench_feishu_task_effect LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
@@ -7107,6 +8412,32 @@ function auditEventFromRow(row: AuditRow): AuditEvent {
       summary: { code: PROJECT_RESPONSIBILITY_SUMMARY, changedFields: Object.freeze(expectedFields) },
     }
   }
+  const taskVocabulary = storedFeishuTaskVocabulary(row.command_type)
+  if (taskVocabulary !== null) {
+    const projectId = nullableString(row.project_id, 'Audit Project id')
+    if (projectId === null
+      || row.action !== taskVocabulary.auditAction
+      || row.reason_code !== taskVocabulary.reason
+      || row.object_type !== taskVocabulary.objectType
+      || row.summary_code !== taskVocabulary.summaryCode
+      || (row.command_type === FEISHU_TASK_LIST_BIND_COMMAND_TYPE && objectId !== projectId)
+      || changedFields.length !== taskVocabulary.changedFields.length
+      || changedFields.some((field, index) => field !== taskVocabulary.changedFields[index])) {
+      throw new Error('Workbench database contains unsupported Feishu task audit fields')
+    }
+    return {
+      ...common,
+      action: taskVocabulary.auditAction,
+      scope: { organizationId, teamId, projectId },
+      reason: { code: taskVocabulary.reason },
+      object: { type: taskVocabulary.objectType, id: objectId, version: objectVersion },
+      command: { id: commandId, type: taskVocabulary.commandType },
+      summary: {
+        code: taskVocabulary.summaryCode,
+        changedFields: Object.freeze([...taskVocabulary.changedFields]),
+      },
+    }
+  }
   const feishuVocabulary = storedFeishuVocabulary(row.command_type, row.summary_code)
   if (feishuVocabulary !== null) {
     if (row.action !== feishuVocabulary.auditAction
@@ -7460,6 +8791,7 @@ function assertValidLedger(database: DatabaseSync): void {
   assertValidAudit(database)
   assertValidSuggestedChanges(database)
   assertValidFeishuConnections(database)
+  assertValidFeishuTasks(database)
   const counts = database.prepare(`
     SELECT
       (SELECT COUNT(*) FROM workbench_audit_event) AS audit_count,
@@ -7686,6 +9018,202 @@ function assertValidFeishuConnections(database: DatabaseSync): void {
   if (orphanRoutes !== 0) throw new Error('Workbench Feishu route escaped its connection')
 }
 
+function assertValidFeishuTasks(database: DatabaseSync): void {
+  const bindings = database.prepare(`
+    SELECT project_id, organization_id, team_id, revision, tasklist_guid,
+      tasklist_name, canonical_url, route_kind, route_generation, app_id,
+      open_id, tenant_key, created_by_workbench, remote_version, sync_state,
+      sync_issue_json, last_event_at, last_reconciled_at, last_attempt_at,
+      reconcile_generation, bound_at, updated_at
+    FROM workbench_feishu_task_binding ORDER BY project_id
+  `).all() as unknown as FeishuTaskBindingRow[]
+  for (const binding of bindings) {
+    validateStoredTaskBinding(binding)
+    const project = readProjectById(database, binding.project_id)
+    if (project === null || project.organization_id !== binding.organization_id
+      || project.team_id !== binding.team_id) {
+      throw new Error('Workbench Feishu task-list binding escaped its Project scope')
+    }
+    const route = taskRouteFromBinding(database, binding.project_id)
+    if (route.kind !== binding.route_kind || route.routeGeneration !== binding.route_generation
+      || route.actor.openId !== binding.open_id || route.actor.tenantKey !== binding.tenant_key) {
+      throw new Error('Workbench Feishu task-list binding escaped its exact identity route')
+    }
+
+    const taskRows = database.prepare(`
+      SELECT project_id, task_guid, scope, visible, parent_task_guid, task_id,
+        summary, description, assignees_json, followers_json, comments_json,
+        completed, completed_at, canonical_url, remote_version,
+        projection_revision, reconcile_generation, created_at, updated_at
+      FROM workbench_feishu_task_projection WHERE project_id = ?
+      ORDER BY task_guid LIMIT ${MAX_FEISHU_TASKS_PER_PROJECT + 1}
+    `).all(binding.project_id) as unknown as FeishuTaskProjectionRow[]
+    if (taskRows.length > MAX_FEISHU_TASKS_PER_PROJECT) {
+      throw new Error('Workbench Feishu task projection exceeds its bound')
+    }
+    for (const row of taskRows) {
+      taskProjectionFromRow(row)
+      if (row.project_id !== binding.project_id
+        || row.projection_revision > binding.revision
+        || row.reconcile_generation > binding.reconcile_generation) {
+        throw new Error('Workbench Feishu task projection escaped its binding revision')
+      }
+      const referenced = taskReferenceExists(database, row.project_id, row.task_guid)
+      if ((row.scope === 'explicit-reference') !== referenced
+        || (referenced && row.visible !== 1)) {
+        throw new Error('Workbench Feishu task visibility escaped its explicit reference')
+      }
+    }
+
+    const references = database.prepare(`
+      SELECT project_id, task_guid, command_id, referenced_at
+      FROM workbench_feishu_task_reference WHERE project_id = ? ORDER BY task_guid
+    `).all(binding.project_id) as unknown as Array<{
+      readonly project_id: string
+      readonly task_guid: string
+      readonly command_id: string
+      readonly referenced_at: string
+    }>
+    for (const reference of references) {
+      validateFeishuResourceId(reference.task_guid, 'Stored referenced task guid')
+      validateBoundedReference(reference.command_id, 'Stored task reference command id')
+      canonicalInstant(reference.referenced_at, 'Stored task referencedAt')
+      const task = readTaskProjectionRow(database, reference.project_id, reference.task_guid)
+      if (task === null || task.scope !== 'explicit-reference' || task.visible !== 1) {
+        throw new Error('Workbench Feishu task reference lacks its visible projection')
+      }
+    }
+
+    const reconciliations = database.prepare(`
+      SELECT sequence, binding_revision, reconcile_generation, outcome, issue_json,
+        task_count, snapshot_digest, attempted_at
+      FROM workbench_feishu_task_reconciliation WHERE project_id = ?
+      ORDER BY reconcile_generation
+    `).all(binding.project_id) as unknown as Array<{
+      readonly sequence: number
+      readonly binding_revision: number
+      readonly reconcile_generation: number
+      readonly outcome: string
+      readonly issue_json: string | null
+      readonly task_count: number
+      readonly snapshot_digest: string | null
+      readonly attempted_at: string
+    }>
+    if (reconciliations.length !== binding.reconcile_generation) {
+      throw new Error('Workbench Feishu reconciliation generation is incomplete')
+    }
+    for (let index = 0; index < reconciliations.length; index += 1) {
+      const reconciliation = reconciliations[index]
+      if (reconciliation === undefined || reconciliation.reconcile_generation !== index + 1
+        || reconciliation.binding_revision < 1
+        || reconciliation.binding_revision > binding.revision
+        || !Number.isSafeInteger(reconciliation.task_count)
+        || reconciliation.task_count < 0
+        || reconciliation.task_count > MAX_FEISHU_TASKS_PER_PROJECT) {
+        throw new Error('Workbench Feishu reconciliation history is invalid')
+      }
+      positiveInteger(reconciliation.sequence, 'Stored task reconciliation sequence')
+      canonicalInstant(reconciliation.attempted_at, 'Stored task reconciliation attemptedAt')
+      if (reconciliation.outcome === 'healthy') {
+        if (reconciliation.issue_json !== null || reconciliation.snapshot_digest === null
+          || !reconciliation.snapshot_digest.startsWith('sha256:')
+          || !SHA256_HEX.test(reconciliation.snapshot_digest.slice(7))) {
+          throw new Error('Workbench healthy Feishu reconciliation lacks its snapshot fact')
+        }
+      } else if (reconciliation.outcome === 'attention') {
+        if (reconciliation.issue_json === null || reconciliation.snapshot_digest !== null) {
+          throw new Error('Workbench failed Feishu reconciliation lacks its issue fact')
+        }
+        decodeFeishuIssue(reconciliation.issue_json)
+      } else {
+        throw new Error('Workbench Feishu reconciliation outcome is invalid')
+      }
+    }
+
+    const inbox = database.prepare(`
+      SELECT event_id, project_id, tasklist_guid, task_guid, event_kind,
+        remote_version, outcome, occurred_at, received_at, projection_revision
+      FROM workbench_feishu_task_inbox WHERE project_id = ? ORDER BY received_at, event_id
+    `).all(binding.project_id) as unknown as Array<{
+      readonly event_id: string
+      readonly project_id: string
+      readonly tasklist_guid: string
+      readonly task_guid: string
+      readonly event_kind: string
+      readonly remote_version: string
+      readonly outcome: string
+      readonly occurred_at: string
+      readonly received_at: string
+      readonly projection_revision: number | null
+    }>
+    for (const event of inbox) {
+      validateBoundedReference(event.event_id, 'Stored task event id')
+      validateFeishuResourceId(event.task_guid, 'Stored task event guid')
+      validateRemoteVersion(event.remote_version, 'Stored task event remote version')
+      canonicalInstant(event.occurred_at, 'Stored task event occurredAt')
+      canonicalInstant(event.received_at, 'Stored task event receivedAt')
+      if (event.tasklist_guid !== binding.tasklist_guid
+        || (event.event_kind !== 'upsert' && event.event_kind !== 'removed')
+        || (event.outcome !== 'applied' && event.outcome !== 'stale'
+          && event.outcome !== 'ignored')) {
+        throw new Error('Workbench Feishu task event escaped its binding')
+      }
+      if (event.outcome === 'applied') {
+        if (event.projection_revision === null || event.projection_revision > binding.revision) {
+          throw new Error('Workbench applied task event lacks its projection revision')
+        }
+        positiveInteger(event.projection_revision, 'Stored task event projection revision')
+      } else if (event.projection_revision !== null) {
+        throw new Error('Workbench unapplied task event advanced the projection')
+      }
+    }
+
+    const effects = database.prepare(`
+      SELECT id, project_id, organization_id, team_id, actor_id, task_guid,
+        expected_project_revision, expected_remote_version, changes_json,
+        request_hash, idempotency_key_hash, state, issue_json,
+        current_remote_version, attempt_count, command_id, audit_event_id,
+        outbox_id, created_at, updated_at
+      FROM workbench_feishu_task_effect WHERE project_id = ? ORDER BY created_at, id
+    `).all(binding.project_id) as unknown as FeishuTaskEffectRow[]
+    for (const effect of effects) {
+      validateStoredTaskEffect(effect)
+      if (effect.organization_id !== binding.organization_id || effect.team_id !== binding.team_id) {
+        throw new Error('Workbench Feishu task effect escaped its authorized scope')
+      }
+      const state = taskEffectState(effect.state)
+      const claimed = state !== 'prepared'
+      if (effect.attempt_count !== (claimed ? 1 : 0)
+        || ((state === 'unknown' || state === 'failed') !== (effect.issue_json !== null))
+        || (state === 'conflict') !== (effect.current_remote_version !== null)) {
+        throw new Error('Workbench Feishu task effect state facts are inconsistent')
+      }
+      if (effect.issue_json !== null) decodeFeishuIssue(effect.issue_json)
+      if (effect.current_remote_version !== null) {
+        validateRemoteVersion(effect.current_remote_version, 'Stored task conflict remote version')
+      }
+      const outbox = database.prepare(`
+        SELECT state, attempt_count, error_code FROM workbench_outbox WHERE id = ?
+      `).get(effect.outbox_id) as {
+        readonly state: string
+        readonly attempt_count: number
+        readonly error_code: string | null
+      } | undefined
+      const expectedOutboxState = state === 'delivered'
+        ? 'delivered'
+        : state === 'unknown'
+          ? 'unknown'
+          : state === 'failed' || state === 'conflict'
+            ? 'failed'
+            : 'pending'
+      if (outbox === undefined || outbox.state !== expectedOutboxState
+        || outbox.attempt_count !== (claimed ? 1 : 0)) {
+        throw new Error('Workbench Feishu task effect disagrees with its Outbox state')
+      }
+    }
+  }
+}
+
 function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrityRow): void {
   positiveInteger(row.audit_sequence, 'Audit sequence')
   if (!SHA256_HEX.test(row.request_hash)
@@ -7720,6 +9248,10 @@ function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrity
   }
   if (row.command_type === PROJECT_RESPONSIBILITY_COMMAND_TYPE) {
     assertValidProjectResponsibilityReceipt(database, row)
+    return
+  }
+  if (storedFeishuTaskVocabulary(row.command_type) !== null) {
+    assertValidFeishuTaskReceipt(database, row)
     return
   }
   if (storedFeishuVocabulary(row.command_type, row.audit_summary_code) !== null) {
@@ -8051,6 +9583,149 @@ function assertValidProjectResponsibilityReceipt(
     throw new Error(
       'Workbench Project Responsibility receipt does not match its request hash or redacted Outbox intent',
     )
+  }
+}
+
+function assertValidFeishuTaskReceipt(
+  database: DatabaseSync,
+  row: ReceiptIntegrityRow,
+): void {
+  const vocabulary = storedFeishuTaskVocabulary(row.command_type)
+  if (vocabulary === null
+    || row.audit_action !== vocabulary.auditAction
+    || row.audit_reason_code !== vocabulary.reason
+    || row.audit_object_type !== vocabulary.objectType
+    || row.audit_summary_code !== vocabulary.summaryCode
+    || row.audit_project_id === null
+    || row.outbox_topic !== vocabulary.outboxTopic
+    || row.outbox_project_id !== row.audit_project_id
+    || row.outbox_object_type !== vocabulary.objectType
+    || row.outbox_object_id !== row.audit_object_id) {
+    throw new Error('Workbench Feishu task receipt has mismatched audit or Outbox vocabulary')
+  }
+  let expectedRequestHash: string
+  if (row.command_type === FEISHU_TASK_LIST_BIND_COMMAND_TYPE) {
+    const decoded = decodeTaskListBindingResult(row.result_json, row)
+    const binding = decoded.value.binding
+    if (binding === null || decoded.value.projectId !== row.audit_project_id
+      || row.audit_object_id !== decoded.value.projectId
+      || row.audit_object_version !== decoded.value.revision
+      || decoded.value.revision !== 1) {
+      throw new Error('Workbench task-list receipt does not match its committed projection')
+    }
+    const historicalConnectionRevision = integerField(database.prepare(`
+      SELECT COUNT(*) AS count FROM workbench_audit_event
+      WHERE organization_id = ? AND team_id = ? AND sequence < ?
+        AND command_type IN (?, ?, ?, ?)
+    `).get(
+      row.audit_organization_id,
+      row.audit_team_id,
+      row.audit_sequence,
+      FEISHU_ROUTE_SET_COMMAND_TYPE,
+      FEISHU_ROUTE_RESET_COMMAND_TYPE,
+      FEISHU_ROUTE_DISABLE_COMMAND_TYPE,
+      FEISHU_VERIFY_COMMAND_TYPE,
+    ), 'count')
+    expectedRequestHash = digest(canonicalizeJson({
+      commandType: FEISHU_TASK_LIST_BIND_COMMAND_TYPE,
+      target: FEISHU_TASK_LIST_BIND_OBJECT_TYPE,
+      scope: {
+        organizationId: row.audit_organization_id,
+        teamId: row.audit_team_id,
+        projectId: row.audit_project_id,
+      },
+      intent: binding.createdByWorkbench
+        ? { mode: 'create', name: binding.name }
+        : { mode: 'existing', taskListGuid: binding.taskListGuid },
+      expectedBindingRevision: null,
+      expectedConnectionRevision: historicalConnectionRevision,
+      expectedRouteGeneration: binding.identity.routeGeneration,
+      routeKind: binding.identity.kind,
+      reason: vocabulary.reason,
+      causationId: row.audit_causation_id,
+    }))
+  } else if (row.command_type === FEISHU_TASK_REFERENCE_COMMAND_TYPE) {
+    const decoded = decodeTaskReferenceResult(row.result_json, row)
+    if (decoded.value.projectId !== row.audit_project_id
+      || decoded.value.revision !== row.audit_object_version
+      || !decoded.value.tasks.some(task =>
+        task.taskGuid === row.audit_object_id && task.scope === 'explicit-reference')) {
+      throw new Error('Workbench task reference receipt does not match its projection')
+    }
+    expectedRequestHash = digest(canonicalizeJson({
+      commandType: FEISHU_TASK_REFERENCE_COMMAND_TYPE,
+      target: FEISHU_TASK_OBJECT_TYPE,
+      scope: {
+        organizationId: row.audit_organization_id,
+        teamId: row.audit_team_id,
+        projectId: row.audit_project_id,
+      },
+      taskGuid: row.audit_object_id,
+      expectedRevision: row.audit_object_version - 1,
+      reason: vocabulary.reason,
+      causationId: row.audit_causation_id,
+    }))
+  } else {
+    let parsed: unknown
+    try { parsed = JSON.parse(row.result_json) } catch {
+      throw new Error('Workbench task update receipt contains invalid JSON')
+    }
+    if (canonicalizeJson(parsed) !== row.result_json) {
+      throw new Error('Workbench task update receipt is not canonical JSON')
+    }
+    const committed = objectValue(parsed, 'Workbench task update receipt')
+    if (committed.ok !== true) throw new Error('Workbench task update receipt is not committed')
+    const receipt = objectValue(committed.receipt, 'Workbench task update command receipt')
+    if (receipt.commandId !== row.command_id || receipt.auditEventId !== row.audit_event_id
+      || receipt.outboxId !== row.outbox_id) {
+      throw new Error('Workbench task update receipt references mismatched ledger artifacts')
+    }
+    const projectedEffect = decodeStoredTaskEffectProjection(committed.value)
+    const effect = readTaskEffectByCommand(database, row.command_id)
+    if (effect === null || effect.id !== projectedEffect.effectId
+      || effect.task_guid !== projectedEffect.taskGuid
+      || row.audit_object_id !== effect.task_guid
+      || row.audit_object_version !== effect.expected_project_revision
+      || effect.audit_event_id !== row.audit_event_id
+      || effect.outbox_id !== row.outbox_id
+      || effect.organization_id !== row.audit_organization_id
+      || effect.team_id !== row.audit_team_id
+      || effect.project_id !== row.audit_project_id) {
+      throw new Error('Workbench task update receipt does not match its durable effect')
+    }
+    let changes: unknown
+    try { changes = JSON.parse(effect.changes_json) } catch {
+      throw new Error('Workbench task update effect contains invalid changes JSON')
+    }
+    expectedRequestHash = digest(canonicalizeJson({
+      commandType: FEISHU_TASK_UPDATE_COMMAND_TYPE,
+      target: FEISHU_TASK_OBJECT_TYPE,
+      scope: {
+        organizationId: row.audit_organization_id,
+        teamId: row.audit_team_id,
+        projectId: row.audit_project_id,
+      },
+      taskGuid: effect.task_guid,
+      expectedRevision: effect.expected_project_revision,
+      expectedRemoteVersion: effect.expected_remote_version,
+      changes,
+      reason: vocabulary.reason,
+      causationId: row.audit_causation_id,
+    }))
+  }
+  const expectedPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    requestHash: row.request_hash,
+    projectId: row.audit_project_id,
+    objectType: vocabulary.objectType,
+    objectId: row.audit_object_id,
+    objectVersion: row.audit_object_version,
+    causationId: row.audit_causation_id,
+  })
+  if (row.request_hash !== expectedRequestHash || row.outbox_payload_json !== expectedPayload) {
+    throw new Error('Workbench Feishu task receipt has invalid request or Outbox facts')
   }
 }
 
@@ -8498,6 +10173,24 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
       objectType: PROJECT_RESPONSIBILITY_OBJECT_TYPE,
     }
   } else {
+    const taskVocabulary = storedFeishuTaskVocabulary(row.command_type)
+    if (taskVocabulary !== null) {
+      if (row.action !== taskVocabulary.auditAction
+        || row.reason_code !== taskVocabulary.reason
+        || row.object_type !== taskVocabulary.objectType
+        || row.summary_code !== taskVocabulary.summaryCode
+        || projectId === null
+        || (row.command_type === FEISHU_TASK_LIST_BIND_COMMAND_TYPE
+          && projectId !== row.object_id)) {
+        throw new Error('Workbench database contains an unsupported Feishu task Activity row')
+      }
+      vocabulary = {
+        action: taskVocabulary.auditAction,
+        reason: taskVocabulary.reason,
+        summaryCode: taskVocabulary.summaryCode,
+        objectType: taskVocabulary.objectType,
+      }
+    } else {
     const feishuVocabulary = storedFeishuVocabulary(row.command_type, row.summary_code)
     if (feishuVocabulary !== null) {
       if (row.action !== feishuVocabulary.auditAction
@@ -8529,6 +10222,7 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
       reason: suggestedVocabulary.reason,
       summaryCode: suggestedVocabulary.summaryCode,
       objectType: SUGGESTED_CHANGE_OBJECT_TYPE,
+    }
     }
     }
   }
@@ -9138,6 +10832,66 @@ interface StoredFeishuVocabulary {
   readonly summaryCode: WorkbenchActivitySummaryCode
   readonly changedFields: readonly string[]
   readonly outboxTopic: string
+}
+
+interface StoredFeishuTaskVocabulary {
+  readonly commandType:
+    | typeof FEISHU_TASK_LIST_BIND_COMMAND_TYPE
+    | typeof FEISHU_TASK_REFERENCE_COMMAND_TYPE
+    | typeof FEISHU_TASK_UPDATE_COMMAND_TYPE
+  readonly auditAction:
+    | typeof FEISHU_TASK_LIST_BIND_AUDIT_ACTION
+    | typeof FEISHU_TASK_REFERENCE_AUDIT_ACTION
+    | typeof FEISHU_TASK_UPDATE_AUDIT_ACTION
+  readonly reason:
+    | typeof FEISHU_TASK_LIST_BIND_REASON
+    | typeof FEISHU_TASK_REFERENCE_REASON
+    | typeof FEISHU_TASK_UPDATE_REASON
+  readonly summaryCode:
+    | typeof FEISHU_TASK_LIST_BIND_SUMMARY
+    | typeof FEISHU_TASK_REFERENCE_SUMMARY
+    | typeof FEISHU_TASK_UPDATE_SUMMARY
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+  readonly objectType:
+    | typeof FEISHU_TASK_LIST_BIND_OBJECT_TYPE
+    | typeof FEISHU_TASK_OBJECT_TYPE
+}
+
+function storedFeishuTaskVocabulary(commandType: string): StoredFeishuTaskVocabulary | null {
+  switch (commandType) {
+    case FEISHU_TASK_LIST_BIND_COMMAND_TYPE:
+      return {
+        commandType: FEISHU_TASK_LIST_BIND_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_LIST_BIND_AUDIT_ACTION,
+        reason: FEISHU_TASK_LIST_BIND_REASON,
+        summaryCode: FEISHU_TASK_LIST_BIND_SUMMARY,
+        changedFields: ['taskList', 'tasks', 'sync'],
+        outboxTopic: FEISHU_TASK_LIST_BIND_OUTBOX_TOPIC,
+        objectType: FEISHU_TASK_LIST_BIND_OBJECT_TYPE,
+      }
+    case FEISHU_TASK_REFERENCE_COMMAND_TYPE:
+      return {
+        commandType: FEISHU_TASK_REFERENCE_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_REFERENCE_AUDIT_ACTION,
+        reason: FEISHU_TASK_REFERENCE_REASON,
+        summaryCode: FEISHU_TASK_REFERENCE_SUMMARY,
+        changedFields: ['scope', 'task'],
+        outboxTopic: FEISHU_TASK_REFERENCE_OUTBOX_TOPIC,
+        objectType: FEISHU_TASK_OBJECT_TYPE,
+      }
+    case FEISHU_TASK_UPDATE_COMMAND_TYPE:
+      return {
+        commandType: FEISHU_TASK_UPDATE_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_UPDATE_AUDIT_ACTION,
+        reason: FEISHU_TASK_UPDATE_REASON,
+        summaryCode: FEISHU_TASK_UPDATE_SUMMARY,
+        changedFields: ['remoteVersion', 'changes', 'effectState'],
+        outboxTopic: FEISHU_TASK_UPDATE_OUTBOX_TOPIC,
+        objectType: FEISHU_TASK_OBJECT_TYPE,
+      }
+    default: return null
+  }
 }
 
 function storedFeishuVocabulary(
@@ -10220,6 +11974,1532 @@ CreateProjectResult,
       current: Object.freeze({ ...KNOWLEDGE_WORK_TEMPLATE_SELECTION_V1 }),
     }),
   })
+}
+
+function taskListBindingRequestHash(
+  mutation: WorkbenchFeishuTaskListBindingMutation | WorkbenchFeishuTaskListBindingReplayQuery,
+): string {
+  const organizationId = 'command' in mutation
+    ? mutation.command.actor.organizationId
+    : mutation.organizationId
+  const teamId = 'command' in mutation ? mutation.command.actor.teamId : mutation.teamId
+  const reason = 'command' in mutation ? mutation.command.reason : mutation.reason
+  const causationId = 'command' in mutation
+    ? mutation.command.causationId
+    : mutation.causationId
+  return digest(canonicalizeJson({
+    commandType: FEISHU_TASK_LIST_BIND_COMMAND_TYPE,
+    target: FEISHU_TASK_LIST_BIND_OBJECT_TYPE,
+    scope: {
+      organizationId,
+      teamId,
+      projectId: mutation.projectId,
+    },
+    intent: mutation.intent,
+    expectedBindingRevision: mutation.expectedBindingRevision,
+    expectedConnectionRevision: mutation.expectedConnectionRevision,
+    expectedRouteGeneration: mutation.expectedRouteGeneration,
+    routeKind: 'route' in mutation ? mutation.route.kind : mutation.kind,
+    reason,
+    causationId,
+  }))
+}
+
+function taskReferenceRequestHash(mutation: WorkbenchFeishuTaskReferenceMutation): string {
+  return digest(canonicalizeJson({
+    commandType: FEISHU_TASK_REFERENCE_COMMAND_TYPE,
+    target: FEISHU_TASK_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    taskGuid: mutation.task.taskGuid,
+    expectedRevision: mutation.expectedRevision,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+function taskUpdateRequestHash(mutation: WorkbenchFeishuTaskUpdateReservationMutation): string {
+  return digest(canonicalizeJson({
+    commandType: FEISHU_TASK_UPDATE_COMMAND_TYPE,
+    target: FEISHU_TASK_OBJECT_TYPE,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    taskGuid: mutation.taskGuid,
+    expectedRevision: mutation.expectedRevision,
+    expectedRemoteVersion: mutation.expectedRemoteVersion,
+    changes: mutation.changes,
+    reason: mutation.command.reason,
+    causationId: mutation.command.causationId,
+  }))
+}
+
+interface FeishuTaskLedgerInput {
+  readonly command: WorkbenchCommandMetadata
+  readonly requestHash: string
+  readonly commandType:
+    | typeof FEISHU_TASK_LIST_BIND_COMMAND_TYPE
+    | typeof FEISHU_TASK_REFERENCE_COMMAND_TYPE
+    | typeof FEISHU_TASK_UPDATE_COMMAND_TYPE
+  readonly auditAction:
+    | typeof FEISHU_TASK_LIST_BIND_AUDIT_ACTION
+    | typeof FEISHU_TASK_REFERENCE_AUDIT_ACTION
+    | typeof FEISHU_TASK_UPDATE_AUDIT_ACTION
+  readonly summaryCode:
+    | typeof FEISHU_TASK_LIST_BIND_SUMMARY
+    | typeof FEISHU_TASK_REFERENCE_SUMMARY
+    | typeof FEISHU_TASK_UPDATE_SUMMARY
+  readonly objectType:
+    | typeof FEISHU_TASK_LIST_BIND_OBJECT_TYPE
+    | typeof FEISHU_TASK_OBJECT_TYPE
+  readonly objectId: string
+  readonly objectVersion: number
+  readonly changedFields: readonly string[]
+  readonly outboxTopic: string
+  readonly result: unknown
+}
+
+function appendFeishuTaskLedger(database: DatabaseSync, input: FeishuTaskLedgerInput): void {
+  const projectId = (() => {
+    const parsed = objectValue(input.result, 'Feishu task committed result')
+    if (input.commandType === FEISHU_TASK_UPDATE_COMMAND_TYPE) {
+      const effect = objectValue(parsed.value, 'Feishu task update effect')
+      const row = database.prepare(`
+        SELECT project_id FROM workbench_feishu_task_effect WHERE id = ?
+      `).get(stringValue(effect.effectId, 'Feishu task effect id')) as {
+        readonly project_id: string
+      } | undefined
+      if (row === undefined) throw new Error('Workbench task effect lost its Project')
+      return row.project_id
+    }
+    const value = objectValue(parsed.value, 'Feishu task committed projection')
+    return stringValue(value.projectId, 'Feishu task committed Project id')
+  })()
+  const payload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: input.command.commandId,
+    auditEventId: input.command.auditEventId,
+    requestHash: input.requestHash,
+    projectId,
+    objectType: input.objectType,
+    objectId: input.objectId,
+    objectVersion: input.objectVersion,
+    causationId: input.command.causationId,
+  })
+  const outbox = database.prepare(`
+    INSERT INTO workbench_outbox (
+      id, command_id, organization_id, topic, effect_key, project_id,
+      object_type, object_id, object_version, causation_id, payload_json,
+      state, attempt_count, created_at, updated_at, error_code
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
+  `).run(
+    input.command.outboxId,
+    input.command.commandId,
+    input.command.actor.organizationId,
+    input.outboxTopic,
+    `workbench:${input.command.outboxId}`,
+    projectId,
+    input.objectType,
+    input.objectId,
+    input.objectVersion,
+    input.command.causationId,
+    payload,
+    input.command.occurredAt,
+    input.command.occurredAt,
+  )
+  if (outbox.changes !== 1) throw new Error('Workbench Feishu task Outbox was not inserted')
+  const head = readAuditHead(database)
+  const sequence = incrementRevision(head.sequence, 'Workbench audit sequence')
+  const event = createAuditEvent({
+    sequence: String(sequence),
+    previousHash: auditHash(head.head_hash),
+    auditId: input.command.auditEventId,
+    occurredAt: input.command.occurredAt,
+    actor: { kind: input.command.actor.kind, id: input.command.actor.id },
+    action: input.auditAction,
+    scope: {
+      organizationId: input.command.actor.organizationId,
+      teamId: input.command.actor.teamId,
+      projectId,
+    },
+    reason: { code: input.command.reason },
+    object: { type: input.objectType, id: input.objectId, version: String(input.objectVersion) },
+    command: { id: input.command.commandId, type: input.commandType },
+    causation: { id: input.command.causationId },
+    outbox: { id: input.command.outboxId, state: 'pending' },
+    outcome: 'committed',
+    summary: { code: input.summaryCode, changedFields: input.changedFields },
+  })
+  insertAuditEvent(database, event)
+  const advanced = database.prepare(`
+    UPDATE workbench_audit_head SET sequence = ?, head_hash = ?
+    WHERE singleton = 1 AND sequence = ? AND head_hash = ?
+  `).run(sequence, event.eventHash, head.sequence, head.head_hash)
+  if (advanced.changes !== 1) throw new Error('Workbench audit head did not advance')
+  const receipt = database.prepare(`
+    INSERT INTO workbench_command_receipt (
+      organization_id, actor_id, idempotency_key_hash, command_type,
+      request_hash, command_id, audit_event_id, outbox_id, result_json, committed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.command.actor.organizationId,
+    input.command.actor.id,
+    idempotencyKeyHash(input.command.idempotencyKey),
+    input.commandType,
+    input.requestHash,
+    input.command.commandId,
+    input.command.auditEventId,
+    input.command.outboxId,
+    canonicalizeJson(input.result),
+    input.command.occurredAt,
+  )
+  if (receipt.changes !== 1) throw new Error('Workbench Feishu task receipt was not inserted')
+}
+
+function taskReceipt(command: WorkbenchCommandMetadata) {
+  return Object.freeze({
+    commandId: command.commandId,
+    auditEventId: command.auditEventId,
+    outboxId: command.outboxId,
+  })
+}
+
+function taskReceiptFromRow(row: FeishuTaskEffectRow) {
+  return Object.freeze({
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    outboxId: row.outbox_id,
+  })
+}
+
+function validateTaskRouteForCommit(
+  database: DatabaseSync,
+  route: FeishuRouteRow | null,
+  supplied: WorkbenchFeishuTaskRoute,
+): Extract<BindFeishuTaskListResult, { readonly ok: false }> | null {
+  if (route === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'route-unconfigured',
+        message: `Feishu ${supplied.kind} route is not configured`,
+        kind: supplied.kind,
+      }),
+    })
+  }
+  if (route.generation !== supplied.routeGeneration) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'route-generation-conflict',
+        message: 'Feishu task route generation changed before binding',
+        kind: supplied.kind,
+        expectedRouteGeneration: supplied.routeGeneration,
+        currentRouteGeneration: route.generation,
+      }),
+    })
+  }
+  if (route.state !== 'configured') {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'route-disabled',
+        message: `Feishu ${supplied.kind} route is disabled`,
+        kind: supplied.kind,
+      }),
+    })
+  }
+  if (route.app_id !== supplied.appId || route.credential_ref !== supplied.credentialRef) {
+    throw new Error('Workbench Feishu task route material changed within one generation')
+  }
+  const binding = readFeishuIdentityBinding(
+    database,
+    route.organization_id,
+    route.team_id,
+    supplied.kind,
+    route.identity_epoch,
+  )
+  if (binding === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'route-unverified',
+        message: `Feishu ${supplied.kind} route has no verified identity binding`,
+        kind: supplied.kind,
+      }),
+    })
+  }
+  if (binding.app_id !== supplied.actor.appId
+    || binding.open_id !== supplied.actor.openId
+    || binding.tenant_key !== supplied.actor.tenantKey
+    || binding.route_generation !== supplied.actor.routeGeneration) {
+    throw new Error('Workbench supplied Feishu actor escaped its immutable identity binding')
+  }
+  return null
+}
+
+function taskRouteFromBinding(database: DatabaseSync, projectId: string): WorkbenchFeishuTaskRoute {
+  const binding = readTaskBindingRow(database, projectId)
+  if (binding === null) throw new Error('Workbench task route lacks its task-list binding')
+  const route = database.prepare(`
+    SELECT organization_id, team_id, kind, generation, identity_epoch, state, app_id,
+      credential_ref, command_id, created_at
+    FROM workbench_feishu_route_version
+    WHERE organization_id = ? AND team_id = ? AND kind = ? AND generation = ?
+  `).get(
+    binding.organization_id,
+    binding.team_id,
+    binding.route_kind,
+    binding.route_generation,
+  ) as FeishuRouteRow | undefined
+  if (route === undefined || route.state !== 'configured' || route.app_id !== binding.app_id) {
+    throw new Error('Workbench task-list binding lost its exact configured route')
+  }
+  const kind = binding.route_kind as FeishuIdentityKind
+  validateFeishuRouteRow(route, binding.organization_id, binding.team_id, kind)
+  const identity = readFeishuIdentityBinding(
+    database,
+    binding.organization_id,
+    binding.team_id,
+    kind,
+    route.identity_epoch,
+  )
+  if (identity === null || identity.app_id !== binding.app_id
+    || identity.open_id !== binding.open_id || identity.tenant_key !== binding.tenant_key) {
+    throw new Error('Workbench task-list binding lost its exact verified identity')
+  }
+  return Object.freeze({
+    kind,
+    routeGeneration: route.generation,
+    appId: route.app_id,
+    credentialRef: route.credential_ref,
+    actor: Object.freeze({
+      connectionId: FEISHU_CONNECTION_ID_VALUE,
+      realm: FEISHU_REALM,
+      appId: identity.app_id,
+      kind,
+      routeGeneration: identity.route_generation,
+      openId: identity.open_id,
+      tenantKey: identity.tenant_key,
+    }),
+  })
+}
+
+function readTaskEffect(database: DatabaseSync, effectId: string): FeishuTaskEffectRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id, task_guid,
+      expected_project_revision, expected_remote_version, changes_json,
+      request_hash, idempotency_key_hash, state, issue_json,
+      current_remote_version, attempt_count, command_id, audit_event_id,
+      outbox_id, created_at, updated_at
+    FROM workbench_feishu_task_effect WHERE id = ?
+  `).get(effectId) as FeishuTaskEffectRow | undefined
+  if (row === undefined) return null
+  validateStoredTaskEffect(row)
+  return row
+}
+
+function readTaskEffectByCommand(
+  database: DatabaseSync,
+  commandId: string,
+): FeishuTaskEffectRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id, task_guid,
+      expected_project_revision, expected_remote_version, changes_json,
+      request_hash, idempotency_key_hash, state, issue_json,
+      current_remote_version, attempt_count, command_id, audit_event_id,
+      outbox_id, created_at, updated_at
+    FROM workbench_feishu_task_effect WHERE command_id = ?
+  `).get(commandId) as FeishuTaskEffectRow | undefined
+  if (row === undefined) return null
+  validateStoredTaskEffect(row)
+  return row
+}
+
+function validateStoredTaskEffect(row: FeishuTaskEffectRow): void {
+  validateBoundedReference(row.id, 'Stored Feishu task effect id')
+  validateBoundedReference(row.project_id, 'Stored Feishu task effect Project id')
+  validateBoundedReference(row.organization_id, 'Stored Feishu task effect organization id')
+  validateBoundedReference(row.team_id, 'Stored Feishu task effect team id')
+  validateBoundedReference(row.actor_id, 'Stored Feishu task effect actor id')
+  validateFeishuResourceId(row.task_guid, 'Stored Feishu task effect task guid')
+  positiveInteger(row.expected_project_revision, 'Stored task effect expected revision')
+  validateRemoteVersion(row.expected_remote_version, 'Stored task effect remote version')
+  let changes: unknown
+  try { changes = JSON.parse(row.changes_json) } catch {
+    throw new Error('Stored Feishu task effect changes contain invalid JSON')
+  }
+  validateTaskPatch(objectValue(changes, 'Stored Feishu task effect changes'))
+  if (!SHA256_HEX.test(row.request_hash) || !SHA256_HEX.test(row.idempotency_key_hash)) {
+    throw new Error('Stored Feishu task effect contains an invalid digest')
+  }
+  taskEffectState(row.state)
+  if (row.issue_json !== null) decodeFeishuIssue(row.issue_json)
+  if (row.current_remote_version !== null) {
+    validateRemoteVersion(row.current_remote_version, 'Stored task effect current version')
+  }
+  if (!Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0 || row.attempt_count > 1) {
+    throw new Error('Stored Feishu task effect contains an invalid attempt count')
+  }
+  for (const [label, value] of [
+    ['command id', row.command_id],
+    ['audit id', row.audit_event_id],
+    ['Outbox id', row.outbox_id],
+  ] as const) validateBoundedReference(value, `Stored task effect ${label}`)
+  canonicalInstant(row.created_at, 'Stored task effect createdAt')
+  canonicalInstant(row.updated_at, 'Stored task effect updatedAt')
+}
+
+function taskEffectState(value: string):
+  | 'prepared'
+  | 'inflight'
+  | 'delivered'
+  | 'unknown'
+  | 'failed'
+  | 'conflict' {
+  if (value !== 'prepared' && value !== 'inflight' && value !== 'delivered'
+    && value !== 'unknown' && value !== 'failed' && value !== 'conflict') {
+    throw new Error('Workbench database contains an invalid Feishu task effect state')
+  }
+  return value
+}
+
+function taskEffectProjection(row: FeishuTaskEffectRow): FeishuTaskMutationEffectProjection {
+  validateStoredTaskEffect(row)
+  const state = taskEffectState(row.state)
+  return Object.freeze({
+    effectId: row.id,
+    taskGuid: row.task_guid,
+    state: state === 'inflight' ? 'unknown' : state,
+    expectedRemoteVersion: row.expected_remote_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function markInflightTaskEffectUnknown(
+  database: DatabaseSync,
+  effect: FeishuTaskEffectRow,
+  recoveredAt: string,
+): void {
+  if (effect.state !== 'inflight' || effect.attempt_count !== 1) {
+    throw new Error('Workbench can only recover a claimed task effect')
+  }
+  canonicalInstant(recoveredAt, 'Recovered Feishu task effect instant')
+  const failure = ambiguousTaskIssue()
+  const updated = database.prepare(`
+    UPDATE workbench_feishu_task_effect
+    SET state = 'unknown', issue_json = ?, updated_at = ?
+    WHERE id = ? AND state = 'inflight' AND attempt_count = 1
+  `).run(canonicalizeJson(failure), recoveredAt, effect.id)
+  if (updated.changes !== 1) {
+    throw new Error('Workbench ambiguous task effect recovery lost its CAS')
+  }
+  const outbox = database.prepare(`
+    UPDATE workbench_outbox SET state = 'unknown', error_code = 'transport-ambiguous',
+      claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+    WHERE id = ? AND state = 'pending' AND attempt_count = 1
+  `).run(recoveredAt, effect.outbox_id)
+  if (outbox.changes !== 1) {
+    throw new Error('Workbench ambiguous task effect Outbox was not recovered')
+  }
+  const binding = readTaskBindingRow(database, effect.project_id)
+  if (binding === null) throw new Error('Workbench ambiguous task effect lost its binding')
+  const nextRevision = incrementRevision(binding.revision, 'Feishu task projection')
+  const advanced = database.prepare(`
+    UPDATE workbench_feishu_task_binding SET revision = ?, sync_state = 'unknown',
+      sync_issue_json = ?, updated_at = ? WHERE project_id = ? AND revision = ?
+  `).run(
+    nextRevision,
+    canonicalizeJson(failure),
+    recoveredAt,
+    effect.project_id,
+    binding.revision,
+  )
+  if (advanced.changes !== 1) {
+    throw new Error('Workbench ambiguous task effect binding recovery lost its CAS')
+  }
+}
+
+function taskUpdateResultFromEffect(
+  database: DatabaseSync,
+  effect: FeishuTaskEffectRow,
+): UpdateFeishuTaskResult {
+  const state = taskEffectState(effect.state)
+  if (state === 'prepared' || state === 'inflight') return taskInflightUnknown(effect)
+  if (state === 'conflict') {
+    const current = effect.current_remote_version
+    if (current === null) throw new Error('Workbench conflicted task effect lacks current version')
+    return taskRemoteVersionConflict(effect.task_guid, effect.expected_remote_version, current)
+  }
+  const projection = readProjectTasksProjection(database, {
+    organizationId: effect.organization_id,
+    teamId: effect.team_id,
+    projectId: effect.project_id,
+  })
+  if (projection === null) throw new Error('Workbench task effect escaped its Project')
+  const projectedEffect = taskEffectProjection(effect)
+  if (state === 'delivered') {
+    return Object.freeze({
+      ok: true,
+      value: projection,
+      effect: projectedEffect,
+      receipt: taskReceiptFromRow(effect),
+    })
+  }
+  const issue = effect.issue_json === null
+    ? ambiguousTaskIssue()
+    : decodeFeishuIssue(effect.issue_json)
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: state === 'unknown' ? 'remote-outcome-unknown' : 'remote-rejected',
+      message: state === 'unknown'
+        ? 'Feishu task update outcome is unknown; reconcile before another write'
+        : 'Feishu rejected the task update',
+      effect: projectedEffect,
+      issue: cloneFeishuIssue(issue),
+    }),
+  })
+}
+
+function taskInflightUnknown(effect: FeishuTaskEffectRow): UpdateFeishuTaskResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-outcome-unknown',
+      message: 'Feishu task update may have been delivered; reconcile before another write',
+      effect: Object.freeze({
+        ...taskEffectProjection(effect),
+        state: 'unknown' as const,
+      }),
+      issue: ambiguousTaskIssue(),
+    }),
+  })
+}
+
+function ambiguousTaskIssue(): FeishuConnectionIssue {
+  return Object.freeze({
+    code: 'unknown-provider-error',
+    recovery: 'inspect-provider',
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+}
+
+function taskIdempotencyConflict(): Extract<
+  BindFeishuTaskListResult | ReferenceFeishuTaskResult | UpdateFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'idempotency-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict',
+      message: 'Workbench idempotency key was already used for different task intent',
+    }),
+  })
+}
+
+function taskProjectNotFound(projectId: string): Extract<
+  BindFeishuTaskListResult | ReconcileProjectTasksResult
+    | ReferenceFeishuTaskResult | UpdateFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'project-not-found' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found',
+      message: `Workbench Project ${projectId} was not found in the authorized scope`,
+      projectId,
+    }),
+  })
+}
+
+function taskListUnbound(): Extract<
+  ReconcileProjectTasksResult | ReferenceFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'task-list-unbound' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'task-list-unbound',
+      message: 'Project has no primary Feishu task list',
+    }),
+  })
+}
+
+function taskUpdateListUnbound() {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'task-list-unbound',
+      message: 'Project has no primary Feishu task list',
+    }),
+  })
+}
+
+function taskProjectionRevisionConflict(
+  expectedRevision: number,
+  currentRevision: number,
+): Extract<
+  ReconcileProjectTasksResult | ReferenceFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'task-projection-revision-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'task-projection-revision-conflict',
+      message: `Project task revision changed (expected ${expectedRevision}, current ${currentRevision})`,
+      expectedRevision,
+      currentRevision,
+    }),
+  })
+}
+
+function taskUpdateProjectionRevisionConflict(
+  expectedRevision: number,
+  currentRevision: number,
+): Extract<
+  UpdateFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'task-projection-revision-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'task-projection-revision-conflict',
+      message: `Project task revision changed (expected ${expectedRevision}, current ${currentRevision})`,
+      expectedRevision,
+      currentRevision,
+    }),
+  })
+}
+
+function taskAlreadyInProject(taskGuid: string): Extract<
+  ReferenceFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'task-already-in-project' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'task-already-in-project',
+      message: 'Feishu task is already visible in this Project',
+      taskGuid,
+    }),
+  })
+}
+
+function taskNotInProject(taskGuid: string) {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'task-not-in-project',
+      message: 'Feishu task is not visible in this Project',
+      taskGuid,
+    }),
+  })
+}
+
+function taskRemoteVersionConflict(
+  taskGuid: string,
+  expectedRemoteVersion: string,
+  currentRemoteVersion: string,
+): Extract<
+  UpdateFeishuTaskResult,
+  { readonly ok: false; readonly error: { readonly code: 'remote-version-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-version-conflict',
+      message: 'Feishu task changed since the Workbench projection was read',
+      taskGuid,
+      expectedRemoteVersion,
+      currentRemoteVersion,
+    }),
+  })
+}
+
+function taskConnectionRevisionConflict(
+  expectedConnectionRevision: number,
+  currentConnectionRevision: number,
+): Extract<
+  BindFeishuTaskListResult,
+  { readonly ok: false; readonly error: { readonly code: 'connection-revision-conflict' } }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'connection-revision-conflict',
+      message: 'Feishu connection changed before the task list was bound',
+      expectedConnectionRevision,
+      currentConnectionRevision,
+    }),
+  })
+}
+
+function decodeTaskListBindingResult(
+  resultJson: string,
+  receipt: ReceiptRow,
+): Extract<BindFeishuTaskListResult, { readonly ok: true }> {
+  const decoded = decodeStoredTaskProjectionResult(resultJson, receipt)
+  return Object.freeze({ ok: true, value: decoded.value, receipt: decoded.receipt })
+}
+
+function decodeTaskReferenceResult(
+  resultJson: string,
+  receipt: ReceiptRow,
+): Extract<ReferenceFeishuTaskResult, { readonly ok: true }> {
+  const decoded = decodeStoredTaskProjectionResult(resultJson, receipt)
+  return Object.freeze({ ok: true, value: decoded.value, receipt: decoded.receipt })
+}
+
+function decodeStoredTaskProjectionResult(
+  resultJson: string,
+  receipt: ReceiptRow,
+): Readonly<{
+  value: ProjectTasksProjection
+  receipt: { readonly commandId: string; readonly auditEventId: string; readonly outboxId: string }
+}> {
+  let parsed: unknown
+  try { parsed = JSON.parse(resultJson) } catch {
+    throw new Error('Workbench Feishu task receipt contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== resultJson) {
+    throw new Error('Workbench Feishu task receipt is not canonical JSON')
+  }
+  const row = objectValue(parsed, 'Feishu task receipt')
+  if (row.ok !== true) throw new Error('Workbench Feishu task receipt is not committed')
+  const storedReceipt = objectValue(row.receipt, 'Feishu task command receipt')
+  const decodedReceipt = Object.freeze({
+    commandId: stringValue(storedReceipt.commandId, 'Feishu task receipt command id'),
+    auditEventId: stringValue(storedReceipt.auditEventId, 'Feishu task receipt audit id'),
+    outboxId: stringValue(storedReceipt.outboxId, 'Feishu task receipt Outbox id'),
+  })
+  if (decodedReceipt.commandId !== receipt.command_id
+    || decodedReceipt.auditEventId !== receipt.audit_event_id
+    || decodedReceipt.outboxId !== receipt.outbox_id) {
+    throw new Error('Workbench Feishu task receipt references mismatched ledger artifacts')
+  }
+  return Object.freeze({
+    value: decodeStoredProjectTasksProjection(row.value),
+    receipt: decodedReceipt,
+  })
+}
+
+function decodeStoredProjectTasksProjection(value: unknown): ProjectTasksProjection {
+  const row = objectValue(value, 'Stored Project tasks projection')
+  const projectId = boundedReference(row.projectId, 'Stored Project tasks Project id')
+  const revision = positiveInteger(row.revision, 'Stored Project tasks revision', true)
+  const binding = row.binding === null ? null : decodeStoredTaskListBinding(row.binding)
+  const taskValues = arrayValue(row.tasks, 'Stored Project tasks')
+  if (taskValues.length > MAX_FEISHU_TASKS_PER_PROJECT) {
+    throw new Error('Stored Project tasks exceed their bounded limit')
+  }
+  const tasks = Object.freeze(taskValues.map(decodeStoredTaskProjection))
+  const syncRow = objectValue(row.sync, 'Stored Project task sync')
+  const state = syncRow.state
+  if (state !== 'unbound' && state !== 'healthy' && state !== 'attention' && state !== 'unknown') {
+    throw new Error('Stored Project task sync state is invalid')
+  }
+  const issue = syncRow.issue === null
+    ? null
+    : decodeFeishuIssue(canonicalizeJson(syncRow.issue))
+  const nullableInstant = (candidate: unknown, label: string): string | null => {
+    if (candidate === null) return null
+    return canonicalInstant(candidate, label)
+  }
+  const effectValues = arrayValue(row.effects, 'Stored Project task effects')
+  if (effectValues.length > 100) throw new Error('Stored Project task effects exceed their limit')
+  const effects = Object.freeze(effectValues.map(decodeStoredTaskEffectProjection))
+  if ((binding === null) !== (revision === 0) || (binding === null) !== (state === 'unbound')) {
+    throw new Error('Stored Project task projection has inconsistent binding state')
+  }
+  return projectTasksProjection({
+    projectId,
+    revision,
+    binding,
+    tasks,
+    sync: Object.freeze({
+      state,
+      lastEventAt: nullableInstant(syncRow.lastEventAt, 'Stored task sync lastEventAt'),
+      lastReconciledAt: nullableInstant(
+        syncRow.lastReconciledAt,
+        'Stored task sync lastReconciledAt',
+      ),
+      lastAttemptAt: nullableInstant(syncRow.lastAttemptAt, 'Stored task sync lastAttemptAt'),
+      issue,
+    }),
+    effects,
+  })
+}
+
+function decodeStoredTaskListBinding(value: unknown): ProjectTaskListBindingProjection {
+  const row = objectValue(value, 'Stored task-list binding')
+  const identity = objectValue(row.identity, 'Stored task-list identity')
+  const kind = identity.kind
+  if (kind !== 'bot' && kind !== 'user') throw new Error('Stored task-list identity kind is invalid')
+  const result: ProjectTaskListBindingProjection = Object.freeze({
+    taskListGuid: stringValue(row.taskListGuid, 'Stored task-list guid'),
+    name: stringValue(row.name, 'Stored task-list name'),
+    canonicalUrl: stringValue(row.canonicalUrl, 'Stored task-list URL'),
+    identity: Object.freeze({
+      kind,
+      routeGeneration: positiveInteger(
+        identity.routeGeneration,
+        'Stored task-list route generation',
+      ),
+      appId: stringValue(identity.appId, 'Stored task-list app id'),
+      openId: stringValue(identity.openId, 'Stored task-list open id'),
+      tenantKey: nullableString(identity.tenantKey, 'Stored task-list tenant key'),
+    }),
+    createdByWorkbench: booleanValue(row.createdByWorkbench, 'Stored task-list creator flag'),
+    remoteVersion: stringValue(row.remoteVersion, 'Stored task-list remote version'),
+    boundAt: canonicalInstant(row.boundAt, 'Stored task-list boundAt'),
+  })
+  validateFeishuResourceId(result.taskListGuid, 'Stored task-list guid')
+  validateSafeText(result.name, 'Stored task-list name', 100)
+  validateCanonicalFeishuUrl(result.canonicalUrl, 'Stored task-list URL')
+  validateFeishuAppId(result.identity.appId, 'Stored task-list app id')
+  validateBoundedReference(result.identity.openId, 'Stored task-list open id')
+  if (result.identity.tenantKey !== null) {
+    validateBoundedReference(result.identity.tenantKey, 'Stored task-list tenant key')
+  }
+  validateRemoteVersion(result.remoteVersion, 'Stored task-list remote version')
+  return result
+}
+
+function decodeStoredTaskProjection(value: unknown): ProjectTaskProjection {
+  const row = objectValue(value, 'Stored task projection')
+  const scope = row.scope
+  if (scope !== 'primary-list' && scope !== 'explicit-reference') {
+    throw new Error('Stored task projection scope is invalid')
+  }
+  const snapshot: WorkbenchFeishuTaskSnapshot = {
+    taskGuid: stringValue(row.taskGuid, 'Stored task guid'),
+    taskId: nullableString(row.taskId, 'Stored task id'),
+    parentTaskGuid: nullableString(row.parentTaskGuid, 'Stored task parent guid'),
+    summary: stringValue(row.summary, 'Stored task summary'),
+    description: stringValue(row.description, 'Stored task description'),
+    assignees: decodeTaskMembers(canonicalizeJson(row.assignees), 'Stored task assignees'),
+    followers: decodeTaskMembers(canonicalizeJson(row.followers), 'Stored task followers'),
+    comments: decodeTaskComments(canonicalizeJson(row.comments)),
+    completed: booleanValue(row.completed, 'Stored task completion'),
+    completedAt: nullableString(row.completedAt, 'Stored task completedAt'),
+    canonicalUrl: stringValue(row.canonicalUrl, 'Stored task URL'),
+    remoteVersion: stringValue(row.remoteVersion, 'Stored task remote version'),
+  }
+  validateTaskSnapshot(snapshot, 'Stored task projection')
+  return Object.freeze({
+    ...snapshot,
+    scope,
+    projectionRevision: positiveInteger(
+      row.projectionRevision,
+      'Stored task projection revision',
+    ),
+  })
+}
+
+function decodeStoredTaskEffectProjection(value: unknown): FeishuTaskMutationEffectProjection {
+  const row = objectValue(value, 'Stored task effect projection')
+  const state = row.state
+  if (state !== 'prepared' && state !== 'delivered' && state !== 'unknown'
+    && state !== 'failed' && state !== 'conflict') {
+    throw new Error('Stored task effect projection state is invalid')
+  }
+  const result = Object.freeze({
+    effectId: boundedReference(row.effectId, 'Stored task effect id'),
+    taskGuid: stringValue(row.taskGuid, 'Stored task effect task guid'),
+    state,
+    expectedRemoteVersion: stringValue(
+      row.expectedRemoteVersion,
+      'Stored task effect expected remote version',
+    ),
+    createdAt: canonicalInstant(row.createdAt, 'Stored task effect createdAt'),
+    updatedAt: canonicalInstant(row.updatedAt, 'Stored task effect updatedAt'),
+  })
+  validateFeishuResourceId(result.taskGuid, 'Stored task effect task guid')
+  validateRemoteVersion(result.expectedRemoteVersion, 'Stored task effect expected remote version')
+  return result
+}
+
+function booleanValue(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(`${label} is not boolean`)
+  return value
+}
+
+interface ProjectScopeRow {
+  readonly id: string
+  readonly organization_id: string
+  readonly team_id: string
+}
+
+function validateProjectTasksReadQuery(query: WorkbenchProjectTasksReadQuery): void {
+  validateBoundedReference(query.organizationId, 'Project tasks organization id')
+  validateBoundedReference(query.teamId, 'Project tasks team id')
+  validateBoundedReference(query.projectId, 'Project tasks Project id')
+}
+
+function validateTaskListBindingMutation(
+  mutation: WorkbenchFeishuTaskListBindingMutation,
+): void {
+  validateBoundedReference(mutation.projectId, 'Feishu task-list Project id')
+  validateTaskListBindingIntent(mutation.intent)
+  if (mutation.expectedBindingRevision !== null) {
+    throw new TypeError('A new Feishu task-list binding must expect no prior revision')
+  }
+  nonNegativeStoredRevision(
+    mutation.expectedConnectionRevision,
+    'Feishu task-list expected connection revision',
+  )
+  positiveInteger(
+    mutation.expectedRouteGeneration,
+    'Feishu task-list expected route generation',
+  )
+  validateTaskRoute(mutation.route)
+  if (mutation.route.routeGeneration !== mutation.expectedRouteGeneration) {
+    throw new TypeError('Feishu task-list route generation does not match the request')
+  }
+  validateTaskListSnapshot(mutation.snapshot)
+  validateInstant(mutation.boundAt, 'Feishu task-list boundAt')
+  validateFeishuCommand(mutation.command)
+  if (mutation.command.reason !== FEISHU_TASK_LIST_BIND_REASON
+    || mutation.command.occurredAt !== mutation.boundAt) {
+    throw new TypeError('Feishu task-list command metadata is inconsistent')
+  }
+}
+
+function validateTaskListBindingReplayQuery(
+  query: WorkbenchFeishuTaskListBindingReplayQuery,
+): void {
+  validateBoundedReference(query.organizationId, 'Feishu task replay organization id')
+  validateBoundedReference(query.teamId, 'Feishu task replay team id')
+  validateBoundedReference(query.actorId, 'Feishu task replay actor id')
+  validateBoundedReference(query.projectId, 'Feishu task replay Project id')
+  validateTaskListBindingIntent(query.intent)
+  if (query.kind !== 'bot' && query.kind !== 'user') {
+    throw new TypeError('Feishu task replay route kind is unsupported')
+  }
+  nonNegativeStoredRevision(
+    query.expectedConnectionRevision,
+    'Feishu task replay expected connection revision',
+  )
+  positiveInteger(query.expectedRouteGeneration, 'Feishu task replay route generation')
+  if (query.expectedBindingRevision !== null) {
+    throw new TypeError('Feishu task replay must expect no prior binding')
+  }
+  validateProjectCommandKey(query.idempotencyKey, 'Feishu task replay idempotency key')
+  validateProjectCommandKey(query.causationId, 'Feishu task replay causation id')
+  if (query.reason !== FEISHU_TASK_LIST_BIND_REASON) {
+    throw new TypeError('Feishu task replay reason is unsupported')
+  }
+}
+
+function validateTaskListBindingIntent(
+  intent: WorkbenchFeishuTaskListBindingMutation['intent'],
+): void {
+  if (intent.mode === 'existing') {
+    validateFeishuResourceId(intent.taskListGuid, 'Feishu task-list intent guid')
+    return
+  }
+  if (intent.mode !== 'create') throw new TypeError('Feishu task-list intent mode is unsupported')
+  validateSafeText(intent.name, 'Feishu task-list intent name', 100)
+}
+
+function validateTaskReconciliationMutation(
+  mutation: WorkbenchFeishuTaskReconciliationMutation,
+): void {
+  validateBoundedReference(mutation.projectId, 'Feishu reconciliation Project id')
+  positiveInteger(mutation.expectedRevision, 'Feishu reconciliation expected revision')
+  validateTaskListSnapshot(mutation.snapshot)
+  validateInstant(mutation.attemptedAt, 'Feishu reconciliation attemptedAt')
+}
+
+function validateTaskReconciliationFailureMutation(
+  mutation: WorkbenchFeishuTaskReconciliationFailureMutation,
+): void {
+  validateBoundedReference(mutation.projectId, 'Feishu reconciliation Project id')
+  positiveInteger(mutation.expectedRevision, 'Feishu reconciliation expected revision')
+  validateInstant(mutation.attemptedAt, 'Feishu reconciliation attemptedAt')
+  safeFeishuIssue(mutation.issue, 'Feishu reconciliation issue')
+}
+
+function validateTaskReferenceMutation(mutation: WorkbenchFeishuTaskReferenceMutation): void {
+  validateBoundedReference(mutation.projectId, 'Feishu task reference Project id')
+  positiveInteger(mutation.expectedRevision, 'Feishu task reference expected revision')
+  validateTaskSnapshot(mutation.task, 'Feishu referenced task')
+  validateInstant(mutation.referencedAt, 'Feishu task referencedAt')
+  validateFeishuCommand(mutation.command)
+  if (mutation.command.reason !== FEISHU_TASK_REFERENCE_REASON
+    || mutation.command.occurredAt !== mutation.referencedAt) {
+    throw new TypeError('Feishu task reference command metadata is inconsistent')
+  }
+}
+
+function validateTaskEventMutation(mutation: WorkbenchFeishuTaskEventMutation): void {
+  validateBoundedReference(mutation.event.eventId, 'Feishu task event id')
+  validateFeishuResourceId(mutation.event.taskListGuid, 'Feishu event task-list guid')
+  validateFeishuResourceId(mutation.event.taskGuid, 'Feishu event task guid')
+  if (mutation.event.kind !== 'upsert' && mutation.event.kind !== 'removed') {
+    throw new TypeError('Feishu task event kind is unsupported')
+  }
+  validateRemoteVersion(mutation.event.remoteVersion, 'Feishu task event remote version')
+  validateInstant(mutation.event.occurredAt, 'Feishu task event occurredAt')
+  validateInstant(mutation.receivedAt, 'Feishu task event receivedAt')
+  if (mutation.event.kind === 'upsert') {
+    if (mutation.task === null) throw new TypeError('Feishu upsert event requires a task')
+    validateTaskSnapshot(mutation.task, 'Feishu event task')
+    if (mutation.task.taskGuid !== mutation.event.taskGuid
+      || mutation.task.remoteVersion !== mutation.event.remoteVersion) {
+      throw new TypeError('Feishu event task identity or version does not match')
+    }
+  } else if (mutation.task !== null) {
+    throw new TypeError('Feishu removal event cannot carry a task snapshot')
+  }
+}
+
+function validateTaskUpdateReservationMutation(
+  mutation: WorkbenchFeishuTaskUpdateReservationMutation,
+): void {
+  validateBoundedReference(mutation.effectId, 'Feishu task effect id')
+  validateBoundedReference(mutation.projectId, 'Feishu task update Project id')
+  validateFeishuResourceId(mutation.taskGuid, 'Feishu task update task guid')
+  positiveInteger(mutation.expectedRevision, 'Feishu task update expected revision')
+  validateRemoteVersion(mutation.expectedRemoteVersion, 'Feishu task expected remote version')
+  validateTaskPatch(mutation.changes)
+  validateInstant(mutation.preparedAt, 'Feishu task update preparedAt')
+  validateFeishuCommand(mutation.command)
+  if (mutation.command.reason !== FEISHU_TASK_UPDATE_REASON
+    || mutation.command.occurredAt !== mutation.preparedAt) {
+    throw new TypeError('Feishu task update command metadata is inconsistent')
+  }
+}
+
+function validateTaskUpdateSettlement(settlement: WorkbenchFeishuTaskUpdateSettlement): void {
+  validateInstant(settlement.settledAt, 'Feishu task settlement settledAt')
+  if (settlement.state === 'delivered') {
+    validateTaskSnapshot(settlement.task, 'Delivered Feishu task')
+    return
+  }
+  if (settlement.state === 'conflict') {
+    validateTaskSnapshot(settlement.current, 'Conflicted Feishu task')
+    return
+  }
+  if (settlement.state !== 'unknown' && settlement.state !== 'failed') {
+    throw new TypeError('Feishu task settlement state is unsupported')
+  }
+  safeFeishuIssue(settlement.issue, 'Feishu task settlement issue')
+}
+
+function validateTaskRoute(route: WorkbenchFeishuTaskRoute): void {
+  if (route.kind !== 'bot' && route.kind !== 'user') {
+    throw new TypeError('Feishu task route kind is unsupported')
+  }
+  positiveInteger(route.routeGeneration, 'Feishu task route generation')
+  validateFeishuAppId(route.appId, 'Feishu task route app id')
+  validateCredentialRef(route.credentialRef, 'Feishu task route credential ref')
+  validateFeishuActor(route.actor, route.kind)
+  if (route.actor.connectionId !== FEISHU_CONNECTION_ID_VALUE
+    || route.actor.routeGeneration !== route.routeGeneration
+    || route.actor.appId !== route.appId) {
+    throw new TypeError('Feishu task route and verified actor are inconsistent')
+  }
+}
+
+function validateTaskListSnapshot(snapshot: WorkbenchFeishuTaskListSnapshot): void {
+  validateFeishuResourceId(snapshot.taskList.taskListGuid, 'Feishu task-list guid')
+  validateSafeText(snapshot.taskList.name, 'Feishu task-list name', 100)
+  validateCanonicalFeishuUrl(snapshot.taskList.canonicalUrl, 'Feishu task-list URL')
+  validateRemoteVersion(snapshot.taskList.remoteVersion, 'Feishu task-list remote version')
+  validateInstant(snapshot.observedAt, 'Feishu task-list observedAt')
+  if (!Array.isArray(snapshot.tasks) || snapshot.tasks.length > MAX_FEISHU_TASKS_PER_PROJECT) {
+    throw new TypeError(`Feishu task-list may contain at most ${MAX_FEISHU_TASKS_PER_PROJECT} tasks`)
+  }
+  const guids = new Set<string>()
+  for (const task of snapshot.tasks) {
+    validateTaskSnapshot(task, 'Feishu task-list task')
+    if (guids.has(task.taskGuid)) throw new TypeError('Feishu task-list task guids must be unique')
+    guids.add(task.taskGuid)
+  }
+}
+
+function validateTaskSnapshot(task: WorkbenchFeishuTaskSnapshot, label: string): void {
+  validateFeishuResourceId(task.taskGuid, `${label} guid`)
+  if (task.taskId !== null) validateFeishuResourceId(task.taskId, `${label} id`)
+  if (task.parentTaskGuid !== null) {
+    validateFeishuResourceId(task.parentTaskGuid, `${label} parent guid`)
+    if (task.parentTaskGuid === task.taskGuid) throw new TypeError(`${label} cannot parent itself`)
+  }
+  validateSafeText(task.summary, `${label} summary`, MAX_FEISHU_TASK_TEXT_LENGTH)
+  validateTaskText(task.description, `${label} description`)
+  validateTaskMembers(task.assignees, `${label} assignees`)
+  validateTaskMembers(task.followers, `${label} followers`)
+  if (!Array.isArray(task.comments) || task.comments.length > MAX_FEISHU_TASK_COMMENTS) {
+    throw new TypeError(`${label} comments must be bounded`)
+  }
+  const commentIds = new Set<string>()
+  for (const comment of task.comments) {
+    validateFeishuResourceId(comment.commentId, `${label} comment id`)
+    if (commentIds.has(comment.commentId)) throw new TypeError(`${label} comment ids must be unique`)
+    commentIds.add(comment.commentId)
+    validateTaskText(comment.content, `${label} comment content`)
+    if (comment.creator !== null) validateTaskMember(comment.creator, `${label} comment creator`)
+    if (comment.replyToCommentId !== null) {
+      validateFeishuResourceId(comment.replyToCommentId, `${label} reply comment id`)
+    }
+    validateInstant(comment.createdAt, `${label} comment createdAt`)
+    validateInstant(comment.updatedAt, `${label} comment updatedAt`)
+  }
+  if (typeof task.completed !== 'boolean') throw new TypeError(`${label} completion is invalid`)
+  if (task.completedAt !== null) validateInstant(task.completedAt, `${label} completedAt`)
+  if (!task.completed && task.completedAt !== null) {
+    throw new TypeError(`${label} cannot have completedAt while incomplete`)
+  }
+  validateCanonicalFeishuUrl(task.canonicalUrl, `${label} URL`)
+  validateRemoteVersion(task.remoteVersion, `${label} remote version`)
+}
+
+function validateTaskMembers(
+  members: readonly FeishuTaskMemberProjection[],
+  label: string,
+): void {
+  if (!Array.isArray(members) || members.length > 100) {
+    throw new TypeError(`${label} must be a bounded array`)
+  }
+  const ids = new Set<string>()
+  for (const member of members) {
+    validateTaskMember(member, label)
+    if (ids.has(member.openId)) throw new TypeError(`${label} must not contain duplicate identities`)
+    ids.add(member.openId)
+  }
+}
+
+function validateTaskMember(member: FeishuTaskMemberProjection, label: string): void {
+  validateBoundedReference(member.openId, `${label} open id`)
+  if (member.name !== null) {
+    validateSafeText(member.name, `${label} name`, MAX_FEISHU_TASK_MEMBER_NAME_LENGTH)
+  }
+}
+
+function validateTaskPatch(patch: WorkbenchFeishuTaskPatch): void {
+  const keys = Object.keys(patch)
+  if (keys.length < 1 || keys.some(key =>
+    key !== 'summary' && key !== 'description' && key !== 'completed')) {
+    throw new TypeError('Feishu task update must contain supported changed fields')
+  }
+  if (patch.summary !== undefined) {
+    validateSafeText(patch.summary, 'Feishu task update summary', MAX_FEISHU_TASK_TEXT_LENGTH)
+  }
+  if (patch.description !== undefined) {
+    validateTaskText(patch.description, 'Feishu task update description')
+  }
+  if (patch.completed !== undefined && typeof patch.completed !== 'boolean') {
+    throw new TypeError('Feishu task update completion must be boolean')
+  }
+}
+
+function validateTaskText(value: string, label: string): void {
+  if (typeof value !== 'string' || !value.isWellFormed() || ASCII_CONTROL.test(value)
+    || [...value].length > MAX_FEISHU_TASK_TEXT_LENGTH) {
+    throw new TypeError(`${label} is not bounded safe text`)
+  }
+}
+
+function validateRemoteVersion(value: string, label: string): void {
+  validateSafeText(value, label, 64)
+}
+
+function validateCanonicalFeishuUrl(value: string, label: string): void {
+  if (typeof value !== 'string' || value.length > 2_048 || value.trim() !== value
+    || ASCII_CONTROL.test(value)) throw new TypeError(`${label} is invalid`)
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new TypeError(`${label} is invalid`)
+  }
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') {
+    throw new TypeError(`${label} must be an HTTPS URL without credentials`)
+  }
+}
+
+function readProjectScopeRow(
+  database: DatabaseSync,
+  organizationId: string,
+  teamId: string,
+  projectId: string,
+): ProjectScopeRow | null {
+  const row = database.prepare(`
+    SELECT id, organization_id, team_id FROM workbench_project
+    WHERE id = ? AND organization_id = ? AND team_id = ?
+  `).get(projectId, organizationId, teamId) as ProjectScopeRow | undefined
+  return row ?? null
+}
+
+function readProjectById(database: DatabaseSync, projectId: string): ProjectScopeRow | null {
+  const row = database.prepare(`
+    SELECT id, organization_id, team_id FROM workbench_project WHERE id = ?
+  `).get(projectId) as ProjectScopeRow | undefined
+  return row ?? null
+}
+
+function readTaskBindingRow(database: DatabaseSync, projectId: string): FeishuTaskBindingRow | null {
+  const row = database.prepare(`
+    SELECT project_id, organization_id, team_id, revision, tasklist_guid,
+      tasklist_name, canonical_url, route_kind, route_generation, app_id,
+      open_id, tenant_key, created_by_workbench, remote_version, sync_state,
+      sync_issue_json, last_event_at, last_reconciled_at, last_attempt_at,
+      reconcile_generation, bound_at, updated_at
+    FROM workbench_feishu_task_binding WHERE project_id = ?
+  `).get(projectId) as FeishuTaskBindingRow | undefined
+  if (row === undefined) return null
+  validateStoredTaskBinding(row)
+  return row
+}
+
+function validateStoredTaskBinding(row: FeishuTaskBindingRow): void {
+  validateBoundedReference(row.project_id, 'Stored task-list Project id')
+  validateBoundedReference(row.organization_id, 'Stored task-list organization id')
+  validateBoundedReference(row.team_id, 'Stored task-list team id')
+  positiveInteger(row.revision, 'Stored task-list revision')
+  validateFeishuResourceId(row.tasklist_guid, 'Stored task-list guid')
+  validateSafeText(row.tasklist_name, 'Stored task-list name', 100)
+  validateCanonicalFeishuUrl(row.canonical_url, 'Stored task-list URL')
+  if (row.route_kind !== 'bot' && row.route_kind !== 'user') {
+    throw new Error('Workbench database contains an invalid task-list route kind')
+  }
+  positiveInteger(row.route_generation, 'Stored task-list route generation')
+  validateFeishuAppId(row.app_id, 'Stored task-list app id')
+  validateBoundedReference(row.open_id, 'Stored task-list open id')
+  if (row.tenant_key !== null) validateBoundedReference(row.tenant_key, 'Stored tenant key')
+  if (row.created_by_workbench !== 0 && row.created_by_workbench !== 1) {
+    throw new Error('Workbench database contains an invalid task-list creator flag')
+  }
+  validateRemoteVersion(row.remote_version, 'Stored task-list remote version')
+  if (row.sync_state !== 'healthy' && row.sync_state !== 'attention'
+    && row.sync_state !== 'unknown') {
+    throw new Error('Workbench database contains an invalid task sync state')
+  }
+  if (row.sync_issue_json !== null) decodeFeishuIssue(row.sync_issue_json)
+  if (row.sync_state === 'healthy' && row.sync_issue_json !== null) {
+    throw new Error('Workbench healthy task-list binding contains an issue')
+  }
+  for (const [label, value] of [
+    ['lastEventAt', row.last_event_at],
+    ['lastReconciledAt', row.last_reconciled_at],
+    ['lastAttemptAt', row.last_attempt_at],
+  ] as const) if (value !== null) canonicalInstant(value, `Stored task-list ${label}`)
+  positiveInteger(row.reconcile_generation, 'Stored reconciliation generation', true)
+  canonicalInstant(row.bound_at, 'Stored task-list boundAt')
+  canonicalInstant(row.updated_at, 'Stored task-list updatedAt')
+}
+
+function readTaskProjectionRow(
+  database: DatabaseSync,
+  projectId: string,
+  taskGuid: string,
+): FeishuTaskProjectionRow | null {
+  const row = database.prepare(`
+    SELECT project_id, task_guid, scope, visible, parent_task_guid, task_id,
+      summary, description, assignees_json, followers_json, comments_json,
+      completed, completed_at, canonical_url, remote_version,
+      projection_revision, reconcile_generation, created_at, updated_at
+    FROM workbench_feishu_task_projection WHERE project_id = ? AND task_guid = ?
+  `).get(projectId, taskGuid) as FeishuTaskProjectionRow | undefined
+  return row ?? null
+}
+
+function readProjectTasksProjection(
+  database: DatabaseSync,
+  query: WorkbenchProjectTasksReadQuery,
+): ProjectTasksProjection | null {
+  const project = readProjectScopeRow(
+    database,
+    query.organizationId,
+    query.teamId,
+    query.projectId,
+  )
+  if (project === null) return null
+  const binding = readTaskBindingRow(database, query.projectId)
+  if (binding === null) {
+    return Object.freeze({
+      projectId: query.projectId,
+      revision: 0,
+      binding: null,
+      tasks: Object.freeze([]),
+      sync: Object.freeze({
+        state: 'unbound',
+        lastEventAt: null,
+        lastReconciledAt: null,
+        lastAttemptAt: null,
+        issue: null,
+      }),
+      effects: Object.freeze([]),
+    })
+  }
+  if (binding.organization_id !== query.organizationId || binding.team_id !== query.teamId) {
+    throw new Error('Workbench task-list binding escaped its authorized Project scope')
+  }
+  const taskRows = database.prepare(`
+    SELECT project_id, task_guid, scope, visible, parent_task_guid, task_id,
+      summary, description, assignees_json, followers_json, comments_json,
+      completed, completed_at, canonical_url, remote_version,
+      projection_revision, reconcile_generation, created_at, updated_at
+    FROM workbench_feishu_task_projection
+    WHERE project_id = ? AND visible = 1
+    ORDER BY CASE WHEN parent_task_guid IS NULL THEN 0 ELSE 1 END,
+      parent_task_guid, task_guid
+    LIMIT ${MAX_FEISHU_TASKS_PER_PROJECT + 1}
+  `).all(query.projectId) as unknown as FeishuTaskProjectionRow[]
+  if (taskRows.length > MAX_FEISHU_TASKS_PER_PROJECT) {
+    throw new Error('Workbench task projection exceeds its bounded limit')
+  }
+  const effects = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id, task_guid,
+      expected_project_revision, expected_remote_version, changes_json,
+      request_hash, idempotency_key_hash, state, issue_json,
+      current_remote_version, attempt_count, command_id, audit_event_id,
+      outbox_id, created_at, updated_at
+    FROM workbench_feishu_task_effect WHERE project_id = ?
+    ORDER BY created_at DESC, id LIMIT 100
+  `).all(query.projectId) as unknown as FeishuTaskEffectRow[]
+  const issue = binding.sync_issue_json === null ? null : decodeFeishuIssue(binding.sync_issue_json)
+  const result: ProjectTasksProjection = {
+    projectId: binding.project_id,
+    revision: binding.revision,
+    binding: Object.freeze({
+      taskListGuid: binding.tasklist_guid,
+      name: binding.tasklist_name,
+      canonicalUrl: binding.canonical_url,
+      identity: Object.freeze({
+        kind: binding.route_kind as FeishuIdentityKind,
+        routeGeneration: binding.route_generation,
+        appId: binding.app_id,
+        openId: binding.open_id,
+        tenantKey: binding.tenant_key,
+      }),
+      createdByWorkbench: binding.created_by_workbench === 1,
+      remoteVersion: binding.remote_version,
+      boundAt: binding.bound_at,
+    }),
+    tasks: Object.freeze(taskRows.map(taskProjectionFromRow)),
+    sync: Object.freeze({
+      state: binding.sync_state as 'healthy' | 'attention' | 'unknown',
+      lastEventAt: binding.last_event_at,
+      lastReconciledAt: binding.last_reconciled_at,
+      lastAttemptAt: binding.last_attempt_at,
+      issue,
+    }),
+    effects: Object.freeze(effects.map(taskEffectProjection)),
+  }
+  return projectTasksProjection(result)
+}
+
+function taskProjectionFromRow(row: FeishuTaskProjectionRow): ProjectTaskProjection {
+  if (row.scope !== 'primary-list' && row.scope !== 'explicit-reference') {
+    throw new Error('Workbench database contains an invalid task scope')
+  }
+  if (row.visible !== 0 && row.visible !== 1) {
+    throw new Error('Workbench database contains an invalid task visibility flag')
+  }
+  const snapshot: WorkbenchFeishuTaskSnapshot = {
+    taskGuid: row.task_guid,
+    taskId: row.task_id,
+    parentTaskGuid: row.parent_task_guid,
+    summary: row.summary,
+    description: row.description,
+    assignees: decodeTaskMembers(row.assignees_json, 'Stored task assignees'),
+    followers: decodeTaskMembers(row.followers_json, 'Stored task followers'),
+    comments: decodeTaskComments(row.comments_json),
+    completed: row.completed === 1,
+    completedAt: row.completed_at,
+    canonicalUrl: row.canonical_url,
+    remoteVersion: row.remote_version,
+  }
+  if (row.completed !== 0 && row.completed !== 1) {
+    throw new Error('Workbench database contains invalid task completion')
+  }
+  validateTaskSnapshot(snapshot, 'Stored Feishu task')
+  positiveInteger(row.projection_revision, 'Stored task projection revision')
+  positiveInteger(row.reconcile_generation, 'Stored task reconciliation generation', true)
+  canonicalInstant(row.created_at, 'Stored task createdAt')
+  canonicalInstant(row.updated_at, 'Stored task updatedAt')
+  return Object.freeze({ ...snapshot, scope: row.scope, projectionRevision: row.projection_revision })
+}
+
+function decodeTaskMembers(value: string, label: string): readonly FeishuTaskMemberProjection[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch { throw new Error(`${label} contains invalid JSON`) }
+  if (!Array.isArray(parsed)) throw new Error(`${label} is not an array`)
+  const members = parsed.map((candidate) => {
+    const row = objectValue(candidate, label)
+    const member = Object.freeze({
+      openId: stringValue(row.openId, `${label} open id`),
+      name: nullableString(row.name, `${label} name`),
+    })
+    validateTaskMember(member, label)
+    return member
+  })
+  validateTaskMembers(members, label)
+  return Object.freeze(members)
+}
+
+function decodeTaskComments(value: string): readonly FeishuTaskCommentProjection[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch { throw new Error('Stored task comments contain invalid JSON') }
+  if (!Array.isArray(parsed)) throw new Error('Stored task comments are not an array')
+  const comments = parsed.map((candidate) => {
+    const row = objectValue(candidate, 'Stored task comment')
+    const creatorRow = row.creator === null ? null : objectValue(row.creator, 'Stored comment creator')
+    return Object.freeze({
+      commentId: stringValue(row.commentId, 'Stored comment id'),
+      content: stringValue(row.content, 'Stored comment content'),
+      creator: creatorRow === null ? null : Object.freeze({
+        openId: stringValue(creatorRow.openId, 'Stored comment creator open id'),
+        name: nullableString(creatorRow.name, 'Stored comment creator name'),
+      }),
+      replyToCommentId: nullableString(row.replyToCommentId, 'Stored reply comment id'),
+      createdAt: stringValue(row.createdAt, 'Stored comment createdAt'),
+      updatedAt: stringValue(row.updatedAt, 'Stored comment updatedAt'),
+    })
+  })
+  if (comments.length > MAX_FEISHU_TASK_COMMENTS) {
+    throw new Error('Stored task comments exceed their bounded limit')
+  }
+  return Object.freeze(comments)
+}
+
+function upsertTaskProjection(
+  database: DatabaseSync,
+  projectId: string,
+  task: WorkbenchFeishuTaskSnapshot,
+  scope: 'primary-list' | 'explicit-reference',
+  projectionRevision: number,
+  reconcileGeneration: number,
+  updatedAt: string,
+): void {
+  validateTaskSnapshot(task, 'Feishu task projection')
+  const result = database.prepare(`
+    INSERT INTO workbench_feishu_task_projection (
+      project_id, task_guid, scope, visible, parent_task_guid, task_id,
+      summary, description, assignees_json, followers_json, comments_json,
+      completed, completed_at, canonical_url, remote_version,
+      projection_revision, reconcile_generation, created_at, updated_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(project_id, task_guid) DO UPDATE SET
+      scope = excluded.scope, visible = 1,
+      parent_task_guid = excluded.parent_task_guid, task_id = excluded.task_id,
+      summary = excluded.summary, description = excluded.description,
+      assignees_json = excluded.assignees_json,
+      followers_json = excluded.followers_json,
+      comments_json = excluded.comments_json, completed = excluded.completed,
+      completed_at = excluded.completed_at, canonical_url = excluded.canonical_url,
+      remote_version = excluded.remote_version,
+      projection_revision = excluded.projection_revision,
+      reconcile_generation = excluded.reconcile_generation,
+      updated_at = excluded.updated_at
+  `).run(
+    projectId,
+    task.taskGuid,
+    scope,
+    task.parentTaskGuid,
+    task.taskId,
+    task.summary,
+    task.description,
+    canonicalizeJson(task.assignees),
+    canonicalizeJson(task.followers),
+    canonicalizeJson(task.comments),
+    task.completed ? 1 : 0,
+    task.completedAt,
+    task.canonicalUrl,
+    task.remoteVersion,
+    projectionRevision,
+    reconcileGeneration,
+    updatedAt,
+    updatedAt,
+  )
+  if (result.changes !== 1) throw new Error('Workbench task projection was not upserted exactly once')
+}
+
+function taskReferenceExists(database: DatabaseSync, projectId: string, taskGuid: string): boolean {
+  return database.prepare(`
+    SELECT 1 FROM workbench_feishu_task_reference WHERE project_id = ? AND task_guid = ?
+  `).get(projectId, taskGuid) !== undefined
+}
+
+function insertTaskReconciliation(
+  database: DatabaseSync,
+  input: Readonly<{
+    projectId: string
+    bindingRevision: number
+    generation: number
+    outcome: 'healthy' | 'attention'
+    issue: FeishuConnectionIssue | null
+    taskCount: number
+    snapshotDigest: string | null
+    attemptedAt: string
+  }>,
+): void {
+  const inserted = database.prepare(`
+    INSERT INTO workbench_feishu_task_reconciliation (
+      project_id, binding_revision, reconcile_generation, outcome,
+      issue_json, task_count, snapshot_digest, attempted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.projectId,
+    input.bindingRevision,
+    input.generation,
+    input.outcome,
+    input.issue === null ? null : canonicalizeJson(input.issue),
+    input.taskCount,
+    input.snapshotDigest,
+    input.attemptedAt,
+  )
+  if (inserted.changes !== 1) throw new Error('Workbench task reconciliation was not appended')
+}
+
+function taskListSnapshotDigest(snapshot: WorkbenchFeishuTaskListSnapshot): string {
+  return contentDigest(canonicalizeJson(snapshot))
+}
+
+function advanceTaskBindingRevision(
+  database: DatabaseSync,
+  binding: FeishuTaskBindingRow,
+  nextRevision: number,
+  updatedAt: string,
+): void {
+  const advanced = database.prepare(`
+    UPDATE workbench_feishu_task_binding SET revision = ?, updated_at = ?
+    WHERE project_id = ? AND revision = ?
+  `).run(nextRevision, updatedAt, binding.project_id, binding.revision)
+  if (advanced.changes !== 1) throw new Error('Workbench task-list binding revision lost its CAS')
+}
+
+function incrementRevision(value: number, label: string): number {
+  positiveInteger(value, `${label} current revision`, true)
+  if (value >= Number.MAX_SAFE_INTEGER) throw new Error(`${label} revision exhausted`)
+  return value + 1
+}
+
+function compareRemoteVersion(left: string, right: string): number {
+  if (left === right) return 0
+  if (/^(?:0|[1-9][0-9]*)$/u.test(left) && /^(?:0|[1-9][0-9]*)$/u.test(right)) {
+    const leftInteger = BigInt(left)
+    const rightInteger = BigInt(right)
+    return leftInteger < rightInteger ? -1 : 1
+  }
+  if (isIsoInstant(left) && isIsoInstant(right)) return left < right ? -1 : 1
+  return left < right ? -1 : 1
+}
+
+function cloneFeishuIssue(issue: FeishuConnectionIssue): FeishuConnectionIssue {
+  const safe = safeFeishuIssue(issue, 'Feishu issue')
+  return Object.freeze({ ...safe, missingScopes: Object.freeze([...safe.missingScopes]) })
 }
 
 function digest(value: string): string {

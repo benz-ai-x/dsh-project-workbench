@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Verify the executable artifacts that T07 actually loads.
+ * Verify the executable artifacts that T08 actually loads.
  *
  * This intentionally runs after `pnpm build`.  It imports the Host entry and
  * generated Typert modules as plain JavaScript, and executes the Client bundle
@@ -84,7 +84,7 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
-    check(main.WORKBENCH_SCHEMA_VERSION === 6, `${packageName}: built SQLite authority exports Schema v6`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 7, `${packageName}: built SQLite authority exports Schema v7`)
     check(typeof main.DshFeishuConnectionAdapter === 'function', `${packageName}: production Feishu adapter is a packed main export`)
     check(main.FEISHU_CONNECTION_ADAPTER_ID === 'feishu-open-platform-v1', `${packageName}: Feishu adapter exports its stable identity`)
     check(
@@ -294,24 +294,30 @@ function verifyTypertFace(face, packageName, label) {
     'activity',
     'addProjectMember',
     'auditIntegrity',
+    'bindFeishuTaskList',
     'configureFeishuIdentityRoute',
     'createProject',
+    'decideSuggestedChange',
+    'discoverFeishuTaskLists',
     'feishuConnectionCenter',
     'project',
     'projectStart',
+    'projectTasks',
     'projectTeam',
     'proposeProjectResponsibilityChange',
+    'reconcileProjectTasks',
+    'referenceFeishuTask',
     'reviewCenter',
-    'decideSuggestedChange',
     'setProjectMemberStatus',
     'setProjectResponsibility',
     'setStatus',
     'snapshot',
+    'updateFeishuTask',
     'verifyFeishuIdentityRoute',
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the seventeen T07 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the twenty-three T08 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -320,6 +326,9 @@ function verifyTypertFace(face, packageName, label) {
   const activity = invocations.find(invocation => invocation?.method === 'activity')
   const addProjectMember = invocations.find(invocation => invocation?.method === 'addProjectMember')
   const auditIntegrity = invocations.find(invocation => invocation?.method === 'auditIntegrity')
+  const bindFeishuTaskList = invocations.find(
+    invocation => invocation?.method === 'bindFeishuTaskList',
+  )
   const createProject = invocations.find(invocation => invocation?.method === 'createProject')
   const configureFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'configureFeishuIdentityRoute',
@@ -327,13 +336,23 @@ function verifyTypertFace(face, packageName, label) {
   const feishuConnectionCenter = invocations.find(
     invocation => invocation?.method === 'feishuConnectionCenter',
   )
+  const discoverFeishuTaskLists = invocations.find(
+    invocation => invocation?.method === 'discoverFeishuTaskLists',
+  )
   const project = invocations.find(invocation => invocation?.method === 'project')
   const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
+  const projectTasks = invocations.find(invocation => invocation?.method === 'projectTasks')
   const projectTeam = invocations.find(invocation => invocation?.method === 'projectTeam')
   const proposeProjectResponsibilityChange = invocations.find(
     invocation => invocation?.method === 'proposeProjectResponsibilityChange',
   )
   const reviewCenter = invocations.find(invocation => invocation?.method === 'reviewCenter')
+  const reconcileProjectTasks = invocations.find(
+    invocation => invocation?.method === 'reconcileProjectTasks',
+  )
+  const referenceFeishuTask = invocations.find(
+    invocation => invocation?.method === 'referenceFeishuTask',
+  )
   const decideSuggestedChange = invocations.find(
     invocation => invocation?.method === 'decideSuggestedChange',
   )
@@ -345,6 +364,7 @@ function verifyTypertFace(face, packageName, label) {
   )
   const setStatus = invocations.find(invocation => invocation?.method === 'setStatus')
   const snapshot = invocations.find(invocation => invocation?.method === 'snapshot')
+  const updateFeishuTask = invocations.find(invocation => invocation?.method === 'updateFeishuTask')
   const verifyFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'verifyFeishuIdentityRoute',
   )
@@ -352,19 +372,25 @@ function verifyTypertFace(face, packageName, label) {
     activity,
     addProjectMember,
     auditIntegrity,
+    bindFeishuTaskList,
     configureFeishuIdentityRoute,
     createProject,
+    discoverFeishuTaskLists,
     feishuConnectionCenter,
     project,
     projectStart,
+    projectTasks,
     projectTeam,
     proposeProjectResponsibilityChange,
+    reconcileProjectTasks,
+    referenceFeishuTask,
     reviewCenter,
     decideSuggestedChange,
     setProjectMemberStatus,
     setProjectResponsibility,
     setStatus,
     snapshot,
+    updateFeishuTask,
     verifyFeishuIdentityRoute,
   ]) {
     check(
@@ -443,6 +469,21 @@ function verifyTypertFace(face, packageName, label) {
       }),
     `${packageName}: ${label} Activity filter carries the closed T07 Feishu vocabulary without a fallback action`,
   )
+  check(
+    schemaAccepts(activityFilter?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      objectType: 'feishu-task',
+      action: 'workbench.feishu-task.update-requested',
+      limit: 5,
+    })
+      && schemaRejects(activityFilter?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        objectType: 'feishu-task',
+        action: 'workbench.feishu-task.retried',
+        limit: 5,
+      }),
+    `${packageName}: ${label} Activity filter carries closed T08 task vocabulary without a retry action`,
+  )
   const activityShape = unwrapSchema(activity?.result?.schema)?.def?.shape
   check(
     sameStrings(schemaObjectKeys(activity?.result?.schema), ['integrity', 'items', 'nextBeforeSequence']),
@@ -465,6 +506,69 @@ function verifyTypertFace(face, packageName, label) {
       'valid',
     ]),
     `${packageName}: ${label} auditIntegrity result exposes the safe verification projection`,
+  )
+
+  const projectTasksQuery = projectTasks?.parameters?.find(parameter => parameter?.name === 'query')
+  check(
+    sameStrings(schemaObjectKeys(projectTasksQuery?.codec?.schema), ['projectId']),
+    `${packageName}: ${label} Project Tasks query carries only Project identity`,
+  )
+  const bindTaskListRequest = bindFeishuTaskList?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  const bindTaskListBase = {
+    projectId: 'project-built-artifact',
+    kind: 'bot',
+    expectedConnectionRevision: 7,
+    expectedRouteGeneration: 3,
+    expectedBindingRevision: null,
+    idempotencyKey: 'built-task-bind-idempotency-0001',
+    causationId: 'built-task-bind-causation-0001',
+    reason: 'owner-feishu-task-list-bind',
+  }
+  check(
+    schemaAccepts(bindTaskListRequest?.codec?.schema, {
+      ...bindTaskListBase,
+      mode: 'existing',
+      taskListGuid: 'tasklist-built-1',
+    })
+      && schemaAccepts(bindTaskListRequest?.codec?.schema, {
+        ...bindTaskListBase,
+        mode: 'create',
+        name: 'Built Project Tasks',
+      })
+      && schemaRejects(bindTaskListRequest?.codec?.schema, {
+        ...bindTaskListBase,
+        mode: 'existing',
+        taskListGuid: 'tasklist-built-1',
+        name: 'Mixed mode',
+      }),
+    `${packageName}: ${label} task-list binding carries one exact identity fence and one closed mode`,
+  )
+  const updateTaskRequest = updateFeishuTask?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    schemaAccepts(updateTaskRequest?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      taskGuid: 'task-built-1',
+      expectedRevision: 4,
+      expectedRemoteVersion: '1700000000000',
+      changes: { summary: 'Versioned update', completed: true },
+      idempotencyKey: 'built-task-update-idempotency-0001',
+      causationId: 'built-task-update-causation-0001',
+      reason: 'owner-feishu-task-update',
+    })
+      && schemaRejects(updateTaskRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        taskGuid: 'task-built-1',
+        expectedRevision: 4,
+        changes: { summary: 'Missing remote version' },
+        idempotencyKey: 'built-task-update-idempotency-0001',
+        causationId: 'built-task-update-causation-0001',
+        reason: 'owner-feishu-task-update',
+      }),
+    `${packageName}: ${label} task update requires both local and remote versions plus idempotency`,
   )
 
   const projectStartFilter = projectStart?.parameters?.find(

@@ -7,12 +7,16 @@ import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  BindFeishuTaskListRequest,
+  BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteRequest,
   ConfigureFeishuIdentityRouteResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  DiscoverFeishuTaskListsRequest,
+  FeishuTaskListDiscoveryProjection,
   FeishuConnectionCenterProjection,
   ProjectDetailProjection,
   ProjectQuery,
@@ -20,8 +24,14 @@ import type {
   ProjectStartProjection,
   ProjectTeamProjection,
   ProjectTeamQuery,
+  ProjectTasksProjection,
+  ProjectTasksQuery,
   ProposeProjectResponsibilityChangeRequest,
   ProposeProjectResponsibilityChangeResult,
+  ReconcileProjectTasksRequest,
+  ReconcileProjectTasksResult,
+  ReferenceFeishuTaskRequest,
+  ReferenceFeishuTaskResult,
   ReviewCenterFilter,
   ReviewCenterProjection,
   SetProjectMemberStatusRequest,
@@ -36,6 +46,8 @@ import type {
   WorkbenchStatusSnapshot,
   VerifyFeishuIdentityRouteRequest,
   VerifyFeishuIdentityRouteResult,
+  UpdateFeishuTaskRequest,
+  UpdateFeishuTaskResult,
 } from './client.ts'
 import type { WorkbenchRepository } from './repository.ts'
 import {
@@ -55,6 +67,7 @@ import { DshFeishuConnectionAdapter } from './feishu-connection-adapter.ts'
 
 export type * from './client.ts'
 export type * from './repository.ts'
+export type * from './feishu-task-federation.ts'
 export {
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_BYTES_V1,
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
@@ -176,6 +189,7 @@ export type {
 export const DEFAULT_WORKBENCH_DATABASE_PATH = '.dsh/project-workbench.sqlite'
 export const DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS = 5_000
 export const DEFAULT_WORKBENCH_MAX_STATUS_LENGTH = 280
+export const DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1_000
 const MAX_BUSY_TIMEOUT_MS = 2_147_483_647
 
 /** Public Loader configuration. Every property has an operational default. */
@@ -184,6 +198,7 @@ export interface Config {
   readonly journalMode?: WorkbenchJournalMode
   readonly busyTimeoutMs?: number
   readonly maxStatusLength?: number
+  readonly taskReconciliationIntervalMs?: number
 }
 
 /** Runtime mirror of {@link Config}; Loader validation happens before activation. */
@@ -202,6 +217,11 @@ export const Config: Schema<Config> = Schema.object({
     .min(1)
     .max(Number.MAX_SAFE_INTEGER)
     .default(DEFAULT_WORKBENCH_MAX_STATUS_LENGTH),
+  taskReconciliationIntervalMs: Schema.number()
+    .step(1)
+    .min(0)
+    .max(MAX_BUSY_TIMEOUT_MS)
+    .default(DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS),
 })
 
 interface ResolvedConfig {
@@ -209,6 +229,7 @@ interface ResolvedConfig {
   readonly journalMode: WorkbenchJournalMode
   readonly busyTimeoutMs: number
   readonly maxStatusLength: number
+  readonly taskReconciliationIntervalMs: number
 }
 
 /** Optional construction ports used by WorkbenchScenario and focused Host tests. */
@@ -243,15 +264,18 @@ export class WorkbenchService extends TypertRemoteService {
       journalMode: resolved.journalMode,
       busyTimeoutMs: resolved.busyTimeoutMs,
     })
+    const adapters = internals.adapters ?? (() => {
+      const feishu = new DshFeishuConnectionAdapter(ctx.credentials as CredentialProvider)
+      return Object.freeze({ feishu, feishuTasks: feishu })
+    })()
     this.scenario = new WorkbenchScenario({
       clock: internals.clock ?? systemWorkbenchClock,
       ids: internals.ids ?? randomWorkbenchIds,
       repository,
-      adapters: internals.adapters ?? Object.freeze({
-        feishu: new DshFeishuConnectionAdapter(ctx.credentials as CredentialProvider),
-      }),
+      adapters,
       authorization: internals.authorization ?? ctx.workbenchAuth.authorization,
       maxStatusLength: resolved.maxStatusLength,
+      taskReconciliationIntervalMs: resolved.taskReconciliationIntervalMs,
     })
   }
 
@@ -310,6 +334,60 @@ export class WorkbenchService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<VerifyFeishuIdentityRouteResult> {
     return this.scenario.verifyFeishuIdentityRoute(request, signal)
+  }
+
+  /** Read one Project's local Feishu task projection. */
+  @Remote
+  projectTasks(
+    query: ProjectTasksQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTasksProjection | null> {
+    return this.scenario.projectTasks(query, signal)
+  }
+
+  /** Discover accessible task lists through one exact verified identity. */
+  @Remote
+  discoverFeishuTaskLists(
+    request: DiscoverFeishuTaskListsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskListDiscoveryProjection> {
+    return this.scenario.discoverFeishuTaskLists(request, signal)
+  }
+
+  /** Create or select the unique primary Feishu task list. */
+  @Remote
+  bindFeishuTaskList(
+    request: BindFeishuTaskListRequest,
+    signal: AbortSignal,
+  ): Promise<BindFeishuTaskListResult> {
+    return this.scenario.bindFeishuTaskList(request, signal)
+  }
+
+  /** Run one durable full-baseline reconciliation. */
+  @Remote
+  reconcileProjectTasks(
+    request: ReconcileProjectTasksRequest,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult> {
+    return this.scenario.reconcileProjectTasks(request, signal)
+  }
+
+  /** Add one explicit out-of-list task reference. */
+  @Remote
+  referenceFeishuTask(
+    request: ReferenceFeishuTaskRequest,
+    signal: AbortSignal,
+  ): Promise<ReferenceFeishuTaskResult> {
+    return this.scenario.referenceFeishuTask(request, signal)
+  }
+
+  /** Perform one versioned, idempotent Feishu task update. */
+  @Remote
+  updateFeishuTask(
+    request: UpdateFeishuTaskRequest,
+    signal: AbortSignal,
+  ): Promise<UpdateFeishuTaskResult> {
+    return this.scenario.updateFeishuTask(request, signal)
   }
 
   /** Read the immutable template and a stable descending Project catalog page. */
@@ -410,6 +488,8 @@ function resolveConfig(config: Config): ResolvedConfig {
     journalMode: resolved.journalMode ?? 'wal',
     busyTimeoutMs: resolved.busyTimeoutMs ?? DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS,
     maxStatusLength: resolved.maxStatusLength ?? DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
+    taskReconciliationIntervalMs: resolved.taskReconciliationIntervalMs
+      ?? DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS,
   }
 }
 

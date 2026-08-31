@@ -54,6 +54,7 @@ const WORKBENCH_DECIDE_SUGGESTED_CHANGE_PATH = '/api/workbench/decideSuggestedCh
 const WORKBENCH_FEISHU_CONNECTION_PATH = '/api/workbench/feishuConnectionCenter'
 const WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH = '/api/workbench/configureFeishuIdentityRoute'
 const WORKBENCH_VERIFY_FEISHU_ROUTE_PATH = '/api/workbench/verifyFeishuIdentityRoute'
+const WORKBENCH_PROJECT_TASKS_PATH = '/api/workbench/projectTasks'
 const DESKTOP_VIEWPORT = Object.freeze({ width: 1280, height: 720 })
 const MOBILE_VIEWPORT = Object.freeze({ width: 375, height: 812 })
 
@@ -669,10 +670,12 @@ async function assertProjectDetail(page, expected) {
 async function reopenProject(page, expected) {
   const catalog = await assertProjectCatalog(page, expected.projectName)
   await catalog.card.getByRole('button', { name: '打开 Project', exact: true }).click()
-  return await assertProjectDetail(page, {
+  const detail = await assertProjectDetail(page, {
     ...expected,
     definitionDigest: catalog.definitionDigest,
   })
+  await assertProjectTasksUnbound(page, expected.projectName)
+  return detail
 }
 
 function projectTeamPanel(page) {
@@ -685,6 +688,34 @@ function reviewCenterPanel(page) {
 
 function feishuConnectionPanel(page) {
   return page.locator('section[aria-labelledby="workbench-feishu-connection-title"]')
+}
+
+function projectTasksPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-project-tasks-title"]')
+}
+
+async function assertProjectTasksUnbound(page, projectName) {
+  const panel = projectTasksPanel(page)
+  await panel.getByRole('heading', { name: 'Project Tasks', exact: true })
+    .waitFor({ state: 'visible' })
+  if (projectName === undefined) {
+    await panel.getByText('先打开一个 Project，再配置或阅读它的任务清单。', { exact: true })
+      .waitFor({ state: 'visible' })
+    return panel
+  }
+  await panel.getByText(projectName, { exact: true }).waitFor({ state: 'visible' })
+  await panel.getByRole('heading', { name: '绑定唯一主任务清单', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByText(
+    '请先在 Connection Center 配置并验证所选身份。不会自动回退到另一身份。',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  assert.equal(
+    await panel.getByRole('button', { name: '读取可访问清单', exact: true }).isDisabled(),
+    true,
+    'Project Tasks allowed discovery without a verified explicit Feishu route',
+  )
+  return panel
 }
 
 async function assertFeishuConnectionCenter(page, expected = {}) {
@@ -1313,7 +1344,7 @@ async function exerciseClientHmr(journey, bundlePath, message) {
   const initialStyleCount = await page.locator(
     `style[data-plugin="${CLIENT_PACKAGE_ID}"]`,
   ).count()
-  assert.equal(initialStyleCount, 7, 'Workbench Client did not own exactly seven CSS Module resources')
+  assert.equal(initialStyleCount, 8, 'Workbench Client did not own exactly eight CSS Module resources')
 
   // Change actual inline CSS bytes: stale tag reuse now fails this journey,
   // while a lifecycle-owned HMR replacement updates the live document.
@@ -1498,9 +1529,11 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_FEISHU_CONNECTION_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-tasks-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
   await assertVisibleKeyboardFocus(setupPassword, 'desktop setup password')
   await captureVisual(firstJourney.page, '01-setup-desktop')
@@ -1516,6 +1549,7 @@ async function main() {
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
+  assert.equal(await firstJourney.page.locator('#workbench-project-tasks-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-activity-title').count(), 0)
 
   // Hold the real initialize request briefly so the actual disabled/pending
@@ -1630,6 +1664,7 @@ async function main() {
   await unselectedReview.getByRole('heading', { name: 'Review Center', exact: true })
     .waitFor({ state: 'visible' })
   await assertFeishuConnectionCenter(firstJourney.page)
+  await assertProjectTasksUnbound(firstJourney.page)
   await assertActivityProjection(firstJourney.page, 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_ACTIVITY_PATH) > 0)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_START_PATH) > 0)
@@ -1645,6 +1680,11 @@ async function main() {
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_FEISHU_CONNECTION_PATH) > 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_VERIFY_FEISHU_ROUTE_PATH), 0)
+  assert.equal(
+    countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH),
+    0,
+    'Project Tasks queried Host before a Project was selected',
+  )
   assert.equal(
     countRequestsToPath(firstJourney, WORKBENCH_AUDIT_INTEGRITY_PATH),
     0,
@@ -1711,6 +1751,8 @@ async function main() {
   assert.equal(committedCatalog.definitionDigest, refreshedEmptyCatalog.definitionDigest)
   assert.ok(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_PATH) > 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_PATH), 0)
+  await assertProjectTasksUnbound(firstJourney.page, projectName)
+  assert.ok(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_TASKS_PATH) > 0)
   await assertActivityProjection(
     firstJourney.page,
     2,
@@ -2740,9 +2782,10 @@ async function main() {
   await stopDsh(third.host)
 
   process.stdout.write(
-    'PASS T07 real Workbench setup -> Project Team -> low/high SuggestedChange review '
+    'PASS T08 real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
       + '-> explicit Feishu Bot configure/verify without actor fallback '
+      + '-> Project Tasks selection boundary and verified-route gate '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',

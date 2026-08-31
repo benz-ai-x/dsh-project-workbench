@@ -70,9 +70,20 @@
 - [x] Build an accessible localized Connection Center with independent drafts, exact ambiguous-response retry, reconnect retention, and logout/expiry/Fiber cleanup.
 - [x] Complete the final Schema v5→v6 migration, scenario, Loader/Profile, generated seventeen-method Remote, packed artifact, restart, and browser verification evidence.
 
+## T08 — Bind one primary Feishu Task List and project tasks (#9)
+
+- [x] Bind exactly one existing or newly created primary Task List to a Project through one explicitly selected, verified Bot/User route generation.
+- [x] Project bounded Feishu tasks, recursive subtasks, assignees, followers, comments, completion, opaque remote versions, and canonical URLs without exposing provider payloads.
+- [x] Apply trusted normalized events through an append-only idempotent Inbox and reject duplicate or out-of-order versions.
+- [x] Repair missed events with a bounded periodic full reconciliation that preserves explicit outside-list references and stops cleanly on disposal.
+- [x] Reserve and claim versioned task updates durably before one provider PATCH; settle delivered/conflict/failed/unknown and never blindly retry ambiguity.
+- [x] Keep outside-list tasks invisible until an explicit Owner reference command commits through the audit/Outbox/receipt ledger.
+- [x] Build an accessible localized Project Tasks browser surface with exact identity discovery, hierarchy, roles, comments, canonical links, reconciliation, reference, edit, unknown, reconnect, and cleanup states.
+- [x] Complete Schema v6→v7 migration, production adapter fixtures, Scenario/SQLite/controller/component/lifecycle coverage, generated twenty-three-method Typert artifacts, and built/packed verification.
+
 ## Later tickets
 
-- [ ] T08+ Feishu resource bindings/actions, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T07.
+- [ ] T09+ Calendar federation, files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T08.
 
 ## Definition of done
 

@@ -1197,6 +1197,358 @@ export type VerifyFeishuIdentityRouteResult =
     }
   }
 
+/** One safe Feishu member projection. Provider-specific payloads never cross the Host boundary. */
+export interface FeishuTaskMemberProjection {
+  readonly openId: string
+  readonly name: string | null
+}
+
+/** One authoritative Feishu task comment retained in the local read projection. */
+export interface FeishuTaskCommentProjection {
+  readonly commentId: string
+  readonly content: string
+  readonly creator: FeishuTaskMemberProjection | null
+  readonly replyToCommentId: string | null
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Why one task is visible inside a Project scope. */
+export type ProjectTaskScope = 'primary-list' | 'explicit-reference'
+
+/** Feishu-authoritative task data copied into the Workbench read model. */
+export interface ProjectTaskProjection {
+  readonly taskGuid: string
+  readonly taskId: string | null
+  readonly scope: ProjectTaskScope
+  readonly parentTaskGuid: string | null
+  readonly summary: string
+  readonly description: string
+  readonly assignees: readonly FeishuTaskMemberProjection[]
+  readonly followers: readonly FeishuTaskMemberProjection[]
+  readonly comments: readonly FeishuTaskCommentProjection[]
+  readonly completed: boolean
+  readonly completedAt: string | null
+  readonly canonicalUrl: string
+  /** Opaque Feishu `updated_at` token carried by every Workbench-originated write. */
+  readonly remoteVersion: string
+  readonly projectionRevision: number
+}
+
+/** Exact Bot/User route pinned by the Project task-list binding. */
+export interface ProjectTaskListIdentityProjection {
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly appId: string
+  readonly openId: string
+  readonly tenantKey: string | null
+}
+
+/** The unique primary task-list identity and canonical link for one Project. */
+export interface ProjectTaskListBindingProjection {
+  readonly taskListGuid: string
+  readonly name: string
+  readonly canonicalUrl: string
+  readonly identity: ProjectTaskListIdentityProjection
+  readonly createdByWorkbench: boolean
+  readonly remoteVersion: string
+  readonly boundAt: string
+}
+
+export type ProjectTaskSyncState = 'unbound' | 'healthy' | 'attention' | 'unknown'
+
+/** Safe reconciliation health; the original provider response is never persisted or rendered. */
+export interface ProjectTaskSyncProjection {
+  readonly state: ProjectTaskSyncState
+  readonly lastEventAt: string | null
+  readonly lastReconciledAt: string | null
+  readonly lastAttemptAt: string | null
+  readonly issue: FeishuConnectionIssue | null
+}
+
+/** Observable state of one Workbench-originated Feishu task mutation. */
+export interface FeishuTaskMutationEffectProjection {
+  readonly effectId: string
+  readonly taskGuid: string
+  readonly state: 'prepared' | 'delivered' | 'unknown' | 'failed' | 'conflict'
+  readonly expectedRemoteVersion: string
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Complete Host-owned task workspace projection for one visible Project. */
+export interface ProjectTasksProjection {
+  readonly projectId: string
+  readonly revision: number
+  readonly binding: ProjectTaskListBindingProjection | null
+  readonly tasks: readonly ProjectTaskProjection[]
+  readonly sync: ProjectTaskSyncProjection
+  readonly effects: readonly FeishuTaskMutationEffectProjection[]
+}
+
+export interface ProjectTasksQuery {
+  readonly projectId: string
+}
+
+/** One selectable task list returned by an explicit, exact-identity provider read. */
+export interface FeishuTaskListCandidateProjection {
+  readonly taskListGuid: string
+  readonly name: string
+  readonly canonicalUrl: string
+  readonly remoteVersion: string
+}
+
+export interface DiscoverFeishuTaskListsRequest {
+  readonly projectId: string
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+}
+
+export interface FeishuTaskListDiscoveryProjection {
+  readonly projectId: string
+  readonly connectionRevision: number
+  readonly kind: FeishuIdentityKind
+  readonly routeGeneration: number
+  readonly items: readonly FeishuTaskListCandidateProjection[]
+}
+
+interface BindFeishuTaskListRequestBase {
+  readonly projectId: string
+  readonly kind: FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly expectedBindingRevision: null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-task-list-bind'
+}
+
+/** Bind an accessible list or create one through the exact selected Feishu identity. */
+export type BindFeishuTaskListRequest =
+  | BindFeishuTaskListRequestBase & {
+    readonly mode: 'existing'
+    readonly taskListGuid: string
+    readonly name?: never
+  }
+  | BindFeishuTaskListRequestBase & {
+    readonly mode: 'create'
+    readonly taskListGuid?: never
+    readonly name: string
+  }
+
+export type BindFeishuTaskListResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectTasksProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-list-already-bound'
+      readonly message: string
+      readonly current: ProjectTasksProjection
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'connection-revision-conflict'
+      readonly message: string
+      readonly expectedConnectionRevision: number
+      readonly currentConnectionRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'route-generation-conflict'
+      readonly message: string
+      readonly kind: FeishuIdentityKind
+      readonly expectedRouteGeneration: number
+      readonly currentRouteGeneration: number | null
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'route-unconfigured' | 'route-disabled' | 'route-unverified'
+      readonly message: string
+      readonly kind: FeishuIdentityKind
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'remote-outcome-unknown' | 'remote-rejected'
+      readonly message: string
+      readonly issue: FeishuConnectionIssue
+    }
+  }
+
+export interface ReconcileProjectTasksRequest {
+  readonly projectId: string
+  readonly expectedRevision: number
+}
+
+export type ReconcileProjectTasksResult =
+  | { readonly ok: true; readonly value: ProjectTasksProjection }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-list-unbound'
+      readonly message: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-projection-revision-conflict'
+      readonly message: string
+      readonly expectedRevision: number
+      readonly currentRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'remote-rejected'
+      readonly message: string
+      readonly issue: FeishuConnectionIssue
+    }
+  }
+
+export interface ReferenceFeishuTaskRequest {
+  readonly projectId: string
+  readonly taskGuid: string
+  readonly expectedRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-task-reference'
+}
+
+export type ReferenceFeishuTaskResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectTasksProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-list-unbound'
+      readonly message: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-projection-revision-conflict'
+      readonly message: string
+      readonly expectedRevision: number
+      readonly currentRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-already-in-project'
+      readonly message: string
+      readonly taskGuid: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'remote-rejected'
+      readonly message: string
+      readonly issue: FeishuConnectionIssue
+    }
+  }
+
+export interface UpdateFeishuTaskRequest {
+  readonly projectId: string
+  readonly taskGuid: string
+  readonly expectedRevision: number
+  readonly expectedRemoteVersion: string
+  readonly changes: {
+    readonly summary?: string
+    readonly description?: string
+    readonly completed?: boolean
+  }
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-task-update'
+}
+
+export type UpdateFeishuTaskResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectTasksProjection
+    readonly effect: FeishuTaskMutationEffectProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-list-unbound' | 'task-not-in-project'
+      readonly message: string
+      readonly taskGuid?: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'task-projection-revision-conflict'
+      readonly message: string
+      readonly expectedRevision: number
+      readonly currentRevision: number
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'remote-version-conflict'
+      readonly message: string
+      readonly taskGuid: string
+      readonly expectedRemoteVersion: string
+      readonly currentRemoteVersion: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code: 'remote-outcome-unknown' | 'remote-rejected'
+      readonly message: string
+      readonly effect: FeishuTaskMutationEffectProjection
+      readonly issue: FeishuConnectionIssue
+    }
+  }
+
+/** Normalized event accepted only from a trusted Host connector, never from the browser. */
+export interface FeishuTaskEventInput {
+  readonly eventId: string
+  readonly taskListGuid: string
+  readonly taskGuid: string
+  readonly kind: 'upsert' | 'removed'
+  readonly remoteVersion: string
+  readonly occurredAt: string
+}
+
+export interface FeishuTaskEventResult {
+  readonly outcome: 'applied' | 'duplicate' | 'stale' | 'ignored'
+  readonly projectId: string | null
+  readonly projectionRevision: number | null
+}
+
 /** Durable truth about one committed integration intent. */
 export type WorkbenchOutboxState = 'pending' | 'delivered' | 'unknown' | 'failed'
 
@@ -1223,12 +1575,17 @@ export type WorkbenchFeishuConnectionReason =
   | 'owner-feishu-route-reset'
   | 'owner-feishu-route-disable'
   | 'owner-feishu-route-verify'
+export type WorkbenchFeishuTaskReason =
+  | 'owner-feishu-task-list-bind'
+  | 'owner-feishu-task-reference'
+  | 'owner-feishu-task-update'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
   | WorkbenchProjectTeamReason
   | WorkbenchSuggestedChangeReason
   | WorkbenchFeishuConnectionReason
+  | WorkbenchFeishuTaskReason
 export type WorkbenchAuditAction =
   | 'workbench.status.updated'
   | 'workbench.project.created'
@@ -1244,6 +1601,9 @@ export type WorkbenchAuditAction =
   | 'workbench.feishu-route.reset'
   | 'workbench.feishu-route.disabled'
   | 'workbench.feishu-route.verification-recorded'
+  | 'workbench.feishu-task-list.bound'
+  | 'workbench.feishu-task.referenced'
+  | 'workbench.feishu-task.update-requested'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
@@ -1251,6 +1611,8 @@ export type WorkbenchAuditObjectType =
   | 'project-responsibility'
   | 'suggested-change'
   | 'feishu-connection'
+  | 'feishu-task-list-binding'
+  | 'feishu-task'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
@@ -1268,6 +1630,9 @@ export type WorkbenchActivitySummaryCode =
   | 'feishu-route-verification-healthy'
   | 'feishu-route-verification-attention'
   | 'feishu-route-verification-failed'
+  | 'feishu-task-list-bound'
+  | 'feishu-task-referenced'
+  | 'feishu-task-update-requested'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

@@ -5,17 +5,23 @@ import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   AddProjectMemberRequest,
   AddProjectMemberResult,
+  BindFeishuTaskListRequest,
+  BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteRequest,
   ConfigureFeishuIdentityRouteResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
+  DiscoverFeishuTaskListsRequest,
   FeishuActorBinding,
   FeishuConnectionIssue,
   FeishuConnectionCenterProjection,
   FeishuCredentialProjection,
   FeishuIdentityKind,
+  FeishuTaskEventResult,
+  FeishuTaskMutationEffectProjection,
+  FeishuTaskListDiscoveryProjection,
   FeishuResourceProbeProjection,
   FeishuScopeObservation,
   OutcomeDraft,
@@ -27,9 +33,15 @@ import type {
   ProjectStartProjection,
   ProjectTeamProjection,
   ProjectTeamQuery,
+  ProjectTasksProjection,
+  ProjectTasksQuery,
   ProjectTemplateSelection,
   ProposeProjectResponsibilityChangeRequest,
   ProposeProjectResponsibilityChangeResult,
+  ReconcileProjectTasksRequest,
+  ReconcileProjectTasksResult,
+  ReferenceFeishuTaskRequest,
+  ReferenceFeishuTaskResult,
   ReviewCenterFilter,
   ReviewCenterProjection,
   SetProjectMemberStatusRequest,
@@ -43,9 +55,12 @@ import type {
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
+  WorkbenchFeishuTaskReason,
   WorkbenchStatusSnapshot,
   VerifyFeishuIdentityRouteRequest,
   VerifyFeishuIdentityRouteResult,
+  UpdateFeishuTaskRequest,
+  UpdateFeishuTaskResult,
 } from './client.ts'
 import {
   projectDetailProjection,
@@ -53,21 +68,29 @@ import {
   projectStartProjection,
   projectTeamCommandResult,
   projectTeamProjection,
+  projectTasksProjection,
   reviewCenterProjection,
   statusResult,
   statusSnapshot,
   suggestedChangeDecisionResult,
   suggestedChangeProposalResult,
   type WorkbenchProjectMutation,
+  type WorkbenchCommandMetadata,
   type WorkbenchFeishuVerificationObservation,
   type WorkbenchProjectMemberMutation,
   type WorkbenchProjectMemberStatusMutation,
   type WorkbenchProjectResponsibilityMutation,
+  type WorkbenchFeishuTaskReconciliationTarget,
   type WorkbenchRepository,
   type WorkbenchSuggestedChangeDecisionMutation,
   type WorkbenchSuggestedChangeProposalMutation,
 } from './repository.ts'
-import type { WorkbenchAuthorization } from './authorization.ts'
+import type { AuthorizedScope, WorkbenchAuthorization } from './authorization.ts'
+import type {
+  WorkbenchFeishuTaskEventObservation,
+  WorkbenchFeishuTaskExternalAdapter,
+  WorkbenchFeishuTaskRoute,
+} from './feishu-task-federation.ts'
 
 /** Injectable wall clock; production returns a fresh Date for every command. */
 export interface WorkbenchClock {
@@ -152,6 +175,7 @@ export interface WorkbenchFeishuExternalAdapter extends WorkbenchExternalAdapter
  */
 export interface WorkbenchExternalAdapters {
   readonly feishu?: WorkbenchFeishuExternalAdapter
+  readonly feishuTasks?: WorkbenchFeishuTaskExternalAdapter
   readonly files?: WorkbenchExternalAdapter
   readonly modelAndSubagent?: WorkbenchExternalAdapter
   readonly scheduler?: WorkbenchExternalAdapter
@@ -165,6 +189,8 @@ export interface WorkbenchScenarioOptions {
   readonly adapters: WorkbenchExternalAdapters
   readonly authorization: WorkbenchAuthorization
   readonly maxStatusLength: number
+  /** Zero/omitted disables the timer; production supplies a bounded interval. */
+  readonly taskReconciliationIntervalMs?: number
 }
 
 export const systemWorkbenchClock: WorkbenchClock = Object.freeze({
@@ -199,10 +225,18 @@ export class WorkbenchScenario {
   private readonly inFlight = new Set<Promise<unknown>>()
   private opening: Promise<void> | undefined
   private closing: Promise<void> | undefined
+  private taskEventUnsubscribe: (() => void) | undefined
+  private taskReconciliationTimer: ReturnType<typeof setInterval> | undefined
+  private periodicReconciliationRunning = false
 
   constructor(readonly options: WorkbenchScenarioOptions) {
     if (!Number.isSafeInteger(options.maxStatusLength) || options.maxStatusLength < 1) {
       throw new TypeError('maxStatusLength must be a positive safe integer')
+    }
+    if (options.taskReconciliationIntervalMs !== undefined
+      && (!Number.isSafeInteger(options.taskReconciliationIntervalMs)
+        || options.taskReconciliationIntervalMs < 0)) {
+      throw new TypeError('taskReconciliationIntervalMs must be a non-negative safe integer')
     }
   }
 
@@ -553,6 +587,391 @@ export class WorkbenchScenario {
           }),
           occurredAt: checkedAt,
         }),
+      }), operationSignal)
+    })
+  }
+
+  /** Read the Feishu-authoritative task workspace for one authorized Project. */
+  projectTasks(
+    query: ProjectTasksQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTasksProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('projectTasks requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.read',
+        operationSignal,
+      )
+      const normalized = validateProjectTasksQuery(query)
+      const projection = await this.options.repository.readProjectTasks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.project.tasks.read',
+        projectTasksProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Discover task lists through exactly the selected, verified Bot/User route. */
+  discoverFeishuTaskLists(
+    request: DiscoverFeishuTaskListsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskListDiscoveryProjection> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('discoverFeishuTaskLists requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.bind',
+        operationSignal,
+      )
+      const normalized = validateDiscoverFeishuTaskListsRequest(request)
+      const project = await this.options.repository.readProjectTasks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (project === null) throw badRequest('Project was not found', { field: 'projectId' })
+      const stored = await this.options.repository.readFeishuConnection(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+      }), operationSignal)
+      const resolved = resolveTaskRouteForBinding(stored, normalized)
+      if (!resolved.ok) throw unavailable(resolved.error.error.message)
+      const adapter = requiredTaskAdapter(this.options.adapters)
+      const discovered = await adapter.listTaskLists(resolved.route, operationSignal)
+      throwIfCancelled(operationSignal)
+      if (discovered.state !== 'ok') {
+        throw unavailable('Feishu task-list discovery was rejected')
+      }
+      return Object.freeze({
+        projectId: normalized.projectId,
+        connectionRevision: stored.revision,
+        kind: normalized.kind,
+        routeGeneration: normalized.expectedRouteGeneration,
+        items: Object.freeze(discovered.value.map(item => Object.freeze({ ...item }))),
+      })
+    })
+  }
+
+  /** Create/select the unique primary task list, with replay before remote side effects. */
+  bindFeishuTaskList(
+    request: BindFeishuTaskListRequest,
+    signal: AbortSignal,
+  ): Promise<BindFeishuTaskListResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('bindFeishuTaskList requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.bind',
+        operationSignal,
+      )
+      const normalized = validateBindFeishuTaskListRequest(request)
+      const intent = normalized.mode === 'existing'
+        ? Object.freeze({ mode: 'existing' as const, taskListGuid: normalized.taskListGuid })
+        : Object.freeze({ mode: 'create' as const, name: normalized.name })
+      const replay = await this.options.repository.replayFeishuTaskListBinding(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        intent,
+        kind: normalized.kind,
+        expectedConnectionRevision: normalized.expectedConnectionRevision,
+        expectedRouteGeneration: normalized.expectedRouteGeneration,
+        expectedBindingRevision: null,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+      }), operationSignal)
+      if (replay !== null) return replay
+      const current = await this.options.repository.readProjectTasks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (current === null) return taskProjectNotFoundResult(normalized.projectId)
+      if (current.binding !== null) {
+        return Object.freeze({
+          ok: false,
+          error: Object.freeze({
+            code: 'task-list-already-bound',
+            message: 'Project already has a primary Feishu task list',
+            current,
+          }),
+        })
+      }
+      const stored = await this.options.repository.readFeishuConnection(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+      }), operationSignal)
+      const resolved = resolveTaskRouteForBinding(stored, normalized)
+      if (!resolved.ok) return resolved.error
+      const adapter = requiredTaskAdapter(this.options.adapters)
+      let taskListGuid: string
+      let createdByWorkbench = false
+      if (normalized.mode === 'create') {
+        const created = await adapter.createTaskList(resolved.route, Object.freeze({
+          name: normalized.name,
+          idempotencyKey: normalized.idempotencyKey,
+        }), operationSignal)
+        throwIfCancelled(operationSignal)
+        if (created.state !== 'ok') {
+          return taskRemoteBindFailure(
+            created.state === 'unknown' ? 'remote-outcome-unknown' : 'remote-rejected',
+            created.issue,
+          )
+        }
+        taskListGuid = created.value.taskListGuid
+        createdByWorkbench = true
+      } else {
+        taskListGuid = normalized.taskListGuid
+      }
+      const observed = await adapter.readTaskList(resolved.route, taskListGuid, operationSignal)
+      throwIfCancelled(operationSignal)
+      if (observed.state !== 'ok') return taskRemoteBindFailure('remote-rejected', observed.issue)
+      if (observed.value.taskList.taskListGuid !== taskListGuid) {
+        throw infrastructure('Feishu task-list read changed resource identity')
+      }
+      const boundAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      return this.options.repository.commitFeishuTaskListBinding(Object.freeze({
+        projectId: normalized.projectId,
+        intent,
+        expectedBindingRevision: null,
+        expectedConnectionRevision: normalized.expectedConnectionRevision,
+        expectedRouteGeneration: normalized.expectedRouteGeneration,
+        route: resolved.route,
+        createdByWorkbench,
+        snapshot: observed.value,
+        boundAt,
+        command: taskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          normalized.reason,
+          boundAt,
+        ),
+      }), operationSignal)
+    })
+  }
+
+  /** Replace the local primary-list subset from one complete remote baseline. */
+  reconcileProjectTasks(
+    request: ReconcileProjectTasksRequest,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('reconcileProjectTasks requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.reconcile',
+        operationSignal,
+      )
+      const normalized = validateReconcileProjectTasksRequest(request)
+      const current = await this.options.repository.readProjectTasks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const preflight = reconcilePreflight(current, normalized)
+      if (preflight !== null) return preflight
+      const target = await this.options.repository.readFeishuTaskReconciliationTarget(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (target === null) throw infrastructure('Workbench task reconciliation target disappeared')
+      return this.reconcileTaskTarget(target, operationSignal)
+    })
+  }
+
+  /** Add one out-of-list task only through this explicit, audited command. */
+  referenceFeishuTask(
+    request: ReferenceFeishuTaskRequest,
+    signal: AbortSignal,
+  ): Promise<ReferenceFeishuTaskResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('referenceFeishuTask requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.reference',
+        operationSignal,
+      )
+      const normalized = validateReferenceFeishuTaskRequest(request)
+      const current = await this.options.repository.readProjectTasks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const preflight = referencePreflight(current, normalized)
+      if (preflight !== null) return preflight
+      const target = await this.options.repository.readFeishuTaskReconciliationTarget(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (target === null) throw infrastructure('Workbench task reference target disappeared')
+      const observed = await requiredTaskAdapter(this.options.adapters).readTask(
+        target.route,
+        normalized.taskGuid,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (observed.state !== 'ok') return taskRemoteReferenceFailure(observed.issue)
+      const referencedAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      return this.options.repository.commitFeishuTaskReference(Object.freeze({
+        projectId: normalized.projectId,
+        expectedRevision: normalized.expectedRevision,
+        task: observed.value,
+        referencedAt,
+        command: taskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          normalized.reason,
+          referencedAt,
+        ),
+      }), operationSignal)
+    })
+  }
+
+  /** Reserve, attempt exactly once, and durably settle one versioned Feishu PATCH. */
+  updateFeishuTask(
+    request: UpdateFeishuTaskRequest,
+    signal: AbortSignal,
+  ): Promise<UpdateFeishuTaskResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('updateFeishuTask requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.update',
+        operationSignal,
+      )
+      const normalized = validateUpdateFeishuTaskRequest(request)
+      const preparedAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const mutation = Object.freeze({
+        effectId: generatedId(`effect-${commandId}`, 'Feishu task effect'),
+        projectId: normalized.projectId,
+        taskGuid: normalized.taskGuid,
+        expectedRevision: normalized.expectedRevision,
+        expectedRemoteVersion: normalized.expectedRemoteVersion,
+        changes: Object.freeze({ ...normalized.changes }),
+        preparedAt,
+        command: taskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          normalized.reason,
+          preparedAt,
+        ),
+      })
+      let reservation = await this.options.repository.reserveFeishuTaskUpdate(
+        mutation,
+        operationSignal,
+      )
+      if (reservation.state !== 'deliver') return reservation.result
+      if (!await this.options.repository.claimFeishuTaskUpdate(
+        reservation.effect.effectId,
+        commandInstant(this.options.clock),
+        operationSignal,
+      )) {
+        reservation = await this.options.repository.reserveFeishuTaskUpdate(
+          mutation,
+          operationSignal,
+        )
+        if (reservation.state !== 'deliver') return reservation.result
+        return unknownTaskUpdateResult(reservation.effect, reservation.receipt)
+      }
+      const settleSignal = new AbortController().signal
+      try {
+        const outcome = await requiredTaskAdapter(this.options.adapters).updateTask(
+          reservation.route,
+          Object.freeze({
+            taskGuid: normalized.taskGuid,
+            expectedRemoteVersion: normalized.expectedRemoteVersion,
+            idempotencyKey: normalized.idempotencyKey,
+            changes: normalized.changes,
+          }),
+          operationSignal,
+        )
+        const settledAt = commandInstant(this.options.clock)
+        if (outcome.state === 'ok') {
+          return this.options.repository.settleFeishuTaskUpdate(
+            reservation.effect.effectId,
+            Object.freeze({ state: 'delivered', task: outcome.value, settledAt }),
+            settleSignal,
+          )
+        }
+        if (outcome.state === 'conflict') {
+          return this.options.repository.settleFeishuTaskUpdate(
+            reservation.effect.effectId,
+            Object.freeze({ state: 'conflict', current: outcome.current, settledAt }),
+            settleSignal,
+          )
+        }
+        return this.options.repository.settleFeishuTaskUpdate(
+          reservation.effect.effectId,
+          Object.freeze({
+            state: outcome.state === 'unknown' ? 'unknown' : 'failed',
+            issue: outcome.issue,
+            settledAt,
+          }),
+          settleSignal,
+        )
+      } catch (error: unknown) {
+        const result = await this.options.repository.settleFeishuTaskUpdate(
+          reservation.effect.effectId,
+          Object.freeze({
+            state: 'unknown',
+            issue: ambiguousTaskTransportIssue(),
+            settledAt: commandInstant(this.options.clock),
+          }),
+          settleSignal,
+        )
+        if (error instanceof TypertRemoteFailure && !operationSignal.aborted) throw error
+        return result
+      }
+    })
+  }
+
+  /** Trusted connector entrypoint; it is intentionally not exposed as a Remote. */
+  ingestFeishuTaskEvent(
+    observation: WorkbenchFeishuTaskEventObservation,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<FeishuTaskEventResult> {
+    return this.execute(async (lifetimeSignal) => {
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
+      return this.options.repository.commitFeishuTaskEvent(Object.freeze({
+        event: observation.event,
+        task: observation.task,
+        receivedAt: commandInstant(this.options.clock),
       }), operationSignal)
     })
   }
@@ -1152,6 +1571,7 @@ export class WorkbenchScenario {
       await this.options.repository.open()
       if (this.phase === 'closing') return
       this.phase = 'running'
+      this.installTaskFederationLifecycle()
     } catch (error: unknown) {
       this.phase = 'closed'
       await this.options.repository.close().catch(() => undefined)
@@ -1162,6 +1582,15 @@ export class WorkbenchScenario {
   private async doClose(): Promise<void> {
     if (this.phase === 'closed') return
     this.phase = 'closing'
+    if (this.taskReconciliationTimer !== undefined) {
+      clearInterval(this.taskReconciliationTimer)
+      this.taskReconciliationTimer = undefined
+    }
+    try {
+      this.taskEventUnsubscribe?.()
+    } finally {
+      this.taskEventUnsubscribe = undefined
+    }
     this.lifetime.abort(new Error('Workbench scenario is disposing'))
     await this.opening?.catch(() => undefined)
     await Promise.allSettled([...this.inFlight])
@@ -1170,6 +1599,67 @@ export class WorkbenchScenario {
     } finally {
       this.phase = 'closed'
     }
+  }
+
+  private installTaskFederationLifecycle(): void {
+    const adapter = this.options.adapters.feishuTasks
+    if (adapter?.subscribeTaskEvents !== undefined) {
+      this.taskEventUnsubscribe = adapter.subscribeTaskEvents(async (observation) => {
+        await this.ingestFeishuTaskEvent(observation, this.lifetime.signal)
+      })
+    }
+    const interval = this.options.taskReconciliationIntervalMs ?? 0
+    if (adapter !== undefined && interval > 0) {
+      this.taskReconciliationTimer = setInterval(() => {
+        void this.runPeriodicTaskReconciliation().catch(() => undefined)
+      }, interval)
+      this.taskReconciliationTimer.unref?.()
+    }
+  }
+
+  private async runPeriodicTaskReconciliation(): Promise<void> {
+    if (this.periodicReconciliationRunning || this.phase !== 'running') return
+    this.periodicReconciliationRunning = true
+    try {
+      await this.execute(async (signal) => {
+        const targets = await this.options.repository.listFeishuTaskReconciliationTargets(signal)
+        for (const target of targets) {
+          throwIfCancelled(signal)
+          await this.reconcileTaskTarget(target, signal)
+        }
+      })
+    } finally {
+      this.periodicReconciliationRunning = false
+    }
+  }
+
+  private async reconcileTaskTarget(
+    target: WorkbenchFeishuTaskReconciliationTarget,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult> {
+    const observed = await requiredTaskAdapter(this.options.adapters).readTaskList(
+      target.route,
+      target.taskListGuid,
+      signal,
+    )
+    const attemptedAt = commandInstant(this.options.clock)
+    if (observed.state === 'ok') {
+      if (observed.value.taskList.taskListGuid !== target.taskListGuid) {
+        throw infrastructure('Feishu reconciliation changed task-list identity')
+      }
+      return this.options.repository.commitFeishuTaskReconciliation(Object.freeze({
+        projectId: target.projectId,
+        expectedRevision: target.revision,
+        snapshot: observed.value,
+        attemptedAt,
+      }), signal)
+    }
+    return this.options.repository.commitFeishuTaskReconciliationFailure(Object.freeze({
+      projectId: target.projectId,
+      expectedRevision: target.revision,
+      attemptedAt,
+      issue: observed.issue,
+    }), signal)
   }
 
   private async execute<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -2250,7 +2740,9 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && objectType !== 'project-member'
     && objectType !== 'project-responsibility'
     && objectType !== 'suggested-change'
-    && objectType !== 'feishu-connection') {
+    && objectType !== 'feishu-connection'
+    && objectType !== 'feishu-task-list-binding'
+    && objectType !== 'feishu-task') {
     throw badRequest('objectType is not supported', { field: 'objectType' })
   }
   const objectId: unknown = record.objectId
@@ -2273,7 +2765,10 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     && action !== 'workbench.feishu-route.configured'
     && action !== 'workbench.feishu-route.reset'
     && action !== 'workbench.feishu-route.disabled'
-    && action !== 'workbench.feishu-route.verification-recorded') {
+    && action !== 'workbench.feishu-route.verification-recorded'
+    && action !== 'workbench.feishu-task-list.bound'
+    && action !== 'workbench.feishu-task.referenced'
+    && action !== 'workbench.feishu-task.update-requested') {
     throw badRequest('action is not supported', { field: 'action' })
   }
   const beforeSequence: unknown = record.beforeSequence
@@ -2304,6 +2799,447 @@ function validateActivityFilter(value: WorkbenchActivityFilter): WorkbenchActivi
     ...(beforeSequence === undefined ? {} : { beforeSequence: beforeSequence as number }),
     limit: requestedLimit === undefined ? DEFAULT_ACTIVITY_LIMIT : requestedLimit as number,
   })
+}
+
+const MAX_FEISHU_TASK_LIST_NAME_LENGTH = 100
+const MAX_FEISHU_TASK_TEXT_LENGTH = 3_000
+
+function validateProjectTasksQuery(value: ProjectTasksQuery): ProjectTasksQuery {
+  const record = exactRecord(value, 'projectTasks query', ['projectId'])
+  return Object.freeze({ projectId: safeId(record.projectId, 'projectId') })
+}
+
+function validateDiscoverFeishuTaskListsRequest(
+  value: DiscoverFeishuTaskListsRequest,
+): DiscoverFeishuTaskListsRequest {
+  const record = exactRecord(value, 'discoverFeishuTaskLists request', [
+    'projectId', 'kind', 'expectedConnectionRevision', 'expectedRouteGeneration',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    kind: taskIdentityKind(record.kind),
+    expectedConnectionRevision: nonNegativeRevision(
+      record.expectedConnectionRevision,
+      'expectedConnectionRevision',
+    ),
+    expectedRouteGeneration: positiveRevision(
+      record.expectedRouteGeneration,
+      'expectedRouteGeneration',
+    ),
+  })
+}
+
+function validateBindFeishuTaskListRequest(
+  value: BindFeishuTaskListRequest,
+): BindFeishuTaskListRequest {
+  const base = [
+    'projectId', 'kind', 'mode', 'expectedConnectionRevision',
+    'expectedRouteGeneration', 'expectedBindingRevision', 'idempotencyKey',
+    'causationId', 'reason',
+  ]
+  const preliminary = exactRecord(value, 'bindFeishuTaskList request', base, [
+    'taskListGuid', 'name',
+  ])
+  if (preliminary.reason !== 'owner-feishu-task-list-bind') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  if (preliminary.expectedBindingRevision !== null) {
+    throw badRequest('expectedBindingRevision must be null', { field: 'expectedBindingRevision' })
+  }
+  const common = {
+    projectId: safeId(preliminary.projectId, 'projectId'),
+    kind: taskIdentityKind(preliminary.kind),
+    expectedConnectionRevision: nonNegativeRevision(
+      preliminary.expectedConnectionRevision,
+      'expectedConnectionRevision',
+    ),
+    expectedRouteGeneration: positiveRevision(
+      preliminary.expectedRouteGeneration,
+      'expectedRouteGeneration',
+    ),
+    expectedBindingRevision: null,
+    idempotencyKey: validateCommandKey(preliminary.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(preliminary.causationId, 'causationId'),
+    reason: 'owner-feishu-task-list-bind' as const,
+  }
+  if (preliminary.mode === 'existing') {
+    exactRecord(value, 'bindFeishuTaskList existing request', [...base, 'taskListGuid'])
+    return Object.freeze({
+      ...common,
+      mode: 'existing',
+      taskListGuid: safeFeishuResourceId(preliminary.taskListGuid, 'taskListGuid'),
+    })
+  }
+  if (preliminary.mode === 'create') {
+    exactRecord(value, 'bindFeishuTaskList create request', [...base, 'name'])
+    return Object.freeze({
+      ...common,
+      mode: 'create',
+      name: boundedText(preliminary.name, 'name', MAX_FEISHU_TASK_LIST_NAME_LENGTH),
+    })
+  }
+  throw badRequest('mode must be existing or create', { field: 'mode' })
+}
+
+function validateReconcileProjectTasksRequest(
+  value: ReconcileProjectTasksRequest,
+): ReconcileProjectTasksRequest {
+  const record = exactRecord(value, 'reconcileProjectTasks request', [
+    'projectId', 'expectedRevision',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+  })
+}
+
+function validateReferenceFeishuTaskRequest(
+  value: ReferenceFeishuTaskRequest,
+): ReferenceFeishuTaskRequest {
+  const record = exactRecord(value, 'referenceFeishuTask request', [
+    'projectId', 'taskGuid', 'expectedRevision', 'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.reason !== 'owner-feishu-task-reference') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    taskGuid: safeFeishuResourceId(record.taskGuid, 'taskGuid'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-feishu-task-reference',
+  })
+}
+
+function validateUpdateFeishuTaskRequest(
+  value: UpdateFeishuTaskRequest,
+): UpdateFeishuTaskRequest {
+  const record = exactRecord(value, 'updateFeishuTask request', [
+    'projectId', 'taskGuid', 'expectedRevision', 'expectedRemoteVersion',
+    'changes', 'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.reason !== 'owner-feishu-task-update') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  const changesRecord = exactRecord(record.changes, 'changes', [], [
+    'summary', 'description', 'completed',
+  ])
+  if (Object.keys(changesRecord).length < 1) {
+    throw badRequest('changes must contain at least one field', { field: 'changes' })
+  }
+  const changes = Object.freeze({
+    ...(Object.hasOwn(changesRecord, 'summary') ? {
+      summary: boundedText(changesRecord.summary, 'changes.summary', MAX_FEISHU_TASK_TEXT_LENGTH),
+    } : {}),
+    ...(Object.hasOwn(changesRecord, 'description') ? {
+      description: boundedTaskDescription(changesRecord.description, 'changes.description'),
+    } : {}),
+    ...(Object.hasOwn(changesRecord, 'completed') ? {
+      completed: booleanField(changesRecord.completed, 'changes.completed'),
+    } : {}),
+  })
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    taskGuid: safeFeishuResourceId(record.taskGuid, 'taskGuid'),
+    expectedRevision: positiveRevision(record.expectedRevision, 'expectedRevision'),
+    expectedRemoteVersion: boundedRemoteVersion(
+      record.expectedRemoteVersion,
+      'expectedRemoteVersion',
+    ),
+    changes,
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-feishu-task-update',
+  })
+}
+
+function taskIdentityKind(value: unknown): FeishuIdentityKind {
+  if (value !== 'bot' && value !== 'user') {
+    throw badRequest('kind must be bot or user', { field: 'kind' })
+  }
+  return value
+}
+
+function safeFeishuResourceId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !SAFE_FEISHU_RESOURCE_ID.test(value)) {
+    throw badRequest(`${field} must be a safe Feishu identifier`, { field })
+  }
+  return value
+}
+
+function boundedRemoteVersion(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 64
+    || !value.isWellFormed() || TEXT_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw badRequest(`${field} must be a bounded remote version`, { field })
+  }
+  return value
+}
+
+function boundedTaskDescription(value: unknown, field: string): string {
+  if (typeof value !== 'string' || [...value].length > MAX_FEISHU_TASK_TEXT_LENGTH
+    || !value.isWellFormed() || TEXT_CONTROL_CHARACTER_PATTERN.test(value)) {
+    throw badRequest(`${field} must contain at most ${MAX_FEISHU_TASK_TEXT_LENGTH} safe characters`, {
+      field,
+    })
+  }
+  return value
+}
+
+function booleanField(value: unknown, field: string): boolean {
+  if (typeof value !== 'boolean') throw badRequest(`${field} must be boolean`, { field })
+  return value
+}
+
+type StoredFeishuConnection = Awaited<ReturnType<WorkbenchRepository['readFeishuConnection']>>
+
+function resolveTaskRouteForBinding(
+  stored: StoredFeishuConnection,
+  request: Pick<
+    DiscoverFeishuTaskListsRequest,
+    'kind' | 'expectedConnectionRevision' | 'expectedRouteGeneration'
+  >,
+):
+  | { readonly ok: true; readonly route: WorkbenchFeishuTaskRoute }
+  | {
+    readonly ok: false
+    readonly error: Extract<BindFeishuTaskListResult, { readonly ok: false }>
+  } {
+  if (stored.revision !== request.expectedConnectionRevision) {
+    return {
+      ok: false,
+      error: Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'connection-revision-conflict',
+          message: 'Feishu connection changed before task-list access',
+          expectedConnectionRevision: request.expectedConnectionRevision,
+          currentConnectionRevision: stored.revision,
+        }),
+      }),
+    }
+  }
+  const selected = request.kind === 'bot' ? stored.bot : stored.user
+  if (selected.generation === null) {
+    return {
+      ok: false,
+      error: Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'route-unconfigured',
+          message: `Feishu ${request.kind} route is not configured`,
+          kind: request.kind,
+        }),
+      }),
+    }
+  }
+  if (selected.generation !== request.expectedRouteGeneration) {
+    return {
+      ok: false,
+      error: Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'route-generation-conflict',
+          message: 'Feishu route generation changed before task-list access',
+          kind: request.kind,
+          expectedRouteGeneration: request.expectedRouteGeneration,
+          currentRouteGeneration: selected.generation,
+        }),
+      }),
+    }
+  }
+  if (selected.state === 'disabled') {
+    return {
+      ok: false,
+      error: Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'route-disabled',
+          message: `Feishu ${request.kind} route is disabled`,
+          kind: request.kind,
+        }),
+      }),
+    }
+  }
+  if (selected.actor === null) {
+    return {
+      ok: false,
+      error: Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          code: 'route-unverified',
+          message: `Feishu ${request.kind} route is not identity-verified`,
+          kind: request.kind,
+        }),
+      }),
+    }
+  }
+  if (selected.appId === null || selected.credentialRef === null) {
+    throw infrastructure('Workbench Feishu route projection is incomplete')
+  }
+  return {
+    ok: true,
+    route: Object.freeze({
+      kind: request.kind,
+      routeGeneration: selected.generation,
+      appId: selected.appId,
+      credentialRef: selected.credentialRef,
+      actor: Object.freeze({ ...selected.actor }),
+    }),
+  }
+}
+
+function requiredTaskAdapter(adapters: WorkbenchExternalAdapters): WorkbenchFeishuTaskExternalAdapter {
+  if (adapters.feishuTasks === undefined) {
+    throw unavailable('Workbench Feishu task adapter is not available')
+  }
+  return adapters.feishuTasks
+}
+
+function taskCommand<R extends WorkbenchFeishuTaskReason>(
+  ids: WorkbenchIdGenerator,
+  commandId: string,
+  scope: AuthorizedScope,
+  idempotencyKey: string,
+  causationId: string,
+  reason: R,
+  occurredAt: string,
+): WorkbenchCommandMetadata & { readonly reason: R } {
+  return Object.freeze({
+    commandId,
+    auditEventId: generatedId(ids.nextAuditEventId(), 'audit event'),
+    outboxId: generatedId(ids.nextOutboxId(), 'outbox'),
+    idempotencyKey,
+    causationId,
+    reason,
+    actor: Object.freeze({
+      kind: 'owner',
+      id: scope.ownerId,
+      organizationId: scope.organizationId,
+      teamId: scope.teamId,
+    }),
+    occurredAt,
+  })
+}
+
+function taskProjectNotFoundResult(projectId: string): BindFeishuTaskListResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found',
+      message: `Workbench Project ${projectId} was not found in the authorized scope`,
+      projectId,
+    }),
+  })
+}
+
+function taskRemoteBindFailure(
+  code: 'remote-outcome-unknown' | 'remote-rejected',
+  issue: FeishuConnectionIssue,
+): BindFeishuTaskListResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code,
+      message: code === 'remote-outcome-unknown'
+        ? 'Feishu task-list creation outcome is unknown'
+        : 'Feishu rejected task-list access',
+      issue: detachedIssue(issue),
+    }),
+  })
+}
+
+function taskRemoteReferenceFailure(issue: FeishuConnectionIssue): ReferenceFeishuTaskResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-rejected',
+      message: 'Feishu rejected the explicit task reference',
+      issue: detachedIssue(issue),
+    }),
+  })
+}
+
+function reconcilePreflight(
+  current: ProjectTasksProjection | null,
+  request: ReconcileProjectTasksRequest,
+): ReconcileProjectTasksResult | null {
+  if (current === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'project-not-found',
+        message: `Workbench Project ${request.projectId} was not found in the authorized scope`,
+        projectId: request.projectId,
+      }),
+    })
+  }
+  if (current.binding === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({ code: 'task-list-unbound', message: 'Project has no primary task list' }),
+    })
+  }
+  if (current.revision !== request.expectedRevision) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'task-projection-revision-conflict',
+        message: 'Project task projection changed before reconciliation',
+        expectedRevision: request.expectedRevision,
+        currentRevision: current.revision,
+      }),
+    })
+  }
+  return null
+}
+
+function referencePreflight(
+  current: ProjectTasksProjection | null,
+  request: ReferenceFeishuTaskRequest,
+): ReferenceFeishuTaskResult | null {
+  const shared = reconcilePreflight(current, request)
+  if (shared !== null) return shared as ReferenceFeishuTaskResult
+  if ((current as ProjectTasksProjection).tasks.some(task => task.taskGuid === request.taskGuid)) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'task-already-in-project',
+        message: 'Feishu task is already visible in this Project',
+        taskGuid: request.taskGuid,
+      }),
+    })
+  }
+  return null
+}
+
+function unknownTaskUpdateResult(
+  effect: FeishuTaskMutationEffectProjection,
+  _receipt: unknown,
+): UpdateFeishuTaskResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'remote-outcome-unknown',
+      message: 'Feishu task update is already in flight; reconcile before retrying',
+      effect: Object.freeze({ ...effect, state: 'unknown' }),
+      issue: ambiguousTaskTransportIssue(),
+    }),
+  })
+}
+
+function ambiguousTaskTransportIssue(): FeishuConnectionIssue {
+  return Object.freeze({
+    code: 'unknown-provider-error',
+    recovery: 'inspect-provider',
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+}
+
+function detachedIssue(issue: FeishuConnectionIssue): FeishuConnectionIssue {
+  return Object.freeze({ ...issue, missingScopes: Object.freeze([...issue.missingScopes]) })
 }
 
 function generatedId(value: string, kind: string): string {

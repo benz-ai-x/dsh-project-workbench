@@ -32,6 +32,8 @@ export interface ActivityPanelCopy {
   readonly objectProjectResponsibility: string
   readonly objectSuggestedChange: string
   readonly objectFeishuConnection: string
+  readonly objectFeishuTaskListBinding: string
+  readonly objectFeishuTask: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -49,6 +51,9 @@ export interface ActivityPanelCopy {
   readonly actionFeishuRouteReset: string
   readonly actionFeishuRouteDisabled: string
   readonly actionFeishuRouteVerificationRecorded: string
+  readonly actionFeishuTaskListBound: string
+  readonly actionFeishuTaskReferenced: string
+  readonly actionFeishuTaskUpdateRequested: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -84,6 +89,9 @@ export interface ActivityPanelCopy {
   readonly summaryFeishuVerificationHealthy: string
   readonly summaryFeishuVerificationAttention: string
   readonly summaryFeishuVerificationFailed: string
+  readonly summaryFeishuTaskListBound: string
+  readonly summaryFeishuTaskReferenced: string
+  readonly summaryFeishuTaskUpdateRequested: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -104,6 +112,9 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerFeishuRouteReset: string
   readonly reasonOwnerFeishuRouteDisable: string
   readonly reasonOwnerFeishuRouteVerify: string
+  readonly reasonOwnerFeishuTaskListBind: string
+  readonly reasonOwnerFeishuTaskReference: string
+  readonly reasonOwnerFeishuTaskUpdate: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -131,6 +142,8 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectProjectResponsibility: 'Project Responsibility',
   objectSuggestedChange: 'SuggestedChange',
   objectFeishuConnection: 'Feishu connection',
+  objectFeishuTaskListBinding: 'Feishu task-list binding',
+  objectFeishuTask: 'Feishu task',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -148,6 +161,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionFeishuRouteReset: 'Feishu route reset',
   actionFeishuRouteDisabled: 'Feishu route disabled',
   actionFeishuRouteVerificationRecorded: 'Feishu route verification recorded',
+  actionFeishuTaskListBound: 'Feishu task list bound',
+  actionFeishuTaskReferenced: 'Feishu task referenced',
+  actionFeishuTaskUpdateRequested: 'Feishu task update requested',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -183,6 +199,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summaryFeishuVerificationHealthy: 'Feishu route verification healthy',
   summaryFeishuVerificationAttention: 'Feishu route verification needs attention',
   summaryFeishuVerificationFailed: 'Feishu route verification failed',
+  summaryFeishuTaskListBound: 'Feishu task list bound to Project',
+  summaryFeishuTaskReferenced: 'Outside-list Feishu task referenced',
+  summaryFeishuTaskUpdateRequested: 'Feishu task update requested',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -203,6 +222,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerFeishuRouteReset: 'Owner Feishu identity reset',
   reasonOwnerFeishuRouteDisable: 'Owner Feishu route disable',
   reasonOwnerFeishuRouteVerify: 'Owner Feishu route verification',
+  reasonOwnerFeishuTaskListBind: 'Owner Feishu task-list binding',
+  reasonOwnerFeishuTaskReference: 'Owner Feishu task reference',
+  reasonOwnerFeishuTaskUpdate: 'Owner Feishu task update',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -228,6 +250,8 @@ function isActivityObjectType(
     || value === 'project-responsibility'
     || value === 'suggested-change'
     || value === 'feishu-connection'
+    || value === 'feishu-task-list-binding'
+    || value === 'feishu-task'
 }
 
 function isActivityAction(
@@ -247,6 +271,9 @@ function isActivityAction(
     || value === 'workbench.feishu-route.reset'
     || value === 'workbench.feishu-route.disabled'
     || value === 'workbench.feishu-route.verification-recorded'
+    || value === 'workbench.feishu-task-list.bound'
+    || value === 'workbench.feishu-task.referenced'
+    || value === 'workbench.feishu-task.update-requested'
 }
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
@@ -389,6 +416,8 @@ export function ActivityPanel({
                 <option value="project-responsibility">{copy.objectProjectResponsibility}</option>
                 <option value="suggested-change">{copy.objectSuggestedChange}</option>
                 <option value="feishu-connection">{copy.objectFeishuConnection}</option>
+                <option value="feishu-task-list-binding">{copy.objectFeishuTaskListBinding}</option>
+                <option value="feishu-task">{copy.objectFeishuTask}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -444,6 +473,15 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.feishu-route.verification-recorded">
                   {copy.actionFeishuRouteVerificationRecorded}
+                </option>
+                <option value="workbench.feishu-task-list.bound">
+                  {copy.actionFeishuTaskListBound}
+                </option>
+                <option value="workbench.feishu-task.referenced">
+                  {copy.actionFeishuTaskReferenced}
+                </option>
+                <option value="workbench.feishu-task.update-requested">
+                  {copy.actionFeishuTaskUpdateRequested}
                 </option>
               </select>
             </label>
@@ -626,6 +664,9 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'feishu-route-verification-healthy': return copy.summaryFeishuVerificationHealthy
     case 'feishu-route-verification-attention': return copy.summaryFeishuVerificationAttention
     case 'feishu-route-verification-failed': return copy.summaryFeishuVerificationFailed
+    case 'feishu-task-list-bound': return copy.summaryFeishuTaskListBound
+    case 'feishu-task-referenced': return copy.summaryFeishuTaskReferenced
+    case 'feishu-task-update-requested': return copy.summaryFeishuTaskUpdateRequested
   }
 }
 
@@ -645,6 +686,9 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-feishu-route-reset': return copy.reasonOwnerFeishuRouteReset
     case 'owner-feishu-route-disable': return copy.reasonOwnerFeishuRouteDisable
     case 'owner-feishu-route-verify': return copy.reasonOwnerFeishuRouteVerify
+    case 'owner-feishu-task-list-bind': return copy.reasonOwnerFeishuTaskListBind
+    case 'owner-feishu-task-reference': return copy.reasonOwnerFeishuTaskReference
+    case 'owner-feishu-task-update': return copy.reasonOwnerFeishuTaskUpdate
   }
 }
 

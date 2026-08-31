@@ -20,6 +20,11 @@ export type WorkbenchAction =
   | 'workbench.integration.feishu.read'
   | 'workbench.integration.feishu.configure'
   | 'workbench.integration.feishu.verify'
+  | 'workbench.project.tasks.read'
+  | 'workbench.project.tasks.bind'
+  | 'workbench.project.tasks.reconcile'
+  | 'workbench.project.tasks.reference'
+  | 'workbench.project.tasks.update'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

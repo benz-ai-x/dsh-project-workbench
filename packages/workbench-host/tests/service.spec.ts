@@ -9,6 +9,7 @@ import WorkbenchService, {
   DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS,
   DEFAULT_WORKBENCH_DATABASE_PATH,
   DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
+  DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS,
   V1OwnerAuthorizationPolicy,
   WorkbenchAuthorizationContext,
   ownerPrincipal,
@@ -75,6 +76,12 @@ describe('WorkbenchService', () => {
       { method: 'feishuConnectionCenter', invocation: { kind: 'direct' } },
       { method: 'configureFeishuIdentityRoute', invocation: { kind: 'direct' } },
       { method: 'verifyFeishuIdentityRoute', invocation: { kind: 'direct' } },
+      { method: 'projectTasks', invocation: { kind: 'direct' } },
+      { method: 'discoverFeishuTaskLists', invocation: { kind: 'direct' } },
+      { method: 'bindFeishuTaskList', invocation: { kind: 'direct' } },
+      { method: 'reconcileProjectTasks', invocation: { kind: 'direct' } },
+      { method: 'referenceFeishuTask', invocation: { kind: 'direct' } },
+      { method: 'updateFeishuTask', invocation: { kind: 'direct' } },
       { method: 'projectStart', invocation: { kind: 'direct' } },
       { method: 'createProject', invocation: { kind: 'direct' } },
       { method: 'project', invocation: { kind: 'direct' } },
@@ -407,6 +414,7 @@ describe('WorkbenchService', () => {
       journalMode: 'wal',
       busyTimeoutMs: DEFAULT_WORKBENCH_BUSY_TIMEOUT_MS,
       maxStatusLength: DEFAULT_WORKBENCH_MAX_STATUS_LENGTH,
+      taskReconciliationIntervalMs: DEFAULT_WORKBENCH_TASK_RECONCILIATION_INTERVAL_MS,
     })
     expect(() => Config({ maxStatusLength: 0 })).toThrow()
     expect(() => Config({ busyTimeoutMs: 1.5 })).toThrow()

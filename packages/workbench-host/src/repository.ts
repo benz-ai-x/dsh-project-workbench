@@ -3,6 +3,10 @@ import type {
   ConfigureFeishuIdentityRouteResult,
   CreateProjectResult,
   DecideSuggestedChangeResult,
+  BindFeishuTaskListResult,
+  FeishuTaskEventInput,
+  FeishuTaskEventResult,
+  FeishuTaskMutationEffectProjection,
   FeishuActorBinding,
   FeishuConnectionIssue,
   FeishuIdentityKind,
@@ -16,9 +20,14 @@ import type {
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
+  ProjectTaskProjection,
+  ProjectTaskListBindingProjection,
+  ProjectTasksProjection,
   ProjectTeamProjection,
   ProjectTemplateSelection,
   ProposeProjectResponsibilityChangeResult,
+  ReconcileProjectTasksResult,
+  ReferenceFeishuTaskResult,
   ReviewCenterFilter,
   ReviewCenterProjection,
   SuggestedChangeEvidenceRef,
@@ -27,6 +36,7 @@ import type {
   SetProjectResponsibilityResult,
   SetStatusResult,
   VerifyFeishuIdentityRouteResult,
+  UpdateFeishuTaskResult,
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
@@ -36,6 +46,12 @@ import type {
   WorkbenchStatusChangeReason,
   WorkbenchStatusSnapshot,
 } from './client.ts'
+import type {
+  WorkbenchFeishuTaskListSnapshot,
+  WorkbenchFeishuTaskPatch,
+  WorkbenchFeishuTaskRoute,
+  WorkbenchFeishuTaskSnapshot,
+} from './feishu-task-federation.ts'
 
 /** Authenticated actor copied from the Host-only authorization scope. */
 export interface WorkbenchCommandActor {
@@ -280,6 +296,135 @@ export interface WorkbenchFeishuVerificationReplayQuery {
   readonly reason: 'owner-feishu-route-verify'
 }
 
+/** Host-fixed scope for one Project task workspace read. */
+export interface WorkbenchProjectTasksReadQuery extends ProjectQuery {
+  readonly organizationId: string
+  readonly teamId: string
+}
+
+/** Atomic primary-list binding material after the exact external observation succeeds. */
+export interface WorkbenchFeishuTaskListBindingMutation {
+  readonly projectId: string
+  readonly intent:
+    | { readonly mode: 'existing'; readonly taskListGuid: string }
+    | { readonly mode: 'create'; readonly name: string }
+  readonly expectedBindingRevision: null
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly route: WorkbenchFeishuTaskRoute
+  readonly createdByWorkbench: boolean
+  readonly snapshot: WorkbenchFeishuTaskListSnapshot
+  readonly boundAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-feishu-task-list-bind'
+  }
+}
+
+/** Side-effect-free replay check performed before a possible remote list create. */
+export interface WorkbenchFeishuTaskListBindingReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly intent: WorkbenchFeishuTaskListBindingMutation['intent']
+  readonly kind: import('./client.ts').FeishuIdentityKind
+  readonly expectedConnectionRevision: number
+  readonly expectedRouteGeneration: number
+  readonly expectedBindingRevision: null
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-task-list-bind'
+}
+
+/** One complete replacement baseline from the bound authoritative task list. */
+export interface WorkbenchFeishuTaskReconciliationMutation {
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly snapshot: WorkbenchFeishuTaskListSnapshot
+  readonly attemptedAt: string
+}
+
+/** Safe failed reconciliation fact; no provider body or credential can enter storage. */
+export interface WorkbenchFeishuTaskReconciliationFailureMutation {
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly attemptedAt: string
+  readonly issue: FeishuConnectionIssue
+}
+
+/** Host-only exact binding target used by manual and periodic reconciliation. */
+export interface WorkbenchFeishuTaskReconciliationTarget {
+  readonly projectId: string
+  readonly revision: number
+  readonly taskListGuid: string
+  readonly route: WorkbenchFeishuTaskRoute
+}
+
+/** Add one task outside the primary list through an explicit, audited Project reference. */
+export interface WorkbenchFeishuTaskReferenceMutation {
+  readonly projectId: string
+  readonly expectedRevision: number
+  readonly task: WorkbenchFeishuTaskSnapshot
+  readonly referencedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-feishu-task-reference'
+  }
+}
+
+/** Event plus optional authoritative entity observation accepted from a trusted connector. */
+export interface WorkbenchFeishuTaskEventMutation {
+  readonly event: FeishuTaskEventInput
+  readonly task: WorkbenchFeishuTaskSnapshot | null
+  readonly receivedAt: string
+}
+
+/** Durable intent committed before the non-idempotent Feishu PATCH begins. */
+export interface WorkbenchFeishuTaskUpdateReservationMutation {
+  readonly effectId: string
+  readonly projectId: string
+  readonly taskGuid: string
+  readonly expectedRevision: number
+  readonly expectedRemoteVersion: string
+  readonly changes: WorkbenchFeishuTaskPatch
+  readonly preparedAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-feishu-task-update'
+  }
+}
+
+export type WorkbenchFeishuTaskUpdateReservation =
+  | {
+    readonly state: 'deliver'
+    readonly route: WorkbenchFeishuTaskRoute
+    readonly effect: FeishuTaskMutationEffectProjection
+    readonly receipt: import('./client.ts').WorkbenchCommandReceipt
+  }
+  | {
+    readonly state: 'replay'
+    readonly result: UpdateFeishuTaskResult
+  }
+  | {
+    readonly state: 'rejected'
+    readonly result: UpdateFeishuTaskResult
+  }
+
+export type WorkbenchFeishuTaskUpdateSettlement =
+  | {
+    readonly state: 'delivered'
+    readonly task: WorkbenchFeishuTaskSnapshot
+    readonly settledAt: string
+  }
+  | {
+    readonly state: 'conflict'
+    readonly current: WorkbenchFeishuTaskSnapshot
+    readonly settledAt: string
+  }
+  | {
+    readonly state: 'unknown' | 'failed'
+    readonly issue: FeishuConnectionIssue
+    readonly settledAt: string
+  }
+
 /** Host-fixed scope for the Project creation-page read. */
 export interface WorkbenchProjectStartQuery {
   readonly organizationId: string
@@ -418,6 +563,63 @@ export interface WorkbenchRepository {
     mutation: WorkbenchFeishuVerificationMutation,
     signal: AbortSignal,
   ): Promise<VerifyFeishuIdentityRouteResult>
+  /** Read one Project's durable task-list binding, task projection, and effect health. */
+  readProjectTasks(
+    query: WorkbenchProjectTasksReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectTasksProjection | null>
+  /** Resolve one authorized Project's immutable exact task route. */
+  readFeishuTaskReconciliationTarget(
+    query: WorkbenchProjectTasksReadQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskReconciliationTarget | null>
+  /** Resolve a prior binding result before any remote create/read side effect. */
+  replayFeishuTaskListBinding(
+    query: WorkbenchFeishuTaskListBindingReplayQuery,
+    signal: AbortSignal,
+  ): Promise<BindFeishuTaskListResult | null>
+  /** Enumerate bounded targets for Host-owned periodic repair. */
+  listFeishuTaskReconciliationTargets(
+    signal: AbortSignal,
+  ): Promise<readonly WorkbenchFeishuTaskReconciliationTarget[]>
+  /** Atomically bind the one primary list and install its first full projection. */
+  commitFeishuTaskListBinding(
+    mutation: WorkbenchFeishuTaskListBindingMutation,
+    signal: AbortSignal,
+  ): Promise<BindFeishuTaskListResult>
+  /** Replace the primary-list subset from one complete authoritative baseline. */
+  commitFeishuTaskReconciliation(
+    mutation: WorkbenchFeishuTaskReconciliationMutation,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult>
+  /** Persist a bounded failed-attempt health fact without changing task truth. */
+  commitFeishuTaskReconciliationFailure(
+    mutation: WorkbenchFeishuTaskReconciliationFailureMutation,
+    signal: AbortSignal,
+  ): Promise<ReconcileProjectTasksResult>
+  /** Add one explicit external task reference and its first projection. */
+  commitFeishuTaskReference(
+    mutation: WorkbenchFeishuTaskReferenceMutation,
+    signal: AbortSignal,
+  ): Promise<ReferenceFeishuTaskResult>
+  /** Idempotently fold one normalized connector event into the projection. */
+  commitFeishuTaskEvent(
+    mutation: WorkbenchFeishuTaskEventMutation,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskEventResult>
+  /** Commit and replay-safe reserve one exact Feishu PATCH before transport starts. */
+  reserveFeishuTaskUpdate(
+    mutation: WorkbenchFeishuTaskUpdateReservationMutation,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskUpdateReservation>
+  /** Move a prepared effect to its sole delivery attempt. */
+  claimFeishuTaskUpdate(effectId: string, claimedAt: string, signal: AbortSignal): Promise<boolean>
+  /** Settle the exact effect and update the authoritative projection when delivered. */
+  settleFeishuTaskUpdate(
+    effectId: string,
+    settlement: WorkbenchFeishuTaskUpdateSettlement,
+    signal: AbortSignal,
+  ): Promise<UpdateFeishuTaskResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */
@@ -428,6 +630,73 @@ export interface WorkbenchRepository {
   settleOutbox(settlement: WorkbenchOutboxSettlement, signal: AbortSignal): Promise<boolean>
   /** Release every handle after callers have stopped admission and drained work. */
   close(): Promise<void>
+}
+
+/** Detach and freeze the complete Project task workspace at a process boundary. */
+export function projectTasksProjection(value: ProjectTasksProjection): ProjectTasksProjection {
+  const binding: ProjectTaskListBindingProjection | null = value.binding === null
+    ? null
+    : Object.freeze({
+      taskListGuid: value.binding.taskListGuid,
+      name: value.binding.name,
+      canonicalUrl: value.binding.canonicalUrl,
+      identity: Object.freeze({ ...value.binding.identity }),
+      createdByWorkbench: value.binding.createdByWorkbench,
+      remoteVersion: value.binding.remoteVersion,
+      boundAt: value.binding.boundAt,
+    })
+  const tasks = Object.freeze(value.tasks.map(projectTaskProjection))
+  const effects = Object.freeze(value.effects.map(effect => Object.freeze({ ...effect })))
+  return Object.freeze({
+    projectId: value.projectId,
+    revision: value.revision,
+    binding,
+    tasks,
+    sync: Object.freeze({
+      state: value.sync.state,
+      lastEventAt: value.sync.lastEventAt,
+      lastReconciledAt: value.sync.lastReconciledAt,
+      lastAttemptAt: value.sync.lastAttemptAt,
+      issue: value.sync.issue === null
+        ? null
+        : Object.freeze({
+          ...value.sync.issue,
+          missingScopes: Object.freeze([...value.sync.issue.missingScopes]),
+        }),
+    }),
+    effects,
+  })
+}
+
+/** Detach one task and every nested member/comment collection. */
+export function projectTaskProjection(value: ProjectTaskProjection): ProjectTaskProjection {
+  const member = (candidate: ProjectTaskProjection['assignees'][number]) => Object.freeze({
+    openId: candidate.openId,
+    name: candidate.name,
+  })
+  return Object.freeze({
+    taskGuid: value.taskGuid,
+    taskId: value.taskId,
+    scope: value.scope,
+    parentTaskGuid: value.parentTaskGuid,
+    summary: value.summary,
+    description: value.description,
+    assignees: Object.freeze(value.assignees.map(member)),
+    followers: Object.freeze(value.followers.map(member)),
+    comments: Object.freeze(value.comments.map(comment => Object.freeze({
+      commentId: comment.commentId,
+      content: comment.content,
+      creator: comment.creator === null ? null : member(comment.creator),
+      replyToCommentId: comment.replyToCommentId,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+    }))),
+    completed: value.completed,
+    completedAt: value.completedAt,
+    canonicalUrl: value.canonicalUrl,
+    remoteVersion: value.remoteVersion,
+    projectionRevision: value.projectionRevision,
+  })
 }
 
 /** Copy and freeze one projection at a process or transport boundary. */
