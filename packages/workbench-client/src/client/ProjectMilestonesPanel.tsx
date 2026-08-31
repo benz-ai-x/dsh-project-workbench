@@ -1015,6 +1015,7 @@ function effectStateKey(value: string): WorkbenchKey {
 function changeFieldKey(value: string): WorkbenchKey {
   if (value === 'schedule') return 'milestones.change.schedule'
   if (value === 'remote-status') return 'milestones.change.remoteStatus'
+  if (value === 'remote-eligibility') return 'milestones.change.remoteEligibility'
   return 'milestones.change.eventLink'
 }
 

@@ -134,6 +134,7 @@ import {
   type WorkbenchFeishuCalendarCreationReservationMutation,
   type WorkbenchFeishuCalendarDateUpdateReservation,
   type WorkbenchFeishuCalendarDateUpdateReservationMutation,
+  type WorkbenchFeishuCalendarDateUpdateReplayQuery,
   type WorkbenchFeishuCalendarDateUpdateSettlement,
   type WorkbenchFeishuCalendarEventCreationReservation,
   type WorkbenchFeishuCalendarEventCreationReservationMutation,
@@ -4434,6 +4435,17 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     throwIfAborted(signal)
     validateBoundedReference(effectId, 'Feishu Calendar effect id')
     return settleCalendarEventCreation(this.requireDatabase(), effectId, settlement, signal)
+  }
+
+  async replayFeishuCalendarDateUpdate(
+    query: WorkbenchFeishuCalendarDateUpdateReplayQuery,
+    signal: AbortSignal,
+  ): Promise<UpdateProjectMilestoneDateResult | null> {
+    throwIfAborted(signal)
+    validateCalendarDateUpdateReplayQuery(query)
+    const value = replayCalendarDateUpdate(this.requireDatabase(), query)
+    throwIfAborted(signal)
+    return value
   }
 
   async reserveFeishuCalendarDateUpdate(
@@ -16794,7 +16806,9 @@ function outboxState(value: unknown): WorkbenchOutboxState {
 }
 
 const CALENDAR_OBSERVATION_VERSION_PATTERN = /^sha256:[0-9a-f]{64}$/u
-const CALENDAR_CHANGED_FIELDS = new Set(['schedule', 'remote-status', 'event-link'])
+const CALENDAR_CHANGED_FIELDS = new Set([
+  'schedule', 'remote-status', 'event-link', 'remote-eligibility',
+])
 
 function validateProjectMilestonesReadQuery(query: WorkbenchProjectMilestonesReadQuery): void {
   validateBoundedReference(query.organizationId, 'Calendar organization id')
@@ -17503,14 +17517,21 @@ function milestoneCreationRequestHash(
 }
 
 function milestoneDateRequestHash(
-  input: WorkbenchFeishuCalendarDateUpdateReservationMutation,
+  input: WorkbenchFeishuCalendarDateUpdateReplayQuery
+    | WorkbenchFeishuCalendarDateUpdateReservationMutation,
 ): string {
+  const organizationId = 'command' in input
+    ? input.command.actor.organizationId
+    : input.organizationId
+  const teamId = 'command' in input ? input.command.actor.teamId : input.teamId
+  const reason = 'command' in input ? input.command.reason : input.reason
+  const causationId = 'command' in input ? input.command.causationId : input.causationId
   return digest(canonicalizeJson({
     commandType: FEISHU_MILESTONE_DATE_COMMAND_TYPE,
     target: FEISHU_MILESTONE_OBJECT_TYPE,
     scope: {
-      organizationId: input.command.actor.organizationId,
-      teamId: input.command.actor.teamId,
+      organizationId,
+      teamId,
       projectId: input.projectId,
     },
     milestoneId: input.milestoneId,
@@ -17518,8 +17539,8 @@ function milestoneDateRequestHash(
     expectedMilestoneRevision: input.expectedMilestoneRevision,
     expectedRemoteObservationVersion: input.expectedRemoteObservationVersion,
     schedule: input.schedule,
-    reason: input.command.reason,
-    causationId: input.command.causationId,
+    reason,
+    causationId,
   }))
 }
 
@@ -17674,6 +17695,25 @@ function validateCalendarDateUpdateReservation(
   }
 }
 
+function validateCalendarDateUpdateReplayQuery(
+  query: WorkbenchFeishuCalendarDateUpdateReplayQuery,
+): void {
+  validateProjectMilestonesReadQuery(query)
+  validateBoundedReference(query.actorId, 'Calendar date replay actor id')
+  validateBoundedReference(query.milestoneId, 'Calendar date Milestone id')
+  positiveInteger(query.expectedRevision, 'Calendar date expected Project revision')
+  positiveInteger(query.expectedMilestoneRevision, 'Calendar date expected Milestone revision')
+  if (!CALENDAR_OBSERVATION_VERSION_PATTERN.test(query.expectedRemoteObservationVersion)) {
+    throw new TypeError('Calendar expected observation version is invalid')
+  }
+  validateCalendarScheduleValue(query.schedule, 'Calendar requested schedule')
+  validateProjectCommandKey(query.idempotencyKey, 'Calendar date idempotency key')
+  validateProjectCommandKey(query.causationId, 'Calendar date causation id')
+  if (query.reason !== 'owner-project-milestone-date-update') {
+    throw new TypeError('Calendar date reason is unsupported')
+  }
+}
+
 function validateCalendarReconciliationMutation(
   mutation: WorkbenchFeishuCalendarReconciliationMutation,
 ): void {
@@ -17684,10 +17724,15 @@ function validateCalendarReconciliationMutation(
   }
   const ids = new Set<string>()
   for (const observation of mutation.observations) {
-    validateCalendarEventSnapshotValue(observation.event)
     validateBoundedReference(observation.changeId, 'Calendar reconciliation change id')
-    if (ids.has(observation.event.eventId)) throw new TypeError('Calendar reconciliation repeats an event')
-    ids.add(observation.event.eventId)
+    if ('event' in observation) validateCalendarEventSnapshotValue(observation.event)
+    else {
+      validateFeishuResourceId(observation.eventId, 'Calendar reconciliation event id')
+      safeFeishuIssue(observation.issue, 'Calendar reconciliation event issue')
+    }
+    const eventId = 'event' in observation ? observation.event.eventId : observation.eventId
+    if (ids.has(eventId)) throw new TypeError('Calendar reconciliation repeats an event')
+    ids.add(eventId)
   }
   canonicalInstant(mutation.attemptedAt, 'Calendar reconciliation attemptedAt')
 }
@@ -18001,7 +18046,7 @@ function appendScheduleChange(
     milestoneId: string
     milestoneRevision: number
     source: 'workbench' | 'feishu'
-    changedFields: readonly ('schedule' | 'remote-status' | 'event-link')[]
+    changedFields: ProjectScheduleChangeProjection['changedFields']
     beforeSchedule: ProjectCalendarSchedule | null
     afterSchedule: ProjectCalendarSchedule
     occurredAt: string
@@ -18196,6 +18241,13 @@ function commitExistingCalendarBinding(
       database.exec('ROLLBACK')
       began = false
       return calendarFailure('calendar-already-bound', 'Project already has an immutable Calendar binding', { current })
+    }
+    const activeEffect = readActiveCalendarEffect(database, mutation.projectId)
+    if (activeEffect !== null) {
+      const result = activeCalendarEffectFailure<BindProjectCalendarResult>(database, activeEffect)
+      database.exec('ROLLBACK')
+      began = false
+      return result
     }
     const routeError = validateCalendarRouteForCommit(
       database,
@@ -18474,6 +18526,16 @@ function claimCalendarEffect(
 function ambiguousCalendarIssue(): FeishuConnectionIssue {
   return Object.freeze({
     code: 'unknown-provider-error',
+    recovery: 'inspect-provider',
+    missingScopes: Object.freeze([]),
+    grantPlane: null,
+    retryAt: null,
+  })
+}
+
+function invalidCalendarObservationIssue(): FeishuConnectionIssue {
+  return Object.freeze({
+    code: 'provider-response-invalid',
     recovery: 'inspect-provider',
     missingScopes: Object.freeze([]),
     grantPlane: null,
@@ -18898,6 +18960,13 @@ function commitExistingProjectMilestone(
       began = false
       return preflight
     }
+    const activeEffect = readActiveCalendarEffect(database, mutation.projectId)
+    if (activeEffect !== null) {
+      const result = activeCalendarEffectFailure<CreateProjectMilestoneResult>(database, activeEffect)
+      database.exec('ROLLBACK')
+      began = false
+      return result
+    }
     const binding = readCalendarBinding(database, mutation.projectId)
     const head = readCalendarHead(database, mutation.projectId)
     if (binding === null || head === null) throw new Error('Workbench Milestone lost its Calendar')
@@ -19307,17 +19376,39 @@ function reconciliationMatchesUnknownDateIntent(
   const intent = decodeMilestoneDateIntent(effect)
   return intent.calendarId === binding.calendar_id
     && intent.eventId === milestone.event_id
-    && canonicalizeJson(intent.schedule) === canonicalizeJson(event.schedule)
+    && calendarSchedulesEqual(intent.schedule, event.schedule)
+}
+
+function calendarSchedulesEqual(
+  left: ProjectCalendarSchedule,
+  right: ProjectCalendarSchedule,
+): boolean {
+  if (left.kind !== right.kind) return false
+  if (left.kind === 'all-day' && right.kind === 'all-day') {
+    return left.startDate === right.startDate && left.endDate === right.endDate
+  }
+  if (left.kind !== 'timed' || right.kind !== 'timed') return false
+  return Date.parse(left.startAt) === Date.parse(right.startAt)
+    && Date.parse(left.endAt) === Date.parse(right.endAt)
+    && left.timeZone === right.timeZone
 }
 
 function changedCalendarAuthorityFields(
   milestone: ProjectMilestoneRow,
   event: WorkbenchFeishuCalendarEventSnapshot,
-): readonly ('schedule' | 'remote-status' | 'event-link')[] {
-  const changed: ('schedule' | 'remote-status' | 'event-link')[] = []
-  if (milestone.schedule_json !== canonicalizeJson(event.schedule)) changed.push('schedule')
+  forceAttention = false,
+): ProjectScheduleChangeProjection['changedFields'] {
+  const changed: ProjectScheduleChangeProjection['changedFields'][number][] = []
+  if (!calendarSchedulesEqual(decodeCalendarSchedule(milestone.schedule_json), event.schedule)) {
+    changed.push('schedule')
+  }
   if (milestone.remote_status !== event.status) changed.push('remote-status')
   if (milestone.event_app_link !== event.appLink) changed.push('event-link')
+  const nextSyncState = !forceAttention && event.status === 'confirmed' ? 'healthy' : 'attention'
+  if (milestone.sync_state !== nextSyncState
+    || (forceAttention && milestone.remote_observation_version !== event.remoteObservationVersion)) {
+    changed.push('remote-eligibility')
+  }
   return Object.freeze(changed)
 }
 
@@ -19331,7 +19422,7 @@ function applyCalendarAuthority(
   occurredAt: string,
   forceAttention = false,
 ): Readonly<{ head: ProjectCalendarHeadRow; milestone: ProjectMilestoneRow; changed: boolean }> {
-  const changedFields = changedCalendarAuthorityFields(milestone, event)
+  const changedFields = changedCalendarAuthorityFields(milestone, event, forceAttention)
   const changed = changedFields.length > 0
   const milestoneRevision = changed
     ? incrementRevision(milestone.revision, 'Milestone')
@@ -19399,6 +19490,57 @@ function applyCalendarAuthority(
   return Object.freeze({ head: nextHead, milestone: nextMilestone, changed })
 }
 
+function applyCalendarObservationFailure(
+  database: DatabaseSync,
+  head: ProjectCalendarHeadRow,
+  milestone: ProjectMilestoneRow,
+  changeId: string,
+  issue: FeishuConnectionIssue,
+  occurredAt: string,
+): Readonly<{ head: ProjectCalendarHeadRow; changed: boolean }> {
+  if (milestone.sync_state === 'attention') {
+    return Object.freeze({ head, changed: false })
+  }
+  const milestoneRevision = incrementRevision(milestone.revision, 'Milestone')
+  const projectRevision = incrementRevision(head.revision, 'Project schedule')
+  const updated = database.prepare(`
+    UPDATE workbench_project_milestone SET sync_state = 'attention', revision = ?, updated_at = ?
+    WHERE project_id = ? AND id = ? AND revision = ?
+  `).run(
+    milestoneRevision,
+    occurredAt,
+    milestone.project_id,
+    milestone.id,
+    milestone.revision,
+  )
+  if (updated.changes !== 1) throw new Error('Workbench Milestone failure update lost its CAS')
+  const schedule = decodeCalendarSchedule(milestone.schedule_json)
+  appendScheduleChange(database, {
+    changeId,
+    projectId: milestone.project_id,
+    projectRevision,
+    milestoneId: milestone.id,
+    milestoneRevision,
+    source: 'feishu',
+    changedFields: Object.freeze(['remote-eligibility']),
+    beforeSchedule: schedule,
+    afterSchedule: schedule,
+    occurredAt,
+  })
+  updateCalendarHead(
+    database,
+    head,
+    projectRevision,
+    'attention',
+    issue,
+    occurredAt,
+    Object.freeze({ lastAttemptAt: occurredAt }),
+  )
+  const nextHead = readCalendarHead(database, head.project_id)
+  if (nextHead === null) throw new Error('Workbench Calendar failure update disappeared')
+  return Object.freeze({ head: nextHead, changed: true })
+}
+
 function calendarDateResultFromEffect(
   database: DatabaseSync,
   effect: FeishuCalendarEffectRow,
@@ -19444,6 +19586,51 @@ function calendarDateResultFromEffect(
       : 'Feishu rejected the date update',
     Object.freeze({ current, issue: cloneFeishuIssue(issue), effect: projectedEffect }),
   )
+}
+
+function replayCalendarDateUpdate(
+  database: DatabaseSync,
+  query: WorkbenchFeishuCalendarDateUpdateReplayQuery,
+): UpdateProjectMilestoneDateResult | null {
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    const receipt = readCalendarReceipt(
+      database,
+      query.organizationId,
+      query.actorId,
+      query.idempotencyKey,
+    )
+    if (receipt === undefined) {
+      database.exec('COMMIT')
+      began = false
+      return null
+    }
+    if (receipt.command_type !== FEISHU_MILESTONE_DATE_COMMAND_TYPE
+      || receipt.request_hash !== milestoneDateRequestHash(query)) {
+      database.exec('ROLLBACK')
+      began = false
+      return calendarIdempotencyConflict()
+    }
+    assertValidLedger(database)
+    const effect = readCalendarEffectByCommand(database, receipt.command_id)
+    if (effect === null || effect.operation !== 'event-date-update') {
+      throw new Error('Workbench date update receipt lacks its effect')
+    }
+    if (effect.state === 'prepared') {
+      database.exec('COMMIT')
+      began = false
+      return null
+    }
+    const result = calendarDateResultFromEffect(database, effect)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
 }
 
 function reserveCalendarDateUpdate(
@@ -19858,7 +20045,10 @@ function commitCalendarReconciliation(
       return result
     }
     const milestones = readMilestoneRows(database, mutation.projectId)
-    const observations = new Map(mutation.observations.map(item => [item.event.eventId, item] as const))
+    const observations = new Map(mutation.observations.map(item => [
+      'event' in item ? item.event.eventId : item.eventId,
+      item,
+    ] as const))
     if (observations.size !== milestones.length
       || milestones.some(milestone => !observations.has(milestone.event_id))) {
       throw new Error('Calendar reconciliation must cover every bound event exactly once')
@@ -19868,11 +20058,36 @@ function commitCalendarReconciliation(
       mutation.projectId,
       'event-date-update',
     )
+    let reconciliationIssue: FeishuConnectionIssue | null = null
     for (const milestone of milestones) {
       const observation = observations.get(milestone.event_id)
       if (observation === undefined) throw new Error('Calendar reconciliation lost an observation')
+      if (!('event' in observation)) {
+        const applied = applyCalendarObservationFailure(
+          database,
+          head,
+          milestone,
+          observation.changeId,
+          observation.issue,
+          mutation.attemptedAt,
+        )
+        head = applied.head
+        reconciliationIssue ??= observation.issue
+        continue
+      }
       if (!calendarResourceIdentityMatches(observation.event, binding, milestone)) {
-        throw new Error('Calendar reconciliation observation changed event identity')
+        const issue = invalidCalendarObservationIssue()
+        const applied = applyCalendarObservationFailure(
+          database,
+          head,
+          milestone,
+          observation.changeId,
+          issue,
+          mutation.attemptedAt,
+        )
+        head = applied.head
+        reconciliationIssue ??= issue
+        continue
       }
       const authorityDrift = !calendarAuthorityMatches(observation.event, binding, milestone)
       const resolvedUnknownDates = unknownDateEffects.filter(effect =>
@@ -19910,10 +20125,10 @@ function commitCalendarReconciliation(
     const syncState = remainingUnknownEffect !== null
       ? 'unknown' as const
       : attention ? 'attention' as const : 'healthy' as const
-    const syncIssue = remainingUnknownEffect?.issue_json === null
-      ? ambiguousCalendarIssue()
-      : remainingUnknownEffect === null
-        ? (attention ? ambiguousCalendarIssue() : null)
+    const syncIssue = remainingUnknownEffect === null
+      ? (attention ? reconciliationIssue ?? ambiguousCalendarIssue() : null)
+      : remainingUnknownEffect.issue_json === null
+        ? ambiguousCalendarIssue()
         : decodeFeishuIssue(remainingUnknownEffect.issue_json)
     updateCalendarHead(
       database,

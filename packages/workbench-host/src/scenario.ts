@@ -115,6 +115,7 @@ import {
   type WorkbenchSuggestedChangeProposalMutation,
   type WorkbenchFeishuTaskWorkflowMappedField,
   type WorkbenchFeishuTaskWorkflowContext,
+  type WorkbenchFeishuCalendarReconciliationMutation,
   type WorkbenchFeishuCalendarReconciliationTarget,
   type WorkbenchProjectMilestoneReplayQuery,
 } from './repository.ts'
@@ -1916,6 +1917,21 @@ export class WorkbenchScenario {
         operationSignal,
       )
       const normalized = validateUpdateProjectMilestoneDateRequest(request)
+      const replay = await this.options.repository.replayFeishuCalendarDateUpdate(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        milestoneId: normalized.milestoneId,
+        expectedRevision: normalized.expectedRevision,
+        expectedMilestoneRevision: normalized.expectedMilestoneRevision,
+        expectedRemoteObservationVersion: normalized.expectedRemoteObservationVersion,
+        schedule: normalized.schedule,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: normalized.reason,
+      }), operationSignal)
+      if (replay !== null) return replay
       const current = await this.options.repository.readProjectMilestones(Object.freeze({
         organizationId: scope.organizationId,
         teamId: scope.teamId,
@@ -2875,44 +2891,63 @@ export class WorkbenchScenario {
     signal: AbortSignal,
   ): Promise<ReconcileProjectCalendarResult> {
     const adapter = requiredCalendarAdapter(this.options.adapters)
-    const observations: Array<{
-      readonly event: WorkbenchFeishuCalendarEventSnapshot
-      readonly changeId: string
-    }> = []
+    const observations: WorkbenchFeishuCalendarReconciliationMutation['observations'][number][] = []
+    const attemptedAt = commandInstant(this.options.clock)
     for (const milestone of target.milestones) {
       throwIfCancelled(signal)
-      const observed = await adapter.readCalendarEvent(
-        target.route,
-        target.calendarId,
-        milestone.eventId,
-        signal,
+      const changeId = (outcome: string) => nextScheduleChangeId(
+        this.options.ids,
+        [
+          target.projectId,
+          milestone.milestoneId,
+          String(milestone.milestoneRevision),
+          outcome,
+        ].join('-'),
       )
-      const attemptedAt = commandInstant(this.options.clock)
-      if (observed.state !== 'ok') {
-        return this.options.repository.commitFeishuCalendarReconciliationFailure(
-          Object.freeze({
-            projectId: target.projectId,
-            expectedRevision: target.revision,
-            attemptedAt,
-            issue: observed.issue,
-          }),
+      try {
+        const observed = await adapter.readCalendarEvent(
+          target.route,
+          target.calendarId,
+          milestone.eventId,
           signal,
         )
+        throwIfCancelled(signal)
+        if (observed.state !== 'ok') {
+          observations.push(Object.freeze({
+            eventId: milestone.eventId,
+            issue: observed.issue,
+            changeId: changeId(`failure-${observed.issue.code}`),
+          }))
+          continue
+        }
+        validateCalendarEventSnapshot(observed.value)
+        if (observed.value.calendarId !== target.calendarId
+          || observed.value.eventId !== milestone.eventId) {
+          observations.push(Object.freeze({
+            eventId: milestone.eventId,
+            issue: invalidCalendarIssue(),
+            changeId: changeId('invalid-identity'),
+          }))
+          continue
+        }
+        observations.push(Object.freeze({
+          event: observed.value,
+          changeId: changeId(`observed-${observed.value.remoteObservationVersion}`),
+        }))
+      } catch (error: unknown) {
+        throwIfCancelled(signal)
+        observations.push(Object.freeze({
+          eventId: milestone.eventId,
+          issue: invalidCalendarIssue(),
+          changeId: changeId('invalid-response'),
+        }))
       }
-      validateCalendarEventSnapshot(observed.value)
-      observations.push(Object.freeze({
-        event: observed.value,
-        changeId: nextScheduleChangeId(
-          this.options.ids,
-          `${target.projectId}-${milestone.milestoneId}-${observed.value.remoteObservationVersion}`,
-        ),
-      }))
     }
     return this.options.repository.commitFeishuCalendarReconciliation(Object.freeze({
       projectId: target.projectId,
       expectedRevision: target.revision,
       observations: Object.freeze(observations),
-      attemptedAt: commandInstant(this.options.clock),
+      attemptedAt,
     }), signal)
   }
 

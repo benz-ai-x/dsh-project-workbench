@@ -676,6 +676,22 @@ export type WorkbenchFeishuCalendarEventCreationSettlement =
     readonly settledAt: string
   }
 
+/** Receipt-first replay query used before any Calendar provider read or write. */
+export interface WorkbenchFeishuCalendarDateUpdateReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly milestoneId: string
+  readonly expectedRevision: number
+  readonly expectedMilestoneRevision: number
+  readonly expectedRemoteObservationVersion: string
+  readonly schedule: ProjectCalendarSchedule
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-milestone-date-update'
+}
+
 /** GET-observed, locally versioned exact date intent reserved before Calendar PATCH. */
 export interface WorkbenchFeishuCalendarDateUpdateReservationMutation {
   readonly effectId: string
@@ -736,10 +752,17 @@ export interface WorkbenchFeishuCalendarReconciliationTarget {
 export interface WorkbenchFeishuCalendarReconciliationMutation {
   readonly projectId: string
   readonly expectedRevision: number
-  readonly observations: readonly {
-    readonly event: WorkbenchFeishuCalendarEventSnapshot
-    readonly changeId: string
-  }[]
+  readonly observations: readonly (
+    | {
+      readonly event: WorkbenchFeishuCalendarEventSnapshot
+      readonly changeId: string
+    }
+    | {
+      readonly eventId: string
+      readonly issue: FeishuConnectionIssue
+      readonly changeId: string
+    }
+  )[]
   readonly attemptedAt: string
 }
 
@@ -1033,6 +1056,10 @@ export interface WorkbenchRepository {
     settlement: WorkbenchFeishuCalendarEventCreationSettlement,
     signal: AbortSignal,
   ): Promise<CreateProjectMilestoneResult>
+  replayFeishuCalendarDateUpdate(
+    query: WorkbenchFeishuCalendarDateUpdateReplayQuery,
+    signal: AbortSignal,
+  ): Promise<UpdateProjectMilestoneDateResult | null>
   reserveFeishuCalendarDateUpdate(
     mutation: WorkbenchFeishuCalendarDateUpdateReservationMutation,
     signal: AbortSignal,

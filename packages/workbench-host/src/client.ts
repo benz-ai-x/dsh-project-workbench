@@ -1841,7 +1841,9 @@ export interface ProjectScheduleChangeProjection {
   readonly milestoneId: string
   readonly milestoneRevision: number
   readonly source: 'workbench' | 'feishu'
-  readonly changedFields: readonly ('schedule' | 'remote-status' | 'event-link')[]
+  readonly changedFields: readonly (
+    'schedule' | 'remote-status' | 'event-link' | 'remote-eligibility'
+  )[]
   readonly beforeSchedule: ProjectCalendarSchedule | null
   readonly afterSchedule: ProjectCalendarSchedule
   readonly occurredAt: string

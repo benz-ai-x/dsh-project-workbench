@@ -56,6 +56,12 @@ const allDay = (startDate: string, endDate: string): ProjectCalendarSchedule => 
   endDate,
 })
 
+const timed = (
+  startAt: string,
+  endAt: string,
+  timeZone = 'Asia/Shanghai',
+): ProjectCalendarSchedule => Object.freeze({ kind: 'timed', startAt, endAt, timeZone })
+
 function calendar(): WorkbenchFeishuCalendarSnapshot {
   return Object.freeze({
     calendarId: CALENDAR_ID,
@@ -88,10 +94,24 @@ function event(
   })
 }
 
+function eventFor(
+  eventId: string,
+  schedule: ProjectCalendarSchedule,
+  version: string,
+): WorkbenchFeishuCalendarEventSnapshot {
+  return Object.freeze({
+    ...event(schedule, version),
+    eventId,
+    appLink: `https://applink.feishu.cn/client/calendar/event/detail?eventId=${eventId}`,
+  })
+}
+
 class FixtureCalendarAdapter implements
 WorkbenchFeishuExternalAdapter, WorkbenchFeishuCalendarExternalAdapter {
   readonly adapterId = 'fixture-calendar-adapter'
   currentEvent = event()
+  readonly additionalEvents = new Map<string, WorkbenchFeishuCalendarEventSnapshot>()
+  readonly readFailures = new Map<string, FeishuConnectionIssue>()
   readEventCalls = 0
   updateCalls = 0
   private listener: WorkbenchFeishuCalendarChangeListener | null = null
@@ -173,10 +193,14 @@ WorkbenchFeishuExternalAdapter, WorkbenchFeishuCalendarExternalAdapter {
     _signal: AbortSignal,
   ): Promise<WorkbenchFeishuReadResult<WorkbenchFeishuCalendarEventSnapshot>> {
     this.readEventCalls += 1
-    if (calendarId !== CALENDAR_ID || eventId !== EVENT_ID) {
+    if (calendarId !== CALENDAR_ID) {
       throw new Error('fixture event identity changed')
     }
-    return Object.freeze({ state: 'ok', value: this.currentEvent })
+    const issue = this.readFailures.get(eventId)
+    if (issue !== undefined) return Object.freeze({ state: 'failed', issue })
+    const value = eventId === EVENT_ID ? this.currentEvent : this.additionalEvents.get(eventId)
+    if (value === undefined) throw new Error('fixture event identity changed')
+    return Object.freeze({ state: 'ok', value })
   }
 
   async createCalendarEvent(
@@ -218,6 +242,7 @@ function ids(): WorkbenchIdGenerator {
   let audit = 0
   let outbox = 0
   let change = 0
+  let milestone = 0
   return Object.freeze({
     nextStatusId: () => 'status-calendar-scenario',
     nextProjectId: () => PROJECT_ID,
@@ -230,9 +255,16 @@ function ids(): WorkbenchIdGenerator {
     nextCommandId: () => `command-calendar-scenario-${String(++command).padStart(3, '0')}`,
     nextAuditEventId: () => `audit-calendar-scenario-${String(++audit).padStart(3, '0')}`,
     nextOutboxId: () => `outbox-calendar-scenario-${String(++outbox).padStart(3, '0')}`,
-    nextMilestoneId: () => 'milestone-calendar-scenario',
+    nextMilestoneId: () => ++milestone === 1
+      ? 'milestone-calendar-scenario'
+      : `milestone-calendar-scenario-${String(milestone).padStart(3, '0')}`,
     nextScheduleChangeId: () => `schedule-change-${String(++change).padStart(3, '0')}`,
   })
+}
+
+function idsWithoutScheduleChangeGenerator(): WorkbenchIdGenerator {
+  const { nextScheduleChangeId: _omitted, ...generator } = ids()
+  return Object.freeze(generator)
 }
 
 function clock(): WorkbenchClock {
@@ -270,7 +302,11 @@ function projectRequest(): CreateProjectRequest {
   })
 }
 
-function scenarioFor(databasePath: string, adapter: FixtureCalendarAdapter): WorkbenchScenario {
+function scenarioFor(
+  databasePath: string,
+  adapter: FixtureCalendarAdapter,
+  idGenerator: WorkbenchIdGenerator = ids(),
+): WorkbenchScenario {
   return new WorkbenchScenario({
     repository: new SqliteWorkbenchRepository({
       databasePath,
@@ -278,19 +314,19 @@ function scenarioFor(databasePath: string, adapter: FixtureCalendarAdapter): Wor
       busyTimeoutMs: 1_000,
     }),
     clock: clock(),
-    ids: ids(),
+    ids: idGenerator,
     adapters: Object.freeze({ feishu: adapter, feishuCalendars: adapter }),
     authorization,
     maxStatusLength: 280,
   })
 }
 
-async function fixture() {
+async function fixture(idGenerator: WorkbenchIdGenerator = ids()) {
   const root = await mkdtemp(join(tmpdir(), 'workbench-calendar-scenario-'))
   temporaryRoots.add(root)
   const databasePath = join(root, 'workbench.sqlite')
   const adapter = new FixtureCalendarAdapter()
-  const scenario = scenarioFor(databasePath, adapter)
+  const scenario = scenarioFor(databasePath, adapter, idGenerator)
   await scenario.open()
   await scenario.createProject(projectRequest(), signal)
   await scenario.configureFeishuIdentityRoute({
@@ -508,6 +544,68 @@ describe('T10 Feishu calendar scenario', () => {
     await scenario.close()
   })
 
+  it('does not let an existing Calendar bind bypass an unknown Calendar-create effect', async () => {
+    const { scenario, adapter, databasePath } = await fixture()
+    vi.spyOn(adapter, 'createCalendar').mockResolvedValue(Object.freeze({
+      state: 'unknown',
+      issue: Object.freeze({
+        code: 'unknown-provider-error',
+        recovery: 'inspect-provider',
+        missingScopes: Object.freeze([]),
+        grantPlane: null,
+        retryAt: null,
+      }),
+    }))
+    await expect(scenario.bindProjectCalendar({
+      projectId: PROJECT_ID,
+      kind: 'bot',
+      mode: 'create',
+      summary: 'Ambiguous Project calendar',
+      description: null,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-unknown-create-0001',
+      causationId: 'feishu-calendar-bind-unknown-create-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown', current: { revision: 1 } },
+    })
+
+    await expect(scenario.bindProjectCalendar({
+      projectId: PROJECT_ID,
+      kind: 'bot',
+      mode: 'existing',
+      calendarId: CALENDAR_ID,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-after-unknown-0001',
+      causationId: 'feishu-calendar-bind-after-unknown-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, signal)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'remote-outcome-unknown',
+        current: {
+          revision: 1,
+          binding: null,
+          sync: { state: 'unknown' },
+          effects: [{ operation: 'calendar-create', state: 'unknown' }],
+        },
+      },
+    })
+    await scenario.close()
+
+    const reopened = scenarioFor(databasePath, adapter)
+    await reopened.open()
+    await expect(reopened.auditIntegrity(signal)).resolves.toMatchObject({ valid: true })
+    await expect(reopened.getProjectMilestones({ projectId: PROJECT_ID }, signal))
+      .resolves.toMatchObject({ revision: 1, binding: null, sync: { state: 'unknown' } })
+    await reopened.close()
+  })
+
   it('never PATCHes a cancelled Milestone even after the cancelled authority is current', async () => {
     const { scenario, adapter } = await fixture()
     await scenario.bindProjectCalendar({
@@ -714,6 +812,79 @@ describe('T10 Feishu calendar scenario', () => {
     await scenario.close()
   })
 
+  it('does not let an existing event bind bypass an unknown event-create effect', async () => {
+    const { scenario, adapter, databasePath } = await fixture()
+    await scenario.bindProjectCalendar({
+      projectId: PROJECT_ID,
+      kind: 'bot',
+      mode: 'existing',
+      calendarId: CALENDAR_ID,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-unknown-event-0001',
+      causationId: 'feishu-calendar-bind-unknown-event-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, signal)
+    vi.spyOn(adapter, 'createCalendarEvent').mockResolvedValue(Object.freeze({
+      state: 'unknown',
+      issue: Object.freeze({
+        code: 'unknown-provider-error',
+        recovery: 'inspect-provider',
+        missingScopes: Object.freeze([]),
+        grantPlane: null,
+        retryAt: null,
+      }),
+    }))
+    await expect(scenario.createProjectMilestone({
+      projectId: PROJECT_ID,
+      mode: 'create-event',
+      schedule: allDay('2026-09-14', '2026-09-15'),
+      expectedRevision: 1,
+      expectedMilestoneRevision: null,
+      name: 'Ambiguous checkpoint',
+      description: null,
+      idempotencyKey: 'feishu-milestone-unknown-create-0001',
+      causationId: 'feishu-milestone-unknown-create-cause-0001',
+      reason: 'owner-project-milestone-create',
+    }, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown', current: { revision: 2 } },
+    })
+
+    await expect(scenario.createProjectMilestone({
+      projectId: PROJECT_ID,
+      mode: 'existing-event',
+      eventId: EVENT_ID,
+      expectedRevision: 2,
+      expectedMilestoneRevision: null,
+      name: 'Unsafe replacement checkpoint',
+      description: null,
+      idempotencyKey: 'feishu-milestone-after-unknown-0001',
+      causationId: 'feishu-milestone-after-unknown-cause-0001',
+      reason: 'owner-project-milestone-create',
+    }, signal)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'remote-outcome-unknown',
+        current: {
+          revision: 2,
+          milestones: [],
+          sync: { state: 'unknown' },
+          effects: [{ operation: 'event-create', state: 'unknown' }],
+        },
+      },
+    })
+    await scenario.close()
+
+    const reopened = scenarioFor(databasePath, adapter)
+    await reopened.open()
+    await expect(reopened.auditIntegrity(signal)).resolves.toMatchObject({ valid: true })
+    await expect(reopened.getProjectMilestones({ projectId: PROJECT_ID }, signal))
+      .resolves.toMatchObject({ revision: 2, milestones: [], sync: { state: 'unknown' } })
+    await reopened.close()
+  })
+
   it('claims and settles the original prepared date effect on same-key replay', async () => {
     const { scenario, adapter } = await fixture()
     await bindExistingCalendarAndMilestone(scenario)
@@ -748,6 +919,14 @@ describe('T10 Feishu calendar scenario', () => {
         milestones: [{ schedule: intended }],
       },
     })
+    expect(updateEvent).toHaveBeenCalledTimes(1)
+    const readsAfterDelivery = adapter.readEventCalls
+    await expect(scenario.updateProjectMilestoneDate(request, signal)).resolves.toMatchObject({
+      ok: true,
+      value: { revision: 3 },
+      milestone: { schedule: intended },
+    })
+    expect(adapter.readEventCalls).toBe(readsAfterDelivery)
     expect(updateEvent).toHaveBeenCalledTimes(1)
     await scenario.close()
   })
@@ -965,6 +1144,53 @@ describe('T10 Feishu calendar scenario', () => {
       item.action === 'workbench.project-milestone.date-update-requested',
     )?.outbox).toMatchObject({ state: 'delivered', attemptCount: 1, errorCode: null })
     await expect(scenario.auditIntegrity(signal)).resolves.toMatchObject({ valid: true })
+    await scenario.close()
+  })
+
+  it('reconciles an offset timed intent against the same canonical UTC instants', async () => {
+    const { scenario, adapter } = await fixture()
+    await bindExistingCalendarAndMilestone(scenario)
+    const intended = timed(
+      '2026-09-26T09:00:00+08:00',
+      '2026-09-26T10:30:00+08:00',
+    )
+    vi.spyOn(adapter, 'updateCalendarEventSchedule').mockImplementation(async () => {
+      adapter.updateCalls += 1
+      return Object.freeze({
+        state: 'unknown',
+        issue: Object.freeze({
+          code: 'unknown-provider-error',
+          recovery: 'inspect-provider',
+          missingScopes: Object.freeze([]),
+          grantPlane: null,
+          retryAt: null,
+        }),
+      })
+    })
+    await expect(scenario.updateProjectMilestoneDate(dateUpdateRequest(
+      'feishu-milestone-date-timed-offset-0001',
+      intended,
+    ), signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+
+    adapter.currentEvent = event(timed(
+      '2026-09-26T01:00:00.000Z',
+      '2026-09-26T02:30:00.000Z',
+    ), `sha256:${'7'.repeat(64)}`)
+    await expect(scenario.reconcileProjectCalendar({
+      projectId: PROJECT_ID,
+      expectedRevision: 3,
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 4,
+        sync: { state: 'healthy' },
+        effects: [{ operation: 'event-date-update', state: 'delivered' }],
+        milestones: [{ schedule: adapter.currentEvent.schedule }],
+      },
+    })
     await scenario.close()
   })
 
@@ -1194,6 +1420,123 @@ describe('T10 Feishu calendar scenario', () => {
     await repository.close()
   })
 
+  it('continues reconciling healthy events when one bound event cannot be read', async () => {
+    const { scenario, adapter } = await fixture()
+    await bindExistingCalendarAndMilestone(scenario)
+    const secondEventId = 'event-scenario-secondary'
+    const secondInitial = eventFor(
+      secondEventId,
+      allDay('2026-09-14', '2026-09-15'),
+      `sha256:${'8'.repeat(64)}`,
+    )
+    adapter.additionalEvents.set(secondEventId, secondInitial)
+    await expect(scenario.createProjectMilestone({
+      projectId: PROJECT_ID,
+      mode: 'existing-event',
+      eventId: secondEventId,
+      expectedRevision: 2,
+      expectedMilestoneRevision: null,
+      name: 'Secondary checkpoint',
+      description: null,
+      idempotencyKey: 'feishu-milestone-secondary-0001',
+      causationId: 'feishu-milestone-secondary-cause-0001',
+      reason: 'owner-project-milestone-create',
+    }, signal)).resolves.toMatchObject({ ok: true, value: { revision: 3 } })
+
+    adapter.currentEvent = event(
+      allDay('2026-09-20', '2026-09-21'),
+      `sha256:${'9'.repeat(64)}`,
+    )
+    adapter.readFailures.set(secondEventId, Object.freeze({
+      code: 'resource-not-found',
+      recovery: 'check-resource-id',
+      missingScopes: Object.freeze([]),
+      grantPlane: null,
+      retryAt: null,
+    }))
+    await expect(scenario.reconcileProjectCalendar({
+      projectId: PROJECT_ID,
+      expectedRevision: 3,
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 5,
+        sync: { state: 'attention', issue: { code: 'resource-not-found' } },
+        milestones: [
+          { revision: 2, schedule: adapter.currentEvent.schedule, syncState: 'healthy' },
+          { revision: 2, schedule: secondInitial.schedule, syncState: 'attention' },
+        ],
+        recentChanges: expect.arrayContaining([
+          expect.objectContaining({ projectRevision: 5, changedFields: ['remote-eligibility'] }),
+          expect.objectContaining({ projectRevision: 4, changedFields: ['schedule'] }),
+        ]),
+      },
+    })
+
+    adapter.readFailures.delete(secondEventId)
+    await expect(scenario.reconcileProjectCalendar({
+      projectId: PROJECT_ID,
+      expectedRevision: 5,
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 6,
+        sync: { state: 'healthy', issue: null },
+        milestones: [
+          { revision: 2, syncState: 'healthy' },
+          { revision: 3, syncState: 'healthy' },
+        ],
+        recentChanges: expect.arrayContaining([
+          expect.objectContaining({ projectRevision: 6, changedFields: ['remote-eligibility'] }),
+        ]),
+      },
+    })
+    await scenario.close()
+  })
+
+  it('uses distinct deterministic fallback change IDs across failure recovery', async () => {
+    const { scenario, adapter } = await fixture(idsWithoutScheduleChangeGenerator())
+    await bindExistingCalendarAndMilestone(scenario)
+    adapter.readFailures.set(EVENT_ID, Object.freeze({
+      code: 'resource-not-found',
+      recovery: 'check-resource-id',
+      missingScopes: Object.freeze([]),
+      grantPlane: null,
+      retryAt: null,
+    }))
+    await expect(scenario.reconcileProjectCalendar({
+      projectId: PROJECT_ID,
+      expectedRevision: 2,
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: { revision: 3, milestones: [{ revision: 2, syncState: 'attention' }] },
+    })
+
+    adapter.readFailures.delete(EVENT_ID)
+    await expect(scenario.reconcileProjectCalendar({
+      projectId: PROJECT_ID,
+      expectedRevision: 3,
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 4,
+        sync: { state: 'healthy' },
+        milestones: [{ revision: 3, syncState: 'healthy' }],
+        recentChanges: expect.arrayContaining([
+          expect.objectContaining({
+            projectRevision: 4,
+            changedFields: ['remote-eligibility'],
+          }),
+          expect.objectContaining({
+            projectRevision: 3,
+            changedFields: ['remote-eligibility'],
+          }),
+        ]),
+      },
+    })
+    await scenario.close()
+  })
+
   it.each([
     ['organizer', { organizerCalendarId: 'calendar-drifted-organizer' }],
     ['recurring', { recurring: true }],
@@ -1212,26 +1555,29 @@ describe('T10 Feishu calendar scenario', () => {
     }, signal)).resolves.toMatchObject({
       ok: true,
       value: {
-        revision: 2,
+        revision: 3,
         sync: { state: 'attention' },
         milestones: [{
-          revision: 1,
+          revision: 2,
           syncState: 'attention',
           remoteObservationVersion: `sha256:${'6'.repeat(64)}`,
         }],
+        recentChanges: expect.arrayContaining([
+          expect.objectContaining({ source: 'feishu', changedFields: ['remote-eligibility'] }),
+        ]),
       },
     })
     await expect(scenario.getProjectMilestones({ projectId: PROJECT_ID }, signal))
       .resolves.toMatchObject({
-        revision: 2,
+        revision: 3,
         sync: { state: 'attention' },
-        milestones: [{ syncState: 'attention' }],
+        milestones: [{ revision: 2, syncState: 'attention' }],
       })
     await expect(scenario.updateProjectMilestoneDate({
       projectId: PROJECT_ID,
       milestoneId: 'milestone-calendar-scenario',
-      expectedRevision: 2,
-      expectedMilestoneRevision: 1,
+      expectedRevision: 3,
+      expectedMilestoneRevision: 2,
       expectedRemoteObservationVersion: `sha256:${'6'.repeat(64)}`,
       schedule: allDay('2026-10-02', '2026-10-03'),
       idempotencyKey: `feishu-milestone-date-drift-${_label}-0001`,
