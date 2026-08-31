@@ -88,9 +88,13 @@ const TASK_WRITE_SCOPE = 'task:task:write'
 const CALENDAR_READ_SCOPE = 'calendar:calendar:readonly'
 const CALENDAR_SCOPES = Object.freeze([
   'calendar:calendar',
+  'calendar:calendar.calendar:readonly',
+  'calendar:calendar:create',
   'calendar:calendar:read',
   'calendar:calendar:readonly',
+  'calendar:calendar.event:create',
   'calendar:calendar.event:read',
+  'calendar:calendar.event:update',
 ])
 
 export const DEFAULT_FEISHU_REQUEST_TIMEOUT_MS = 10_000
@@ -324,7 +328,13 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
       return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
     }
     try {
-      return writeOk(calendarSnapshot(nestedProviderEntity(response, 'calendar')))
+      const created = calendarSnapshot(nestedProviderEntity(response, 'calendar'))
+      return created.calendarType === 'shared'
+        && (created.role === 'writer' || created.role === 'owner')
+        && !created.deleted
+        && !created.thirdParty
+        ? writeOk(created)
+        : writeUnknown(invalidProviderIssue())
     } catch {
       return writeUnknown(invalidProviderIssue())
     }
@@ -433,11 +443,17 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
       return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
     }
     try {
-      return writeOk(calendarEventSnapshot(
+      const created = calendarEventSnapshot(
         nestedProviderEntity(response, 'event'),
         normalized.calendarId,
         currentInstant(this.now()),
-      ))
+      )
+      return created.organizerCalendarId === normalized.calendarId
+        && !created.recurring
+        && !created.exception
+        && created.status === 'confirmed'
+        ? writeOk(created)
+        : writeUnknown(invalidProviderIssue())
     } catch {
       return writeUnknown(invalidProviderIssue())
     }
@@ -499,6 +515,9 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
         currentInstant(this.now()),
       )
       return updated.eventId === normalized.eventId
+        && updated.organizerCalendarId === normalized.calendarId
+        && !updated.recurring
+        && !updated.exception
         ? writeOk(updated)
         : writeUnknown(invalidProviderIssue())
     } catch {

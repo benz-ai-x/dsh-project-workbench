@@ -650,6 +650,53 @@ describe('DshFeishuConnectionAdapter calendar federation', () => {
     expect(methods).toEqual(['GET', 'PATCH'])
   })
 
+  it('treats an unbindable event returned by PATCH as an unknown write outcome', async () => {
+    const store = credentials()
+    store.values.set('FEISHU_CALENDAR_USER_TOKEN', { value: USER_TOKEN, source: 'env' })
+    const calendarId = 'feishu.cn_alpha@group.calendar.feishu.cn'
+    const adapter = new DshFeishuConnectionAdapter(store.provider, {
+      fetch: async (input, init) => {
+        const url = requestUrl(input)
+        if (url.pathname === '/open-apis/authen/v1/user_info') return identity()
+        const patch = method(init) === 'PATCH'
+        return json({
+          code: 0,
+          data: {
+            event: {
+              event_id: 'event-timed_0',
+              organizer_calendar_id: patch
+                ? 'feishu.cn_other@group.calendar.feishu.cn'
+                : calendarId,
+              summary: 'Milestone',
+              description: null,
+              start_time: patch
+                ? { date: '2026-09-05', timezone: 'UTC' }
+                : { timestamp: '1788228000', timezone: 'Asia/Shanghai' },
+              end_time: patch
+                ? { date: '2026-09-06', timezone: 'UTC' }
+                : { timestamp: '1788233400', timezone: 'Asia/Shanghai' },
+              recurrence: patch ? 'FREQ=DAILY;INTERVAL=1' : '',
+              status: 'confirmed',
+              is_exception: patch,
+              app_link: 'https://applink.feishu.cn/client/calendar/event/timed',
+            },
+          },
+        })
+      },
+      now: () => FIXED_NOW,
+    })
+
+    await expect(adapter.updateCalendarEventSchedule(route(), {
+      calendarId,
+      eventId: 'event-timed_0',
+      expectedRemoteObservationVersion: 'sha256:cc32673b1d0671974204bef1c34608d5619f054f8f111816fdcd263f36094b1f',
+      schedule: { kind: 'all-day', startDate: '2026-09-05', endDate: '2026-09-06' },
+    }, new AbortController().signal)).resolves.toMatchObject({
+      state: 'unknown',
+      issue: { code: 'provider-response-invalid', recovery: 'inspect-provider' },
+    })
+  })
+
   it('maps Calendar v4 not-found and access failures to closed safe issues', async () => {
     const store = credentials()
     store.values.set('FEISHU_CALENDAR_USER_TOKEN', { value: USER_TOKEN, source: 'env' })
@@ -903,6 +950,73 @@ describe('DshFeishuConnectionAdapter calendar federation', () => {
     })
   })
 
+  it('treats successful creates that violate binding postconditions as unknown', async () => {
+    const store = credentials()
+    store.values.set('FEISHU_CALENDAR_USER_TOKEN', { value: USER_TOKEN, source: 'env' })
+    const calendarId = 'feishu.cn_alpha@group.calendar.feishu.cn'
+    let operation: 'calendar' | 'event' = 'calendar'
+    const adapter = new DshFeishuConnectionAdapter(store.provider, {
+      fetch: async (input) => {
+        const url = requestUrl(input)
+        if (url.pathname === '/open-apis/authen/v1/user_info') return identity()
+        if (operation === 'calendar') {
+          return json({
+            code: 0,
+            data: {
+              calendar: {
+                calendar_id: 'feishu.cn_resource@resource.calendar.feishu.cn',
+                summary: 'Unexpected resource calendar',
+                description: null,
+                type: 'resource',
+                role: 'reader',
+                is_deleted: false,
+                is_third_party: false,
+              },
+            },
+          })
+        }
+        return json({
+          code: 0,
+          data: {
+            event: {
+              event_id: 'event-unbindable_0',
+              organizer_calendar_id: 'feishu.cn_other@group.calendar.feishu.cn',
+              summary: 'Unexpected recurring event',
+              description: null,
+              start_time: { date: '2026-09-01', timezone: 'UTC' },
+              end_time: { date: '2026-09-02', timezone: 'UTC' },
+              recurrence: 'FREQ=DAILY;INTERVAL=1',
+              status: 'confirmed',
+              is_exception: true,
+              app_link: 'https://applink.feishu.cn/client/calendar/event/unbindable',
+            },
+          },
+        })
+      },
+      now: () => FIXED_NOW,
+    })
+
+    await expect(adapter.createCalendar(route(), {
+      summary: 'Project calendar',
+      description: null,
+    }, new AbortController().signal)).resolves.toMatchObject({
+      state: 'unknown',
+      issue: { code: 'provider-response-invalid', recovery: 'inspect-provider' },
+    })
+
+    operation = 'event'
+    await expect(adapter.createCalendarEvent(route(), {
+      calendarId,
+      idempotencyKey: EVENT_IDEMPOTENCY_KEY,
+      summary: 'Project milestone',
+      description: null,
+      schedule: { kind: 'all-day', startDate: '2026-09-01', endDate: '2026-09-02' },
+    }, new AbortController().signal)).resolves.toMatchObject({
+      state: 'unknown',
+      issue: { code: 'provider-response-invalid', recovery: 'inspect-provider' },
+    })
+  })
+
   it('rejects a Calendar page missing its item collection', async () => {
     const store = credentials()
     store.values.set('FEISHU_CALENDAR_USER_TOKEN', { value: USER_TOKEN, source: 'env' })
@@ -930,7 +1044,12 @@ describe('DshFeishuConnectionAdapter calendar federation', () => {
             msg: 'SENSITIVE provider scope diagnostic',
             error: {
               permission_violations: [
+                { subject: 'calendar:calendar' },
+                { subject: 'calendar:calendar.calendar:readonly' },
+                { subject: 'calendar:calendar:create' },
+                { subject: 'calendar:calendar.event:create' },
                 { subject: 'calendar:calendar.event:read' },
+                { subject: 'calendar:calendar.event:update' },
                 { subject: 'unknown:SENSITIVE:scope' },
               ],
             },
@@ -943,7 +1062,14 @@ describe('DshFeishuConnectionAdapter calendar federation', () => {
       issue: {
         code: 'missing-app-scope',
         recovery: 'grant-app-scope',
-        missingScopes: ['calendar:calendar.event:read'],
+        missingScopes: [
+          'calendar:calendar',
+          'calendar:calendar.calendar:readonly',
+          'calendar:calendar.event:create',
+          'calendar:calendar.event:read',
+          'calendar:calendar.event:update',
+          'calendar:calendar:create',
+        ],
         grantPlane: 'application',
       },
     })
