@@ -408,9 +408,12 @@ describe('ProjectTeamPanel', () => {
   })
 
   it('keeps a no-overflow single-column mobile layout and removes motion when requested', async () => {
+    const packageRoot = process.cwd().endsWith('packages/workbench-client')
+      ? process.cwd()
+      : resolve(process.cwd(), 'packages/workbench-client')
     const source = await readFile(resolve(
-      process.cwd(),
-      'packages/workbench-client/src/client/ProjectTeamPanel.module.css',
+      packageRoot,
+      'src/client/ProjectTeamPanel.module.css',
     ), 'utf8')
     expect(source).toContain('@media (max-width: 700px)')
     expect(source).toContain('overflow: hidden;')
