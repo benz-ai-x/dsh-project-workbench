@@ -9,11 +9,15 @@ import type {
   BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteRequest,
   ConfigureFeishuIdentityRouteResult,
+  ConfigureFeishuTaskWorkflowMapping,
+  ConfigureFeishuTaskWorkflowRequest,
+  ConfigureFeishuTaskWorkflowResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
   DiscoverFeishuTaskListsRequest,
+  DiscoverFeishuTaskWorkflowFieldsRequest,
   FeishuActorBinding,
   FeishuConnectionIssue,
   FeishuConnectionCenterProjection,
@@ -22,6 +26,9 @@ import type {
   FeishuTaskEventResult,
   FeishuTaskMutationEffectProjection,
   FeishuTaskListDiscoveryProjection,
+  FeishuTaskWorkflowCompatibilityPreview,
+  FeishuTaskWorkflowFieldCandidate,
+  FeishuTaskWorkflowFieldDiscoveryProjection,
   FeishuResourceProbeProjection,
   FeishuScopeObservation,
   OutcomeDraft,
@@ -33,9 +40,12 @@ import type {
   ProjectStartProjection,
   ProjectTeamProjection,
   ProjectTeamQuery,
+  ProjectTaskWorkflowDefinition,
+  ProjectTaskWorkflowProjection,
   ProjectTasksProjection,
   ProjectTasksQuery,
   ProjectTemplateSelection,
+  PreviewFeishuTaskWorkflowRequest,
   ProposeProjectResponsibilityChangeRequest,
   ProposeProjectResponsibilityChangeResult,
   ReconcileProjectTasksRequest,
@@ -84,13 +94,20 @@ import {
   type WorkbenchRepository,
   type WorkbenchSuggestedChangeDecisionMutation,
   type WorkbenchSuggestedChangeProposalMutation,
+  type WorkbenchFeishuTaskWorkflowMappedField,
+  type WorkbenchFeishuTaskWorkflowContext,
 } from './repository.ts'
 import type { AuthorizedScope, WorkbenchAuthorization } from './authorization.ts'
 import type {
   WorkbenchFeishuTaskEventObservation,
   WorkbenchFeishuTaskExternalAdapter,
   WorkbenchFeishuTaskRoute,
+  WorkbenchFeishuTaskWorkflowFieldWrite,
 } from './feishu-task-federation.ts'
+import {
+  assessTaskWorkflowCompatibility,
+  projectTaskWorkflowDefinition,
+} from './feishu-task-workflow.ts'
 
 /** Injectable wall clock; production returns a fresh Date for every command. */
 export interface WorkbenchClock {
@@ -663,6 +680,286 @@ export class WorkbenchScenario {
     })
   }
 
+  /** Discover custom fields only through the binding's pinned, verified actor route. */
+  discoverFeishuTaskWorkflowFields(
+    request: DiscoverFeishuTaskWorkflowFieldsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskWorkflowFieldDiscoveryProjection> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('discoverFeishuTaskWorkflowFields requires an AbortSignal', {
+          field: 'signal',
+        })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.workflow.read',
+        operationSignal,
+      )
+      const normalized = validateDiscoverFeishuTaskWorkflowFieldsRequest(request)
+      const context = await this.options.repository.readFeishuTaskWorkflowContext(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const ready = workflowContextForRead(context, normalized.expectedTaskRevision)
+      const fields = await listWorkflowFields(
+        requiredTaskAdapter(this.options.adapters),
+        ready.target.route,
+        ready.target.taskListGuid,
+        operationSignal,
+      )
+      return Object.freeze({
+        projectId: ready.project.projectId,
+        taskListGuid: ready.target.taskListGuid,
+        taskRevision: ready.project.revision,
+        items: fields,
+      })
+    })
+  }
+
+  /** Validate a proposed schema/mapping against current Feishu field and task usage. */
+  previewFeishuTaskWorkflow(
+    request: PreviewFeishuTaskWorkflowRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskWorkflowCompatibilityPreview> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('previewFeishuTaskWorkflow requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.workflow.read',
+        operationSignal,
+      )
+      const normalized = validatePreviewFeishuTaskWorkflowRequest(request)
+      const context = await this.options.repository.readFeishuTaskWorkflowContext(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const ready = workflowContextForPreview(
+        context,
+        normalized.expectedTaskRevision,
+        normalized.expectedWorkflowRevision,
+      )
+      const fields = await listWorkflowFields(
+        requiredTaskAdapter(this.options.adapters),
+        ready.target.route,
+        ready.target.taskListGuid,
+        operationSignal,
+      )
+      const assessed = assessTaskWorkflowCompatibility({
+        current: ready.project.workflow,
+        desired: normalized.definition,
+        mapping: normalized.mapping,
+        remoteFields: fields,
+        taskValues: ready.taskValues,
+      })
+      return Object.freeze({
+        projectId: normalized.projectId,
+        taskRevision: ready.project.revision,
+        workflowRevision: ready.project.workflow?.revision ?? null,
+        definition: normalized.definition,
+        mapping: normalized.mapping,
+        compatibility: assessed.compatibility,
+        usedStateIds: assessed.usedStateIds,
+      })
+    })
+  }
+
+  /** Create/map/migrate one Feishu field, then atomically commit its stable GUID mapping. */
+  configureFeishuTaskWorkflow(
+    request: ConfigureFeishuTaskWorkflowRequest,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult> {
+    return this.execute(async (lifetimeSignal) => {
+      if (!(signal instanceof AbortSignal)) {
+        throw badRequest('configureFeishuTaskWorkflow requires an AbortSignal', { field: 'signal' })
+      }
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.tasks.workflow.configure',
+        operationSignal,
+      )
+      const normalized = validateConfigureFeishuTaskWorkflowRequest(request)
+      const replay = await this.options.repository.replayFeishuTaskWorkflowConfiguration(
+        Object.freeze({
+          organizationId: scope.organizationId,
+          teamId: scope.teamId,
+          actorId: scope.ownerId,
+          projectId: normalized.projectId,
+          expectedTaskRevision: normalized.expectedTaskRevision,
+          expectedWorkflowRevision: normalized.expectedWorkflowRevision,
+          definition: normalized.definition,
+          mapping: normalized.mapping,
+          idempotencyKey: normalized.idempotencyKey,
+          causationId: normalized.causationId,
+          reason: normalized.reason,
+        }),
+        operationSignal,
+      )
+      if (replay !== null) return replay
+      const project = await this.options.repository.readProjectTasks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      const projectPreflight = workflowProjectPreflight(project, normalized)
+      if (projectPreflight !== null) return projectPreflight
+      const context = await this.options.repository.readFeishuTaskWorkflowContext(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      if (context === null) throw infrastructure('Workbench workflow context disappeared')
+      const preflight = workflowConfigurationPreflight(context, normalized)
+      if (!preflight.ok) return preflight.result
+      const adapter = requiredTaskAdapter(this.options.adapters)
+      const fields = await listWorkflowFields(
+        adapter,
+        preflight.context.target.route,
+        preflight.context.target.taskListGuid,
+        operationSignal,
+      )
+      const assessed = assessTaskWorkflowCompatibility({
+        current: preflight.context.project.workflow,
+        desired: normalized.definition,
+        mapping: normalized.mapping,
+        remoteFields: fields,
+        taskValues: preflight.context.taskValues,
+      })
+      if (assessed.compatibility.state === 'blocked') {
+        return workflowCompatibilityBlocked(assessed.compatibility)
+      }
+
+      let mappedField: WorkbenchFeishuTaskWorkflowMappedField
+      if (normalized.mapping.mode === 'existing') {
+        const existingMapping = normalized.mapping
+        const selected = fields.find(field => field.fieldGuid === existingMapping.fieldGuid)
+        if (selected === undefined) return workflowCompatibilityBlocked(assessed.compatibility)
+        mappedField = mappedWorkflowFieldFromExisting(
+          normalized.definition,
+          existingMapping,
+          selected,
+        )
+      } else if (normalized.mapping.mode === 'create') {
+        if (preflight.context.project.workflow !== null) {
+          return workflowCompatibilityBlocked(Object.freeze({
+            state: 'blocked',
+            issues: Object.freeze([Object.freeze({
+              code: 'field-missing',
+              severity: 'blocked',
+              stateId: null,
+              taskGuid: null,
+              message: 'An existing workflow must be migrated instead of creating another field',
+            })]),
+          }))
+        }
+        const create = requiredWorkflowFieldCreate(adapter)
+        const outcome = await create(
+          preflight.context.target.route,
+          Object.freeze({
+            taskListGuid: preflight.context.target.taskListGuid,
+            name: normalized.definition.fieldName,
+            options: Object.freeze(normalized.definition.states.map(state => Object.freeze({
+              name: state.name,
+              colorIndex: state.colorIndex,
+            }))),
+          }),
+          operationSignal,
+        )
+        throwIfCancelled(operationSignal)
+        if (outcome.state !== 'ok') {
+          return workflowRemoteFailure(outcome.state, outcome.issue)
+        }
+        mappedField = mappedWorkflowFieldFromWrite(normalized.definition, outcome.value)
+      } else {
+        const current = preflight.context.project.workflow
+        if (current === null) {
+          return workflowCompatibilityBlocked(Object.freeze({
+            state: 'blocked',
+            issues: Object.freeze([Object.freeze({
+              code: 'field-missing',
+              severity: 'blocked',
+              stateId: null,
+              taskGuid: null,
+              message: 'No configured workflow exists to migrate',
+            })]),
+          }))
+        }
+        const selected = fields.find(field => field.fieldGuid === current.field.fieldGuid)
+        if (selected === undefined) return workflowCompatibilityBlocked(assessed.compatibility)
+        const update = requiredWorkflowFieldUpdate(adapter)
+        const currentByState = new Map(
+          current.options.map(option => [option.stateId, option.optionGuid] as const),
+        )
+        const outcome = await update(
+          preflight.context.target.route,
+          Object.freeze({
+            fieldGuid: current.field.fieldGuid,
+            expectedRemoteVersion: selected.remoteVersion,
+            name: normalized.definition.fieldName,
+            options: Object.freeze(normalized.definition.states.map(state => Object.freeze({
+              ...(currentByState.get(state.stateId) === undefined
+                ? {}
+                : { optionGuid: currentByState.get(state.stateId) as string }),
+              name: state.name,
+              colorIndex: state.colorIndex,
+            }))),
+          }),
+          operationSignal,
+        )
+        throwIfCancelled(operationSignal)
+        if (outcome.state === 'conflict') {
+          return workflowCompatibilityBlocked(fieldVersionConflictCompatibility(current))
+        }
+        if (outcome.state !== 'ok') return workflowRemoteFailure(outcome.state, outcome.issue)
+        mappedField = mappedWorkflowFieldFromWrite(normalized.definition, outcome.value, current)
+      }
+
+      const committedMapping = Object.freeze({
+        mode: 'existing' as const,
+        fieldGuid: mappedField.fieldGuid,
+        options: Object.freeze(mappedField.options.map(option => Object.freeze({
+          stateId: option.stateId,
+          optionGuid: option.optionGuid,
+        }))),
+      })
+      const postflight = assessTaskWorkflowCompatibility({
+        current: preflight.context.project.workflow,
+        desired: normalized.definition,
+        mapping: committedMapping,
+        remoteFields: Object.freeze([workflowCandidateFromMappedField(mappedField)]),
+        taskValues: preflight.context.taskValues,
+      })
+      if (postflight.compatibility.state === 'blocked') {
+        return workflowCompatibilityBlocked(postflight.compatibility)
+      }
+      const configuredAt = commandInstant(this.options.clock)
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      return this.options.repository.commitFeishuTaskWorkflowConfiguration(Object.freeze({
+        projectId: normalized.projectId,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        expectedWorkflowRevision: normalized.expectedWorkflowRevision,
+        definition: normalized.definition,
+        mapping: normalized.mapping,
+        field: mappedField,
+        compatibility: postflight.compatibility,
+        configuredAt,
+        command: taskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          normalized.reason,
+          configuredAt,
+        ),
+      }), operationSignal)
+    })
+  }
+
   /** Create/select the unique primary task list, with replay before remote side effects. */
   bindFeishuTaskList(
     request: BindFeishuTaskListRequest,
@@ -879,6 +1176,9 @@ export class WorkbenchScenario {
         taskGuid: normalized.taskGuid,
         expectedRevision: normalized.expectedRevision,
         expectedRemoteVersion: normalized.expectedRemoteVersion,
+        ...(normalized.expectedWorkflowRevision === undefined
+          ? {}
+          : { expectedWorkflowRevision: normalized.expectedWorkflowRevision }),
         changes: Object.freeze({ ...normalized.changes }),
         preparedAt,
         command: taskCommand(
@@ -916,7 +1216,7 @@ export class WorkbenchScenario {
             taskGuid: normalized.taskGuid,
             expectedRemoteVersion: normalized.expectedRemoteVersion,
             idempotencyKey: normalized.idempotencyKey,
-            changes: normalized.changes,
+            changes: reservation.patch,
           }),
           operationSignal,
         )
@@ -2829,6 +3129,160 @@ function validateDiscoverFeishuTaskListsRequest(
   })
 }
 
+function validateDiscoverFeishuTaskWorkflowFieldsRequest(
+  value: DiscoverFeishuTaskWorkflowFieldsRequest,
+): DiscoverFeishuTaskWorkflowFieldsRequest {
+  const record = exactRecord(value, 'discoverFeishuTaskWorkflowFields request', [
+    'projectId', 'expectedTaskRevision',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedTaskRevision: positiveRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+  })
+}
+
+function validatePreviewFeishuTaskWorkflowRequest(
+  value: PreviewFeishuTaskWorkflowRequest,
+): PreviewFeishuTaskWorkflowRequest {
+  const record = exactRecord(value, 'previewFeishuTaskWorkflow request', [
+    'projectId', 'expectedTaskRevision', 'expectedWorkflowRevision', 'definition', 'mapping',
+  ])
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedTaskRevision: positiveRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    expectedWorkflowRevision: nullablePositiveRevision(
+      record.expectedWorkflowRevision,
+      'expectedWorkflowRevision',
+    ),
+    definition: validateProjectTaskWorkflowDefinition(record.definition),
+    mapping: validateConfigureFeishuTaskWorkflowMapping(record.mapping),
+  })
+}
+
+function validateConfigureFeishuTaskWorkflowRequest(
+  value: ConfigureFeishuTaskWorkflowRequest,
+): ConfigureFeishuTaskWorkflowRequest {
+  const record = exactRecord(value, 'configureFeishuTaskWorkflow request', [
+    'projectId', 'expectedTaskRevision', 'expectedWorkflowRevision', 'definition', 'mapping',
+    'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.reason !== 'owner-feishu-task-workflow-configure') {
+    throw badRequest('reason is not supported for this command', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    expectedTaskRevision: positiveRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    expectedWorkflowRevision: nullablePositiveRevision(
+      record.expectedWorkflowRevision,
+      'expectedWorkflowRevision',
+    ),
+    definition: validateProjectTaskWorkflowDefinition(record.definition),
+    mapping: validateConfigureFeishuTaskWorkflowMapping(record.mapping),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-feishu-task-workflow-configure',
+  })
+}
+
+function validateProjectTaskWorkflowDefinition(value: unknown): ProjectTaskWorkflowDefinition {
+  const record = exactRecord(value, 'workflow definition', [
+    'fieldName', 'initialStateId', 'terminalStateIds', 'states',
+  ])
+  if (!Array.isArray(record.states)) {
+    throw badRequest('workflow definition states must be an array', { field: 'definition.states' })
+  }
+  if (!Array.isArray(record.terminalStateIds)) {
+    throw badRequest('workflow terminalStateIds must be an array', {
+      field: 'definition.terminalStateIds',
+    })
+  }
+  const definition = {
+    fieldName: record.fieldName,
+    initialStateId: record.initialStateId,
+    terminalStateIds: record.terminalStateIds.map((stateId, index) => {
+      if (typeof stateId !== 'string') {
+        throw badRequest('workflow terminal state id must be a string', {
+          field: `definition.terminalStateIds[${String(index)}]`,
+        })
+      }
+      return stateId
+    }),
+    states: record.states.map((candidate, index) => {
+      const state = exactRecord(candidate, `workflow state ${String(index + 1)}`, [
+        'stateId', 'name', 'colorIndex', 'allowedNextStateIds',
+      ])
+      if (!Array.isArray(state.allowedNextStateIds)) {
+        throw badRequest('workflow state allowedNextStateIds must be an array', {
+          field: `definition.states[${String(index)}].allowedNextStateIds`,
+        })
+      }
+      return {
+        stateId: state.stateId,
+        name: state.name,
+        colorIndex: state.colorIndex,
+        allowedNextStateIds: state.allowedNextStateIds.map((target, targetIndex) => {
+          if (typeof target !== 'string') {
+            throw badRequest('workflow transition target must be a string', {
+              field: `definition.states[${String(index)}].allowedNextStateIds[${String(targetIndex)}]`,
+            })
+          }
+          return target
+        }),
+      }
+    }),
+  } as ProjectTaskWorkflowDefinition
+  try {
+    return projectTaskWorkflowDefinition(definition)
+  } catch (error: unknown) {
+    throw badRequest(error instanceof Error ? error.message : 'workflow definition is invalid', {
+      field: 'definition',
+    })
+  }
+}
+
+function validateConfigureFeishuTaskWorkflowMapping(
+  value: unknown,
+): ConfigureFeishuTaskWorkflowMapping {
+  const preliminary = exactRecord(value, 'workflow mapping', ['mode'], [
+    'fieldGuid', 'options',
+  ])
+  if (preliminary.mode === 'create') {
+    exactRecord(value, 'create workflow mapping', ['mode'])
+    return Object.freeze({ mode: 'create' })
+  }
+  if (preliminary.mode === 'migrate') {
+    exactRecord(value, 'migrate workflow mapping', ['mode'])
+    return Object.freeze({ mode: 'migrate' })
+  }
+  if (preliminary.mode !== 'existing') {
+    throw badRequest('workflow mapping mode is unsupported', { field: 'mapping.mode' })
+  }
+  const record = exactRecord(value, 'existing workflow mapping', [
+    'mode', 'fieldGuid', 'options',
+  ])
+  if (!Array.isArray(record.options) || record.options.length < 2 || record.options.length > 100) {
+    throw badRequest('workflow option mapping must contain 2-100 items', {
+      field: 'mapping.options',
+    })
+  }
+  return Object.freeze({
+    mode: 'existing',
+    fieldGuid: safeFeishuResourceId(record.fieldGuid, 'mapping.fieldGuid'),
+    options: Object.freeze(record.options.map((candidate, index) => {
+      const option = exactRecord(candidate, `workflow mapping option ${String(index + 1)}`, [
+        'stateId', 'optionGuid',
+      ])
+      return Object.freeze({
+        stateId: safeWorkflowStateId(option.stateId, `mapping.options[${String(index)}].stateId`),
+        optionGuid: safeFeishuResourceId(
+          option.optionGuid,
+          `mapping.options[${String(index)}].optionGuid`,
+        ),
+      })
+    })),
+  })
+}
+
 function validateBindFeishuTaskListRequest(
   value: BindFeishuTaskListRequest,
 ): BindFeishuTaskListRequest {
@@ -2918,12 +3372,12 @@ function validateUpdateFeishuTaskRequest(
   const record = exactRecord(value, 'updateFeishuTask request', [
     'projectId', 'taskGuid', 'expectedRevision', 'expectedRemoteVersion',
     'changes', 'idempotencyKey', 'causationId', 'reason',
-  ])
+  ], ['expectedWorkflowRevision'])
   if (record.reason !== 'owner-feishu-task-update') {
     throw badRequest('reason is not supported for this command', { field: 'reason' })
   }
   const changesRecord = exactRecord(record.changes, 'changes', [], [
-    'summary', 'description', 'completed',
+    'summary', 'description', 'completed', 'workflowStateId',
   ])
   if (Object.keys(changesRecord).length < 1) {
     throw badRequest('changes must contain at least one field', { field: 'changes' })
@@ -2938,7 +3392,25 @@ function validateUpdateFeishuTaskRequest(
     ...(Object.hasOwn(changesRecord, 'completed') ? {
       completed: booleanField(changesRecord.completed, 'changes.completed'),
     } : {}),
+    ...(Object.hasOwn(changesRecord, 'workflowStateId') ? {
+      workflowStateId: safeWorkflowStateId(
+        changesRecord.workflowStateId,
+        'changes.workflowStateId',
+      ),
+    } : {}),
   })
+  const expectedWorkflowRevision = record.expectedWorkflowRevision
+  if (Object.hasOwn(changesRecord, 'workflowStateId')) {
+    if (expectedWorkflowRevision === undefined) {
+      throw badRequest('expectedWorkflowRevision is required for a workflow state change', {
+        field: 'expectedWorkflowRevision',
+      })
+    }
+  } else if (expectedWorkflowRevision !== undefined) {
+    throw badRequest('expectedWorkflowRevision requires changes.workflowStateId', {
+      field: 'expectedWorkflowRevision',
+    })
+  }
   return Object.freeze({
     projectId: safeId(record.projectId, 'projectId'),
     taskGuid: safeFeishuResourceId(record.taskGuid, 'taskGuid'),
@@ -2947,6 +3419,12 @@ function validateUpdateFeishuTaskRequest(
       record.expectedRemoteVersion,
       'expectedRemoteVersion',
     ),
+    ...(expectedWorkflowRevision === undefined ? {} : {
+      expectedWorkflowRevision: positiveRevision(
+        expectedWorkflowRevision,
+        'expectedWorkflowRevision',
+      ),
+    }),
     changes,
     idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
     causationId: validateCommandKey(record.causationId, 'causationId'),
@@ -2964,6 +3442,13 @@ function taskIdentityKind(value: unknown): FeishuIdentityKind {
 function safeFeishuResourceId(value: unknown, field: string): string {
   if (typeof value !== 'string' || !SAFE_FEISHU_RESOURCE_ID.test(value)) {
     throw badRequest(`${field} must be a safe Feishu identifier`, { field })
+  }
+  return value
+}
+
+function safeWorkflowStateId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/u.test(value)) {
+    throw badRequest(`${field} must be a lowercase stable identifier`, { field })
   }
   return value
 }
@@ -3094,6 +3579,277 @@ function requiredTaskAdapter(adapters: WorkbenchExternalAdapters): WorkbenchFeis
     throw unavailable('Workbench Feishu task adapter is not available')
   }
   return adapters.feishuTasks
+}
+
+async function listWorkflowFields(
+  adapter: WorkbenchFeishuTaskExternalAdapter,
+  route: WorkbenchFeishuTaskRoute,
+  taskListGuid: string,
+  signal: AbortSignal,
+): Promise<readonly FeishuTaskWorkflowFieldCandidate[]> {
+  if (adapter.listTaskWorkflowFields === undefined) {
+    throw unavailable('Workbench Feishu task adapter does not support workflow fields')
+  }
+  const outcome = await adapter.listTaskWorkflowFields(route, taskListGuid, signal)
+  throwIfCancelled(signal)
+  if (outcome.state !== 'ok') {
+    throw unavailable('Feishu workflow-field discovery was rejected')
+  }
+  try {
+    const fieldGuids = new Set<string>()
+    return Object.freeze(outcome.value.map((field, fieldIndex) => {
+      if (typeof field.fieldGuid !== 'string' || !SAFE_FEISHU_RESOURCE_ID.test(field.fieldGuid)
+        || fieldGuids.has(field.fieldGuid)
+        || typeof field.name !== 'string' || field.name.length < 1 || field.name.length > 50
+        || typeof field.type !== 'string' || field.type.length < 1 || field.type.length > 64
+        || typeof field.remoteVersion !== 'string' || field.remoteVersion.length < 1
+        || field.remoteVersion.length > 64 || !Array.isArray(field.options)
+        || field.options.length > 100) {
+        throw new TypeError(`invalid workflow field ${String(fieldIndex)}`)
+      }
+      fieldGuids.add(field.fieldGuid)
+      const optionGuids = new Set<string>()
+      const options = Object.freeze(field.options.map((option, optionIndex) => {
+        if (typeof option.optionGuid !== 'string'
+          || !SAFE_FEISHU_RESOURCE_ID.test(option.optionGuid)
+          || optionGuids.has(option.optionGuid)
+          || typeof option.name !== 'string' || option.name.length < 1 || option.name.length > 50
+          || !Number.isInteger(option.colorIndex) || option.colorIndex < 0 || option.colorIndex > 54
+          || typeof option.hidden !== 'boolean') {
+          throw new TypeError(`invalid workflow option ${String(optionIndex)}`)
+        }
+        optionGuids.add(option.optionGuid)
+        return Object.freeze({ ...option })
+      }))
+      return Object.freeze({
+        fieldGuid: field.fieldGuid,
+        name: field.name,
+        type: field.type,
+        remoteVersion: field.remoteVersion,
+        options,
+      })
+    }))
+  } catch (error: unknown) {
+    throw infrastructure('Feishu workflow-field response was invalid', error)
+  }
+}
+
+function requiredWorkflowFieldCreate(adapter: WorkbenchFeishuTaskExternalAdapter): NonNullable<
+  WorkbenchFeishuTaskExternalAdapter['createTaskWorkflowField']
+> {
+  if (adapter.createTaskWorkflowField === undefined) {
+    throw unavailable('Workbench Feishu task adapter cannot create workflow fields')
+  }
+  return adapter.createTaskWorkflowField.bind(adapter)
+}
+
+function requiredWorkflowFieldUpdate(adapter: WorkbenchFeishuTaskExternalAdapter): NonNullable<
+  WorkbenchFeishuTaskExternalAdapter['updateTaskWorkflowField']
+> {
+  if (adapter.updateTaskWorkflowField === undefined) {
+    throw unavailable('Workbench Feishu task adapter cannot update workflow fields')
+  }
+  return adapter.updateTaskWorkflowField.bind(adapter)
+}
+
+function workflowContextForRead(
+  context: WorkbenchFeishuTaskWorkflowContext | null,
+  expectedTaskRevision: number,
+): WorkbenchFeishuTaskWorkflowContext {
+  if (context === null) {
+    throw badRequest('Project was not found or has no primary task list', { field: 'projectId' })
+  }
+  if (context.project.revision !== expectedTaskRevision) {
+    throw badRequest('Project task projection changed', { field: 'expectedTaskRevision' })
+  }
+  return context
+}
+
+function workflowContextForPreview(
+  context: WorkbenchFeishuTaskWorkflowContext | null,
+  expectedTaskRevision: number,
+  expectedWorkflowRevision: number | null,
+): WorkbenchFeishuTaskWorkflowContext {
+  const ready = workflowContextForRead(context, expectedTaskRevision)
+  if ((ready.project.workflow?.revision ?? null) !== expectedWorkflowRevision) {
+    throw badRequest('Project task workflow changed', { field: 'expectedWorkflowRevision' })
+  }
+  return ready
+}
+
+function workflowProjectPreflight(
+  project: ProjectTasksProjection | null,
+  request: Pick<
+    ConfigureFeishuTaskWorkflowRequest,
+    'projectId' | 'expectedTaskRevision' | 'expectedWorkflowRevision'
+  >,
+): ConfigureFeishuTaskWorkflowResult | null {
+  if (project === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'project-not-found',
+        message: `Workbench Project ${request.projectId} was not found in the authorized scope`,
+        projectId: request.projectId,
+      }),
+    })
+  }
+  if (project.binding === null) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({ code: 'task-list-unbound', message: 'Project has no primary task list' }),
+    })
+  }
+  if (project.revision !== request.expectedTaskRevision) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'task-projection-revision-conflict',
+        message: 'Project task projection changed before workflow configuration',
+        expectedRevision: request.expectedTaskRevision,
+        currentRevision: project.revision,
+      }),
+    })
+  }
+  if ((project.workflow?.revision ?? null) !== request.expectedWorkflowRevision) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: 'workflow-revision-conflict',
+        message: 'Project task workflow changed before configuration',
+      }),
+    })
+  }
+  return null
+}
+
+function workflowConfigurationPreflight(
+  context: WorkbenchFeishuTaskWorkflowContext,
+  request: ConfigureFeishuTaskWorkflowRequest,
+):
+  | { readonly ok: true; readonly context: WorkbenchFeishuTaskWorkflowContext }
+  | { readonly ok: false; readonly result: ConfigureFeishuTaskWorkflowResult } {
+  const conflict = workflowProjectPreflight(context.project, request)
+  return conflict === null
+    ? Object.freeze({ ok: true, context })
+    : Object.freeze({ ok: false, result: conflict })
+}
+
+function mappedWorkflowFieldFromExisting(
+  definition: ProjectTaskWorkflowDefinition,
+  mapping: Extract<ConfigureFeishuTaskWorkflowMapping, { readonly mode: 'existing' }>,
+  field: FeishuTaskWorkflowFieldCandidate,
+): WorkbenchFeishuTaskWorkflowMappedField {
+  if (field.type !== 'single_select') throw infrastructure('Mapped workflow field type changed')
+  const mappedByState = new Map(mapping.options.map(option => [option.stateId, option.optionGuid]))
+  return Object.freeze({
+    fieldGuid: field.fieldGuid,
+    name: field.name,
+    remoteVersion: field.remoteVersion,
+    options: Object.freeze(definition.states.map((state) => {
+      const optionGuid = mappedByState.get(state.stateId)
+      const option = field.options.find(candidate => candidate.optionGuid === optionGuid)
+      if (option === undefined) throw infrastructure('Mapped workflow option disappeared')
+      return Object.freeze({ stateId: state.stateId, ...option })
+    })),
+  })
+}
+
+function mappedWorkflowFieldFromWrite(
+  definition: ProjectTaskWorkflowDefinition,
+  field: WorkbenchFeishuTaskWorkflowFieldWrite,
+  current: ProjectTaskWorkflowProjection | null = null,
+): WorkbenchFeishuTaskWorkflowMappedField {
+  if (field.type !== 'single_select' || field.name !== definition.fieldName
+    || field.options.length < definition.states.length) {
+    throw infrastructure('Feishu workflow-field write returned an incompatible field')
+  }
+  const used = new Set<string>()
+  const currentByState = new Map(
+    (current?.options ?? []).map(option => [option.stateId, option.optionGuid] as const),
+  )
+  const options = definition.states.map((state) => {
+    const expectedGuid = currentByState.get(state.stateId)
+    const candidates = expectedGuid === undefined
+      ? field.options.filter(option => option.name === state.name && !used.has(option.optionGuid))
+      : field.options.filter(option => option.optionGuid === expectedGuid)
+    if (candidates.length !== 1) {
+      throw infrastructure('Feishu workflow-field write did not preserve one stable option identity')
+    }
+    const option = candidates[0] as WorkbenchFeishuTaskWorkflowFieldWrite['options'][number]
+    if (option.name !== state.name || option.colorIndex !== state.colorIndex || option.hidden) {
+      throw infrastructure('Feishu workflow-field write did not apply the desired option')
+    }
+    used.add(option.optionGuid)
+    return Object.freeze({ stateId: state.stateId, ...option })
+  })
+  return Object.freeze({
+    fieldGuid: field.fieldGuid,
+    name: field.name,
+    remoteVersion: field.remoteVersion,
+    options: Object.freeze(options),
+  })
+}
+
+function workflowCandidateFromMappedField(
+  field: WorkbenchFeishuTaskWorkflowMappedField,
+): FeishuTaskWorkflowFieldCandidate {
+  return Object.freeze({
+    fieldGuid: field.fieldGuid,
+    name: field.name,
+    type: 'single_select',
+    remoteVersion: field.remoteVersion,
+    options: Object.freeze(field.options.map(option => Object.freeze({
+      optionGuid: option.optionGuid,
+      name: option.name,
+      colorIndex: option.colorIndex,
+      hidden: option.hidden,
+    }))),
+  })
+}
+
+function fieldVersionConflictCompatibility(
+  current: ProjectTaskWorkflowProjection,
+): ProjectTaskWorkflowProjection['compatibility'] {
+  return Object.freeze({
+    state: 'blocked',
+    issues: Object.freeze([Object.freeze({
+      code: 'field-version-changed',
+      severity: 'blocked',
+      stateId: null,
+      taskGuid: null,
+      message: `Feishu workflow field changed after version ${current.field.remoteVersion}`,
+    })]),
+  })
+}
+
+function workflowCompatibilityBlocked(
+  compatibility: ProjectTaskWorkflowProjection['compatibility'],
+): ConfigureFeishuTaskWorkflowResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'workflow-compatibility-blocked',
+      message: 'Workflow compatibility checks blocked configuration',
+      compatibility,
+    }),
+  })
+}
+
+function workflowRemoteFailure(
+  state: 'rejected' | 'unknown',
+  issue: FeishuConnectionIssue,
+): ConfigureFeishuTaskWorkflowResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: state === 'unknown' ? 'remote-outcome-unknown' : 'remote-rejected',
+      message: state === 'unknown'
+        ? 'Feishu workflow-field write outcome is unknown'
+        : 'Feishu rejected the workflow-field write',
+      issue: detachedIssue(issue),
+    }),
+  })
 }
 
 function taskCommand<R extends WorkbenchFeishuTaskReason>(

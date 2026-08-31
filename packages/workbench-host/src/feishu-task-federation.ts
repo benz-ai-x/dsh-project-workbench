@@ -4,8 +4,10 @@ import type {
   FeishuIdentityKind,
   FeishuTaskEventInput,
   FeishuTaskListCandidateProjection,
+  FeishuTaskWorkflowFieldCandidate,
   ProjectTaskProjection,
 } from './client.ts'
+import type { WorkbenchFeishuTaskCustomFieldValue } from './feishu-task-workflow.ts'
 
 /** Exact, continuity-pinned Feishu route used for one provider operation. */
 export interface WorkbenchFeishuTaskRoute {
@@ -20,7 +22,10 @@ export interface WorkbenchFeishuTaskRoute {
 export type WorkbenchFeishuTaskSnapshot = Omit<
   ProjectTaskProjection,
   'scope' | 'projectionRevision'
->
+> & {
+  /** Detached provider values used only to derive the configured workflow projection. */
+  readonly customFieldValues?: readonly WorkbenchFeishuTaskCustomFieldValue[]
+}
 
 /** Complete, bounded snapshot used as the reconciliation replacement baseline. */
 export interface WorkbenchFeishuTaskListSnapshot {
@@ -42,6 +47,23 @@ export interface WorkbenchFeishuTaskPatch {
   readonly summary?: string
   readonly description?: string
   readonly completed?: boolean
+  readonly workflow?: {
+    readonly fieldGuid: string
+    readonly optionGuid: string
+  }
+}
+
+export interface WorkbenchFeishuTaskWorkflowFieldWrite {
+  readonly fieldGuid: string
+  readonly name: string
+  readonly type: 'single_select'
+  readonly remoteVersion: string
+  readonly options: readonly {
+    readonly optionGuid: string
+    readonly name: string
+    readonly colorIndex: number
+    readonly hidden: boolean
+  }[]
 }
 
 /** Normalized task event emitted by a trusted Feishu event connector. */
@@ -97,7 +119,41 @@ export interface WorkbenchFeishuTaskExternalAdapter {
     readonly current: WorkbenchFeishuTaskSnapshot
   }>
 
+  /** Optional on legacy/fake adapters; T09 commands fail closed when absent. */
+  listTaskWorkflowFields?(
+    route: WorkbenchFeishuTaskRoute,
+    taskListGuid: string,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<readonly FeishuTaskWorkflowFieldCandidate[]>>
+
+  createTaskWorkflowField?(
+    route: WorkbenchFeishuTaskRoute,
+    input: Readonly<{
+      readonly taskListGuid: string
+      readonly name: string
+      readonly options: readonly { readonly name: string; readonly colorIndex: number }[]
+    }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite>>
+
+  updateTaskWorkflowField?(
+    route: WorkbenchFeishuTaskRoute,
+    input: Readonly<{
+      readonly fieldGuid: string
+      readonly expectedRemoteVersion: string
+      readonly name: string
+      readonly options: readonly {
+        readonly optionGuid?: string
+        readonly name: string
+        readonly colorIndex: number
+      }[]
+    }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite> | {
+    readonly state: 'conflict'
+    readonly current: WorkbenchFeishuTaskWorkflowFieldWrite
+  }>
+
   /** Optional low-latency source. Durable reconciliation remains mandatory. */
   subscribeTaskEvents?(listener: WorkbenchFeishuTaskEventListener): () => void
 }
-

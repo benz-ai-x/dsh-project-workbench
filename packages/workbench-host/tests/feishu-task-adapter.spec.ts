@@ -374,6 +374,186 @@ describe('DshFeishuConnectionAdapter task federation', () => {
     expect(patchCalls).toBe(1)
   })
 
+  it('uses the exact Task v2 custom-field routes and writes stable option GUIDs to tasks', async () => {
+    const store = credentials()
+    store.values.set('FEISHU_USER_TOKEN', { value: USER_TOKEN, source: 'env' })
+    let fieldVersion = '200'
+    let taskVersion = '100'
+    const calls: string[] = []
+    const customField = () => ({
+      guid: 'field-status',
+      name: 'Project status',
+      type: 'single_select',
+      updated_at: fieldVersion,
+      single_select_setting: {
+        options: [
+          { guid: 'option-planned', name: 'Planned', color_index: 1, is_hidden: false },
+          { guid: 'option-doing', name: 'Doing', color_index: 11, is_hidden: false },
+          { guid: 'option-done', name: 'Done', color_index: 32, is_hidden: false },
+        ],
+      },
+    })
+    const request: FeishuFetch = async (input, init) => {
+      const url = requestUrl(input)
+      calls.push(`${method(init)} ${url.pathname}`)
+      if (url.pathname.endsWith('/authen/v1/user_info')) return identity()
+      authorize(init)
+      if (url.pathname === '/open-apis/task/v2/custom_fields' && method(init) === 'GET') {
+        expect(Object.fromEntries(url.searchParams)).toMatchObject({
+          resource_type: 'tasklist',
+          resource_id: 'list-primary',
+          user_id_type: 'open_id',
+          page_size: '50',
+        })
+        return providerPage([customField()])
+      }
+      if (url.pathname === '/open-apis/task/v2/custom_fields' && method(init) === 'POST') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          resource_type: 'tasklist',
+          resource_id: 'list-primary',
+          name: 'Project status',
+          type: 'single_select',
+          single_select_setting: {
+            options: [
+              { name: 'Planned', color_index: 1 },
+              { name: 'Doing', color_index: 11 },
+              { name: 'Done', color_index: 32 },
+            ],
+          },
+        })
+        return json({ code: 0, data: { custom_field: customField() } })
+      }
+      if (url.pathname === '/open-apis/task/v2/custom_fields/field-status'
+        && method(init) === 'GET') {
+        return json({ code: 0, data: { custom_field: customField() } })
+      }
+      if (url.pathname === '/open-apis/task/v2/custom_fields/field-status'
+        && method(init) === 'PATCH') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          custom_field: {
+            name: 'Delivery state',
+            single_select_setting: {
+              options: [
+                { guid: 'option-planned', name: 'Ready', color_index: 2 },
+                { guid: 'option-doing', name: 'Doing', color_index: 11 },
+                { guid: 'option-done', name: 'Done', color_index: 32 },
+              ],
+            },
+          },
+          update_fields: ['name', 'single_select_setting'],
+        })
+        fieldVersion = '201'
+        return json({
+          code: 0,
+          data: {
+            custom_field: {
+              ...customField(),
+              name: 'Delivery state',
+              single_select_setting: {
+                options: [
+                  { guid: 'option-planned', name: 'Ready', color_index: 2, is_hidden: false },
+                  { guid: 'option-doing', name: 'Doing', color_index: 11, is_hidden: false },
+                  { guid: 'option-done', name: 'Done', color_index: 32, is_hidden: false },
+                ],
+              },
+            },
+          },
+        })
+      }
+      if (url.pathname === '/open-apis/task/v2/comments') return providerPage([])
+      if (url.pathname === '/open-apis/task/v2/tasks/task-parent' && method(init) === 'GET') {
+        return json({
+          code: 0,
+          data: {
+            task: task({
+              updated_at: taskVersion,
+              custom_fields: [{
+                guid: 'field-status',
+                type: 'single_select',
+                single_select_value: 'option-planned',
+              }],
+            }),
+          },
+        })
+      }
+      if (url.pathname === '/open-apis/task/v2/tasks/task-parent' && method(init) === 'PATCH') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          task: {
+            custom_fields: [{
+              guid: 'field-status',
+              single_select_value: 'option-doing',
+            }],
+          },
+          update_fields: ['custom_fields'],
+        })
+        taskVersion = '101'
+        return json({
+          code: 0,
+          data: {
+            task: task({
+              updated_at: taskVersion,
+              custom_fields: [{
+                guid: 'field-status',
+                type: 'single_select',
+                single_select_value: 'option-doing',
+              }],
+            }),
+          },
+        })
+      }
+      return json({ code: 1 }, { status: 400 })
+    }
+    const adapter = new DshFeishuConnectionAdapter(store.provider, { fetch: request })
+    const signal = new AbortController().signal
+
+    await expect(adapter.listTaskWorkflowFields(route(), 'list-primary', signal))
+      .resolves.toMatchObject({
+        state: 'ok',
+        value: [{ fieldGuid: 'field-status', type: 'single_select', remoteVersion: '200' }],
+      })
+    await expect(adapter.createTaskWorkflowField(route(), {
+      taskListGuid: 'list-primary',
+      name: 'Project status',
+      options: [
+        { name: 'Planned', colorIndex: 1 },
+        { name: 'Doing', colorIndex: 11 },
+        { name: 'Done', colorIndex: 32 },
+      ],
+    }, signal)).resolves.toMatchObject({ state: 'ok', value: { fieldGuid: 'field-status' } })
+    await expect(adapter.updateTaskWorkflowField(route(), {
+      fieldGuid: 'field-status',
+      expectedRemoteVersion: '200',
+      name: 'Delivery state',
+      options: [
+        { optionGuid: 'option-planned', name: 'Ready', colorIndex: 2 },
+        { optionGuid: 'option-doing', name: 'Doing', colorIndex: 11 },
+        { optionGuid: 'option-done', name: 'Done', colorIndex: 32 },
+      ],
+    }, signal)).resolves.toMatchObject({
+      state: 'ok',
+      value: { name: 'Delivery state', remoteVersion: '201' },
+    })
+    await expect(adapter.updateTask(route(), {
+      taskGuid: 'task-parent',
+      expectedRemoteVersion: '100',
+      idempotencyKey: IDEMPOTENCY_KEY,
+      changes: { workflow: { fieldGuid: 'field-status', optionGuid: 'option-doing' } },
+    }, signal)).resolves.toMatchObject({
+      state: 'ok',
+      value: {
+        remoteVersion: '101',
+        customFieldValues: [{
+          fieldGuid: 'field-status',
+          singleSelectOptionGuid: 'option-doing',
+        }],
+      },
+    })
+    expect(calls.filter(call => call.startsWith('PATCH'))).toEqual([
+      'PATCH /open-apis/task/v2/custom_fields/field-status',
+      'PATCH /open-apis/task/v2/tasks/task-parent',
+    ])
+  })
+
   it('never retries an ambiguous PATCH and rejects identity drift before task access', async () => {
     const store = credentials()
     store.values.set('FEISHU_USER_TOKEN', { value: USER_TOKEN, source: 'env' })

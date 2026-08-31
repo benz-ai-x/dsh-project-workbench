@@ -12,6 +12,7 @@ import {
   type WorkbenchFeishuTaskRoute,
   type WorkbenchFeishuTaskSnapshot,
   type WorkbenchFeishuTaskUpdateReservationMutation,
+  type WorkbenchFeishuTaskWorkflowConfigurationMutation,
   type WorkbenchFeishuVerificationMutation,
   type WorkbenchProjectMutation,
 } from '../src/index.ts'
@@ -571,6 +572,181 @@ describe('T08 Feishu task SQLite federation', () => {
         },
       },
     })
+    await expect(repository.verifyAuditChain(signal)).resolves.toMatchObject({
+      valid: true,
+      eventCount: 5,
+    })
+    await repository.close()
+  })
+
+  it('persists stable workflow GUIDs, replays configuration, and only suggests completion at a terminal state', async () => {
+    const { repository, route } = await seededRepository()
+    const fieldGuid = 'field-project-status'
+    const optionPlanned = 'option-planned'
+    const optionDoing = 'option-doing'
+    const optionDone = 'option-done'
+    await repository.commitFeishuTaskListBinding(bindingMutation(route, [task(
+      'task-primary',
+      '100',
+      {
+        customFieldValues: Object.freeze([Object.freeze({
+          fieldGuid,
+          type: 'single_select',
+          singleSelectOptionGuid: optionDoing,
+        })]),
+      },
+    )]), signal)
+    const definition = Object.freeze({
+      fieldName: 'Project status',
+      initialStateId: 'planned',
+      terminalStateIds: Object.freeze(['done']),
+      states: Object.freeze([
+        Object.freeze({
+          stateId: 'planned',
+          name: 'Planned',
+          colorIndex: 1,
+          allowedNextStateIds: Object.freeze(['doing']),
+        }),
+        Object.freeze({
+          stateId: 'doing',
+          name: 'Doing',
+          colorIndex: 2,
+          allowedNextStateIds: Object.freeze(['done']),
+        }),
+        Object.freeze({
+          stateId: 'done',
+          name: 'Done',
+          colorIndex: 3,
+          allowedNextStateIds: Object.freeze([]),
+        }),
+      ]),
+    })
+    const mapping = Object.freeze({
+      mode: 'existing' as const,
+      fieldGuid,
+      options: Object.freeze([
+        Object.freeze({ stateId: 'planned', optionGuid: optionPlanned }),
+        Object.freeze({ stateId: 'doing', optionGuid: optionDoing }),
+        Object.freeze({ stateId: 'done', optionGuid: optionDone }),
+      ]),
+    })
+    const configuredAt = at(5)
+    const mutation: WorkbenchFeishuTaskWorkflowConfigurationMutation = Object.freeze({
+      projectId: PROJECT_ID,
+      expectedTaskRevision: 1,
+      expectedWorkflowRevision: null,
+      definition,
+      mapping,
+      field: Object.freeze({
+        fieldGuid,
+        name: 'Project status',
+        remoteVersion: 'field-version-1',
+        options: Object.freeze([
+          Object.freeze({
+            stateId: 'planned', optionGuid: optionPlanned, name: 'Planned',
+            colorIndex: 1, hidden: false,
+          }),
+          Object.freeze({
+            stateId: 'doing', optionGuid: optionDoing, name: 'Doing',
+            colorIndex: 2, hidden: false,
+          }),
+          Object.freeze({
+            stateId: 'done', optionGuid: optionDone, name: 'Done',
+            colorIndex: 3, hidden: false,
+          }),
+        ]),
+      }),
+      compatibility: Object.freeze({ state: 'compatible', issues: Object.freeze([]) }),
+      configuredAt,
+      command: command(5, 'owner-feishu-task-workflow-configure') as
+        WorkbenchFeishuTaskWorkflowConfigurationMutation['command'],
+    })
+
+    const committed = await repository.commitFeishuTaskWorkflowConfiguration(mutation, signal)
+    expect(committed).toMatchObject({
+      ok: true,
+      value: {
+        revision: 2,
+        tasks: [{ taskGuid: 'task-primary', completed: false }],
+        workflow: {
+          revision: 1,
+          field: { fieldGuid, remoteVersion: 'field-version-1' },
+          options: [
+            { stateId: 'planned', optionGuid: optionPlanned, usedTaskCount: 0 },
+            { stateId: 'doing', optionGuid: optionDoing, usedTaskCount: 1 },
+            { stateId: 'done', optionGuid: optionDone, usedTaskCount: 0 },
+          ],
+          values: [{
+            taskGuid: 'task-primary',
+            stateId: 'doing',
+            optionGuid: optionDoing,
+            recognized: true,
+          }],
+          compatibility: { state: 'compatible', issues: [] },
+          completionSuggestions: [],
+        },
+      },
+    })
+    await expect(repository.replayFeishuTaskWorkflowConfiguration({
+      organizationId: ORGANIZATION_ID,
+      teamId: TEAM_ID,
+      actorId: OWNER_ID,
+      projectId: PROJECT_ID,
+      expectedTaskRevision: 1,
+      expectedWorkflowRevision: null,
+      definition,
+      mapping,
+      idempotencyKey: mutation.command.idempotencyKey,
+      causationId: mutation.command.causationId,
+      reason: 'owner-feishu-task-workflow-configure',
+    }, signal)).resolves.toEqual(committed)
+
+    const reconciled = await repository.commitFeishuTaskReconciliation({
+      projectId: PROJECT_ID,
+      expectedRevision: 2,
+      snapshot: snapshot([task('task-primary', '101', {
+        customFieldValues: Object.freeze([Object.freeze({
+          fieldGuid,
+          type: 'single_select',
+          singleSelectOptionGuid: optionDone,
+        })]),
+      })], '11', at(6)),
+      attemptedAt: at(6),
+    }, signal)
+    expect(reconciled).toMatchObject({
+      ok: true,
+      value: {
+        revision: 3,
+        tasks: [{ taskGuid: 'task-primary', completed: false }],
+        workflow: {
+          revision: 1,
+          values: [{ taskGuid: 'task-primary', stateId: 'done', optionGuid: optionDone }],
+          completionSuggestions: [{
+            taskGuid: 'task-primary',
+            stateId: 'done',
+            reason: 'terminal-state-awaiting-owner-confirmation',
+          }],
+        },
+      },
+    })
+    const database = Reflect.get(repository, 'database') as DatabaseSync
+    const workflowVersions = database.prepare(`
+      SELECT revision, field_guid, mapping_json FROM workbench_feishu_task_workflow_version
+      WHERE project_id = ? ORDER BY revision
+    `).all(PROJECT_ID) as Array<{
+      readonly revision: number
+      readonly field_guid: string
+      readonly mapping_json: string
+    }>
+    expect(workflowVersions.map(row => ({
+      revision: row.revision,
+      field_guid: row.field_guid,
+      mapping: JSON.parse(row.mapping_json),
+    }))).toEqual([{
+      revision: 1,
+      field_guid: fieldGuid,
+      mapping,
+    }])
     await expect(repository.verifyAuditChain(signal)).resolves.toMatchObject({
       valid: true,
       eventCount: 5,

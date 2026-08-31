@@ -3,6 +3,7 @@ import type {
   CreateProjectRequest,
   FeishuCredentialProjection,
   FeishuTaskListCandidateProjection,
+  FeishuTaskWorkflowFieldCandidate,
   WorkbenchFeishuIdentityVerificationInput,
   WorkbenchFeishuIdentityVerificationResult,
   WorkbenchFeishuResourceVerificationObservation,
@@ -24,6 +25,7 @@ import type {
   WorkbenchFeishuTaskPatch,
   WorkbenchFeishuTaskRoute,
   WorkbenchFeishuTaskSnapshot,
+  WorkbenchFeishuTaskWorkflowFieldWrite,
   WorkbenchFeishuWriteResult,
 } from '../src/feishu-task-federation.ts'
 import type { WorkbenchFeishuExternalAdapter } from '../src/scenario.ts'
@@ -91,6 +93,22 @@ class FixtureTaskAdapter implements WorkbenchFeishuExternalAdapter, WorkbenchFei
   updateCalls = 0
   listCalls = 0
   readListCalls = 0
+  workflowFieldCalls = 0
+  workflowCreateCalls = 0
+  workflowUpdateCalls = 0
+  workflowFields: readonly FeishuTaskWorkflowFieldCandidate[] = Object.freeze([
+    Object.freeze({
+      fieldGuid: 'field-project-status',
+      name: 'Project status',
+      type: 'single_select',
+      remoteVersion: 'field-version-1',
+      options: Object.freeze([
+        Object.freeze({ optionGuid: 'option-planned', name: 'Planned', colorIndex: 1, hidden: false }),
+        Object.freeze({ optionGuid: 'option-doing', name: 'Doing', colorIndex: 2, hidden: false }),
+        Object.freeze({ optionGuid: 'option-done', name: 'Done', colorIndex: 3, hidden: false }),
+      ]),
+    }),
+  ])
   private listener: WorkbenchFeishuTaskEventListener | null = null
 
   async describeCredential(ref: string): Promise<FeishuCredentialProjection> {
@@ -219,9 +237,23 @@ class FixtureTaskAdapter implements WorkbenchFeishuExternalAdapter, WorkbenchFei
     if (current.remoteVersion !== input.expectedRemoteVersion) {
       return Object.freeze({ state: 'ok', value: current })
     }
+    const workflowValues = input.changes.workflow === undefined
+      ? current.customFieldValues
+      : Object.freeze([
+        ...(current.customFieldValues ?? []).filter(value =>
+          value.fieldGuid !== input.changes.workflow?.fieldGuid),
+        Object.freeze({
+          fieldGuid: input.changes.workflow.fieldGuid,
+          type: 'single_select',
+          singleSelectOptionGuid: input.changes.workflow.optionGuid,
+        }),
+      ])
     const next = Object.freeze({
       ...current,
-      ...input.changes,
+      ...(input.changes.summary === undefined ? {} : { summary: input.changes.summary }),
+      ...(input.changes.description === undefined ? {} : { description: input.changes.description }),
+      ...(input.changes.completed === undefined ? {} : { completed: input.changes.completed }),
+      customFieldValues: workflowValues,
       remoteVersion: String(Number(current.remoteVersion) + 1),
       completedAt: input.changes.completed === undefined
         ? current.completedAt
@@ -234,6 +266,75 @@ class FixtureTaskAdapter implements WorkbenchFeishuExternalAdapter, WorkbenchFei
       this.snapshot.taskList.remoteVersion,
     )
     return Object.freeze({ state: 'ok', value: next })
+  }
+
+  async listTaskWorkflowFields(
+    _route: WorkbenchFeishuTaskRoute,
+    taskListGuid: string,
+    _signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<readonly FeishuTaskWorkflowFieldCandidate[]>> {
+    if (taskListGuid !== TASK_LIST_GUID) throw new Error('fixture workflow task-list changed')
+    this.workflowFieldCalls += 1
+    return Object.freeze({ state: 'ok', value: this.workflowFields })
+  }
+
+  async createTaskWorkflowField(
+    _route: WorkbenchFeishuTaskRoute,
+    input: Readonly<{
+      readonly taskListGuid: string
+      readonly name: string
+      readonly options: readonly { readonly name: string; readonly colorIndex: number }[]
+    }>,
+    _signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite>> {
+    this.workflowCreateCalls += 1
+    return Object.freeze({
+      state: 'ok',
+      value: Object.freeze({
+        fieldGuid: 'field-created-status',
+        name: input.name,
+        type: 'single_select',
+        remoteVersion: 'field-created-version-1',
+        options: Object.freeze(input.options.map((option, index) => Object.freeze({
+          optionGuid: `option-created-${String(index + 1)}`,
+          name: option.name,
+          colorIndex: option.colorIndex,
+          hidden: false,
+        }))),
+      }),
+    })
+  }
+
+  async updateTaskWorkflowField(
+    _route: WorkbenchFeishuTaskRoute,
+    input: Readonly<{
+      readonly fieldGuid: string
+      readonly expectedRemoteVersion: string
+      readonly name: string
+      readonly options: readonly {
+        readonly optionGuid?: string
+        readonly name: string
+        readonly colorIndex: number
+      }[]
+    }>,
+    _signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite>> {
+    this.workflowUpdateCalls += 1
+    return Object.freeze({
+      state: 'ok',
+      value: Object.freeze({
+        fieldGuid: input.fieldGuid,
+        name: input.name,
+        type: 'single_select',
+        remoteVersion: `${input.expectedRemoteVersion}-next`,
+        options: Object.freeze(input.options.map((option, index) => Object.freeze({
+          optionGuid: option.optionGuid ?? `option-new-${String(index + 1)}`,
+          name: option.name,
+          colorIndex: option.colorIndex,
+          hidden: false,
+        }))),
+      }),
+    })
   }
 
   subscribeTaskEvents(listener: WorkbenchFeishuTaskEventListener): () => void {
@@ -517,6 +618,133 @@ describe('T08 Feishu task scenario', () => {
       })],
     })
     expect(adapter.readListCalls).toBe(2)
+    await scenario.close()
+  })
+
+  it('maps a workflow, converges Feishu status, and requires explicit completion confirmation', async () => {
+    const { scenario, adapter } = await fixture()
+    adapter.snapshot = taskListSnapshot([task('task-primary', '100', {
+      customFieldValues: Object.freeze([Object.freeze({
+        fieldGuid: 'field-project-status',
+        type: 'single_select',
+        singleSelectOptionGuid: 'option-doing',
+      })]),
+    })])
+    await bind(scenario)
+    const definition = Object.freeze({
+      fieldName: 'Project status',
+      initialStateId: 'planned',
+      terminalStateIds: Object.freeze(['done']),
+      states: Object.freeze([
+        Object.freeze({
+          stateId: 'planned', name: 'Planned', colorIndex: 1,
+          allowedNextStateIds: Object.freeze(['doing']),
+        }),
+        Object.freeze({
+          stateId: 'doing', name: 'Doing', colorIndex: 2,
+          allowedNextStateIds: Object.freeze(['done']),
+        }),
+        Object.freeze({
+          stateId: 'done', name: 'Done', colorIndex: 3,
+          allowedNextStateIds: Object.freeze([]),
+        }),
+      ]),
+    })
+    const mapping = Object.freeze({
+      mode: 'existing' as const,
+      fieldGuid: 'field-project-status',
+      options: Object.freeze([
+        Object.freeze({ stateId: 'planned', optionGuid: 'option-planned' }),
+        Object.freeze({ stateId: 'doing', optionGuid: 'option-doing' }),
+        Object.freeze({ stateId: 'done', optionGuid: 'option-done' }),
+      ]),
+    })
+
+    await expect(scenario.discoverFeishuTaskWorkflowFields({
+      projectId: PROJECT_ID,
+      expectedTaskRevision: 1,
+    }, signal)).resolves.toMatchObject({
+      taskRevision: 1,
+      items: [{ fieldGuid: 'field-project-status', type: 'single_select' }],
+    })
+    await expect(scenario.previewFeishuTaskWorkflow({
+      projectId: PROJECT_ID,
+      expectedTaskRevision: 1,
+      expectedWorkflowRevision: null,
+      definition,
+      mapping,
+    }, signal)).resolves.toMatchObject({
+      compatibility: { state: 'compatible', issues: [] },
+      usedStateIds: ['doing'],
+    })
+    const configureRequest = Object.freeze({
+      projectId: PROJECT_ID,
+      expectedTaskRevision: 1,
+      expectedWorkflowRevision: null,
+      definition,
+      mapping,
+      idempotencyKey: 'feishu-workflow-configure-0001',
+      causationId: 'feishu-workflow-configure-cause-0001',
+      reason: 'owner-feishu-task-workflow-configure' as const,
+    })
+    await expect(scenario.configureFeishuTaskWorkflow(configureRequest, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 2,
+        workflow: {
+          revision: 1,
+          values: [{ taskGuid: 'task-primary', stateId: 'doing' }],
+        },
+      },
+    })
+    await expect(scenario.configureFeishuTaskWorkflow(configureRequest, signal)).resolves.toMatchObject({
+      ok: true,
+      value: { revision: 2, workflow: { revision: 1 } },
+    })
+    expect(adapter.workflowFieldCalls).toBe(3)
+
+    await expect(scenario.updateFeishuTask({
+      projectId: PROJECT_ID,
+      taskGuid: 'task-primary',
+      expectedRevision: 2,
+      expectedRemoteVersion: '100',
+      expectedWorkflowRevision: 1,
+      changes: Object.freeze({ workflowStateId: 'done' }),
+      idempotencyKey: 'feishu-workflow-state-0001',
+      causationId: 'feishu-workflow-state-cause-0001',
+      reason: 'owner-feishu-task-update',
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 3,
+        tasks: [{ taskGuid: 'task-primary', completed: false }],
+        workflow: {
+          values: [{ taskGuid: 'task-primary', stateId: 'done' }],
+          completionSuggestions: [{
+            taskGuid: 'task-primary',
+            reason: 'terminal-state-awaiting-owner-confirmation',
+          }],
+        },
+      },
+    })
+    await expect(scenario.updateFeishuTask({
+      projectId: PROJECT_ID,
+      taskGuid: 'task-primary',
+      expectedRevision: 3,
+      expectedRemoteVersion: '101',
+      changes: Object.freeze({ completed: true }),
+      idempotencyKey: 'feishu-workflow-complete-0001',
+      causationId: 'feishu-workflow-complete-cause-0001',
+      reason: 'owner-feishu-task-update',
+    }, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 4,
+        tasks: [{ taskGuid: 'task-primary', completed: true }],
+        workflow: { completionSuggestions: [] },
+      },
+    })
+    expect(adapter.updateCalls).toBe(2)
     await scenario.close()
   })
 })

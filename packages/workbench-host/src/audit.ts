@@ -68,6 +68,7 @@ export interface AuditCommandReference {
     | 'workbench.feishu-task-list.bind'
     | 'workbench.feishu-task.reference'
     | 'workbench.feishu-task.update'
+    | 'workbench.feishu-task-workflow.configure'
 }
 
 export interface AuditCausationReference {
@@ -435,7 +436,8 @@ function normalizeReason(value: unknown): AuditReason {
     && record.code !== 'owner-feishu-route-verify'
     && record.code !== 'owner-feishu-task-list-bind'
     && record.code !== 'owner-feishu-task-reference'
-    && record.code !== 'owner-feishu-task-update') {
+    && record.code !== 'owner-feishu-task-update'
+    && record.code !== 'owner-feishu-task-workflow-configure') {
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -535,7 +537,8 @@ function auditAction(value: unknown): WorkbenchAuditAction {
     && value !== 'workbench.feishu-route.verification-recorded'
     && value !== 'workbench.feishu-task-list.bound'
     && value !== 'workbench.feishu-task.referenced'
-    && value !== 'workbench.feishu-task.update-requested') {
+    && value !== 'workbench.feishu-task.update-requested'
+    && value !== 'workbench.feishu-task-workflow.configured') {
     throw new TypeError('Audit action is unsupported')
   }
   return value
@@ -549,7 +552,8 @@ function auditObjectType(value: unknown): WorkbenchAuditObjectType {
     && value !== 'suggested-change'
     && value !== 'feishu-connection'
     && value !== 'feishu-task-list-binding'
-    && value !== 'feishu-task') {
+    && value !== 'feishu-task'
+    && value !== 'feishu-task-workflow') {
     throw new TypeError('Audit object type is unsupported')
   }
   return value
@@ -572,7 +576,8 @@ function auditCommandType(value: unknown): AuditCommandReference['type'] {
     && value !== 'workbench.feishu-route.verify'
     && value !== 'workbench.feishu-task-list.bind'
     && value !== 'workbench.feishu-task.reference'
-    && value !== 'workbench.feishu-task.update') {
+    && value !== 'workbench.feishu-task.update'
+    && value !== 'workbench.feishu-task-workflow.configure') {
     throw new TypeError('Audit command type is unsupported')
   }
   return value
@@ -597,7 +602,8 @@ function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
     && value !== 'feishu-route-verification-failed'
     && value !== 'feishu-task-list-bound'
     && value !== 'feishu-task-referenced'
-    && value !== 'feishu-task-update-requested') {
+    && value !== 'feishu-task-update-requested'
+    && value !== 'feishu-task-workflow-configured') {
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -744,6 +750,13 @@ function assertCorrelatedVocabulary(
           && summary.code === 'feishu-task-update-requested'
           && exactChangedFields(summary, ['remoteVersion', 'changes', 'effectState'])
           && scope.projectId !== null
+      case 'workbench.feishu-task-workflow.configured':
+        return reason.code === 'owner-feishu-task-workflow-configure'
+          && object.type === 'feishu-task-workflow'
+          && command.type === 'workbench.feishu-task-workflow.configure'
+          && summary.code === 'feishu-task-workflow-configured'
+          && exactChangedFields(summary, ['workflowDefinition', 'fieldMapping', 'compatibility'])
+          && scope.projectId === object.id
     }
   })()
   if (!correlated) {

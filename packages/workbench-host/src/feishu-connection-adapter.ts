@@ -10,6 +10,7 @@ import type {
   FeishuScopeObservation,
   FeishuTaskCommentProjection,
   FeishuTaskListCandidateProjection,
+  FeishuTaskWorkflowFieldCandidate,
   FeishuTaskMemberProjection,
   FeishuTaskListProbe,
 } from './client.ts'
@@ -21,6 +22,7 @@ import type {
   WorkbenchFeishuTaskPatch,
   WorkbenchFeishuTaskRoute,
   WorkbenchFeishuTaskSnapshot,
+  WorkbenchFeishuTaskWorkflowFieldWrite,
   WorkbenchFeishuWriteResult,
 } from './feishu-task-federation.ts'
 import type {
@@ -38,6 +40,7 @@ const TASK_LIST_COLLECTION_PATH = '/open-apis/task/v2/tasklists'
 const TASK_LIST_PATH = `${TASK_LIST_COLLECTION_PATH}/`
 const TASK_COLLECTION_PATH = '/open-apis/task/v2/tasks'
 const COMMENT_COLLECTION_PATH = '/open-apis/task/v2/comments'
+const CUSTOM_FIELD_COLLECTION_PATH = '/open-apis/task/v2/custom_fields'
 const SAFE_ROUTE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/u
 const MAX_APP_ID_LENGTH = 128
@@ -57,6 +60,9 @@ const MAX_MEMBER_NAME_LENGTH = 200
 const MAX_TASK_LISTS = 1_000
 const MAX_TASKS = 1_000
 const MAX_COMMENTS_PER_TASK = 500
+const MAX_CUSTOM_FIELDS = 100
+const MAX_CUSTOM_FIELD_OPTIONS = 100
+const MAX_CUSTOM_FIELD_NAME_LENGTH = 50
 const PROVIDER_PAGE_SIZE = 50
 const TASK_LIST_READ_SCOPE = 'task:tasklist:read'
 const TASK_LIST_WRITE_SCOPE = 'task:tasklist:write'
@@ -387,6 +393,145 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
     return result.state === 'ok' ? readOk(result.value.task) : result
   }
 
+  async listTaskWorkflowFields(
+    route: WorkbenchFeishuTaskRoute,
+    taskListGuid: string,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuReadResult<readonly FeishuTaskWorkflowFieldCandidate[]>> {
+    const checkedGuid = checkedResourceId(taskListGuid, 'Feishu task-list guid')
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const listed = await this.readPagedItems(
+      CUSTOM_FIELD_COLLECTION_PATH,
+      Object.freeze({
+        user_id_type: 'open_id',
+        resource_type: 'tasklist',
+        resource_id: checkedGuid,
+      }),
+      access,
+      MAX_CUSTOM_FIELDS,
+      signal,
+    )
+    if (listed.state === 'rejected') return listed
+    try {
+      const seen = new Set<string>()
+      const fields = listed.value.map((value) => {
+        const field = normalizedWorkflowField(value)
+        if (seen.has(field.fieldGuid)) throw new TypeError('duplicate custom-field guid')
+        seen.add(field.fieldGuid)
+        return field
+      })
+      return readOk(Object.freeze(fields))
+    } catch {
+      return readRejected(invalidProviderIssue())
+    }
+  }
+
+  async createTaskWorkflowField(
+    route: WorkbenchFeishuTaskRoute,
+    input: Readonly<{
+      readonly taskListGuid: string
+      readonly name: string
+      readonly options: readonly { readonly name: string; readonly colorIndex: number }[]
+    }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite>> {
+    const normalized = checkedWorkflowFieldCreate(input)
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const response = await this.fetchJson(
+      providerUrl(CUSTOM_FIELD_COLLECTION_PATH, { user_id_type: 'open_id' }),
+      jsonBearerRequest(access.token, 'POST', {
+        resource_type: 'tasklist',
+        resource_id: normalized.taskListGuid,
+        name: normalized.name,
+        type: 'single_select',
+        single_select_setting: { options: normalized.options },
+      }),
+      signal,
+    )
+    const failure = providerIssue(response, 'task-resource', access.kind)
+    if (failure !== null) {
+      return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
+    }
+    try {
+      return writeOk(workflowFieldWrite(nestedProviderEntity(response, 'custom_field')))
+    } catch {
+      return writeUnknown(invalidProviderIssue())
+    }
+  }
+
+  async updateTaskWorkflowField(
+    route: WorkbenchFeishuTaskRoute,
+    input: Readonly<{
+      readonly fieldGuid: string
+      readonly expectedRemoteVersion: string
+      readonly name: string
+      readonly options: readonly {
+        readonly optionGuid?: string
+        readonly name: string
+        readonly colorIndex: number
+      }[]
+    }>,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuWriteResult<WorkbenchFeishuTaskWorkflowFieldWrite> | {
+    readonly state: 'conflict'
+    readonly current: WorkbenchFeishuTaskWorkflowFieldWrite
+  }> {
+    const normalized = checkedWorkflowFieldUpdate(input)
+    const access = await this.resolveTaskAccess(route, signal)
+    if (access.state === 'rejected') return access
+    const currentResponse = await this.readProviderPayload(
+      providerUrl(`${CUSTOM_FIELD_COLLECTION_PATH}/${encodeURIComponent(normalized.fieldGuid)}`, {
+        user_id_type: 'open_id',
+      }),
+      access,
+      signal,
+    )
+    if (currentResponse.state === 'rejected') return currentResponse
+    let current: WorkbenchFeishuTaskWorkflowFieldWrite
+    try {
+      current = workflowFieldWrite(nestedProviderEntity(currentResponse.value, 'custom_field'))
+    } catch {
+      return writeRejected(invalidProviderIssue())
+    }
+    if (current.fieldGuid !== normalized.fieldGuid) return writeRejected(invalidProviderIssue())
+    if (current.remoteVersion !== normalized.expectedRemoteVersion) {
+      return Object.freeze({ state: 'conflict', current })
+    }
+    const response = await this.fetchJson(
+      providerUrl(`${CUSTOM_FIELD_COLLECTION_PATH}/${encodeURIComponent(normalized.fieldGuid)}`, {
+        user_id_type: 'open_id',
+      }),
+      jsonBearerRequest(access.token, 'PATCH', {
+        custom_field: {
+          name: normalized.name,
+          single_select_setting: {
+            options: normalized.options.map(option => ({
+              ...(option.optionGuid === undefined ? {} : { guid: option.optionGuid }),
+              name: option.name,
+              color_index: option.colorIndex,
+            })),
+          },
+        },
+        update_fields: ['name', 'single_select_setting'],
+      }),
+      signal,
+    )
+    const failure = providerIssue(response, 'task-resource', access.kind)
+    if (failure !== null) {
+      return writeOutcomeMayBeUnknown(response) ? writeUnknown(failure) : writeRejected(failure)
+    }
+    try {
+      const updated = workflowFieldWrite(nestedProviderEntity(response, 'custom_field'))
+      return updated.fieldGuid === normalized.fieldGuid
+        ? writeOk(updated)
+        : writeUnknown(invalidProviderIssue())
+    } catch {
+      return writeUnknown(invalidProviderIssue())
+    }
+  }
+
   async updateTask(
     route: WorkbenchFeishuTaskRoute,
     input: Readonly<{
@@ -409,7 +554,7 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
       return Object.freeze({ state: 'conflict', current: preflight.value.task })
     }
 
-    const task: Record<string, string> = {}
+    const task: Record<string, unknown> = {}
     const updateFields: string[] = []
     if (normalized.changes.summary !== undefined
       && normalized.changes.summary !== preflight.value.task.summary) {
@@ -427,6 +572,18 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
         ? String(checkedNow(this.now()).getTime())
         : '0'
       updateFields.push('completed_at')
+    }
+    if (normalized.changes.workflow !== undefined) {
+      const currentOption = preflight.value.task.customFieldValues
+        ?.find(value => value.fieldGuid === normalized.changes.workflow?.fieldGuid)
+        ?.singleSelectOptionGuid ?? null
+      if (currentOption !== normalized.changes.workflow.optionGuid) {
+        task.custom_fields = [{
+          guid: normalized.changes.workflow.fieldGuid,
+          single_select_value: normalized.changes.workflow.optionGuid,
+        }]
+        updateFields.push('custom_fields')
+      }
     }
     if (updateFields.length === 0) return writeOk(preflight.value.task)
 
@@ -957,6 +1114,54 @@ function taskListCandidate(value: unknown): FeishuTaskListCandidateProjection {
   })
 }
 
+function normalizedWorkflowField(value: unknown): FeishuTaskWorkflowFieldCandidate {
+  const field = recordRequired(value)
+  const type = providerRequiredText(field.type, 64, 'custom-field type')
+  const settings = type === 'single_select'
+    ? recordRequired(field.single_select_setting)
+    : null
+  const rawOptions = settings?.options ?? []
+  if (!Array.isArray(rawOptions) || rawOptions.length > MAX_CUSTOM_FIELD_OPTIONS) {
+    throw new TypeError('provider custom-field options are invalid')
+  }
+  const optionGuids = new Set<string>()
+  const options = rawOptions.map((value) => {
+    const option = recordRequired(value)
+    const optionGuid = providerResourceId(option.guid, 'custom-field option guid')
+    if (optionGuids.has(optionGuid)) throw new TypeError('duplicate custom-field option guid')
+    optionGuids.add(optionGuid)
+    if (!Number.isInteger(option.color_index)
+      || (option.color_index as number) < 0
+      || (option.color_index as number) > 54
+      || typeof option.is_hidden !== 'boolean') {
+      throw new TypeError('provider custom-field option metadata is invalid')
+    }
+    return Object.freeze({
+      optionGuid,
+      name: providerRequiredText(
+        option.name,
+        MAX_CUSTOM_FIELD_NAME_LENGTH,
+        'custom-field option name',
+      ),
+      colorIndex: option.color_index as number,
+      hidden: option.is_hidden,
+    })
+  })
+  return Object.freeze({
+    fieldGuid: providerResourceId(field.guid, 'custom-field guid'),
+    name: providerRequiredText(field.name, MAX_CUSTOM_FIELD_NAME_LENGTH, 'custom-field name'),
+    type,
+    remoteVersion: providerRemoteVersion(field.updated_at, 'custom-field remote version'),
+    options: Object.freeze(options),
+  })
+}
+
+function workflowFieldWrite(value: unknown): WorkbenchFeishuTaskWorkflowFieldWrite {
+  const field = normalizedWorkflowField(value)
+  if (field.type !== 'single_select') throw new TypeError('workflow field is not single-select')
+  return Object.freeze({ ...field, type: 'single_select' as const })
+}
+
 function normalizedTaskComments(
   values: readonly unknown[],
 ): readonly FeishuTaskCommentProjection[] {
@@ -1012,7 +1217,29 @@ function normalizedTask(
     completedAt,
     canonicalUrl: providerCanonicalUrl(task.url, 'task url'),
     remoteVersion: providerRemoteVersion(task.updated_at, 'task remote version'),
+    customFieldValues: normalizedTaskCustomFieldValues(task.custom_fields),
   })
+}
+
+function normalizedTaskCustomFieldValues(
+  value: unknown,
+): readonly import('./feishu-task-workflow.ts').WorkbenchFeishuTaskCustomFieldValue[] {
+  if (value === undefined || value === null) return Object.freeze([])
+  if (!Array.isArray(value) || value.length > MAX_CUSTOM_FIELDS) {
+    throw new TypeError('provider task custom-field values are invalid')
+  }
+  const guids = new Set<string>()
+  return Object.freeze(value.map((candidate) => {
+    const field = recordRequired(candidate)
+    const fieldGuid = providerResourceId(field.guid, 'task custom-field guid')
+    if (guids.has(fieldGuid)) throw new TypeError('duplicate task custom-field value')
+    guids.add(fieldGuid)
+    const type = providerRequiredText(field.type, 64, 'task custom-field type')
+    const option = type === 'single_select'
+      ? providerNullableResourceId(field.single_select_value, 'task custom-field option guid')
+      : null
+    return Object.freeze({ fieldGuid, type, singleSelectOptionGuid: option })
+  }))
 }
 
 function providerTaskMembers(value: unknown): Readonly<{
@@ -1080,6 +1307,91 @@ function checkedTaskListCreation(
   })
 }
 
+function checkedWorkflowFieldCreate(input: Readonly<{
+  readonly taskListGuid: string
+  readonly name: string
+  readonly options: readonly { readonly name: string; readonly colorIndex: number }[]
+}>): Readonly<{
+  readonly taskListGuid: string
+  readonly name: string
+  readonly options: readonly { readonly name: string; readonly color_index: number }[]
+}> {
+  if (record(input) === null) throw new TypeError('Feishu workflow field input is invalid')
+  return Object.freeze({
+    taskListGuid: checkedResourceId(input.taskListGuid, 'Feishu task-list guid'),
+    name: checkedRequiredText(input.name, MAX_CUSTOM_FIELD_NAME_LENGTH, 'Feishu field name'),
+    options: checkedWorkflowOptions(input.options).map(option => Object.freeze({
+      name: option.name,
+      color_index: option.colorIndex,
+    })),
+  })
+}
+
+function checkedWorkflowFieldUpdate(input: Readonly<{
+  readonly fieldGuid: string
+  readonly expectedRemoteVersion: string
+  readonly name: string
+  readonly options: readonly {
+    readonly optionGuid?: string
+    readonly name: string
+    readonly colorIndex: number
+  }[]
+}>): Readonly<{
+  readonly fieldGuid: string
+  readonly expectedRemoteVersion: string
+  readonly name: string
+  readonly options: readonly {
+    readonly optionGuid?: string
+    readonly name: string
+    readonly colorIndex: number
+  }[]
+}> {
+  if (record(input) === null) throw new TypeError('Feishu workflow field update is invalid')
+  const options = checkedWorkflowOptions(input.options).map((option, index) => {
+    const original = input.options[index]
+    if (original === undefined) throw new TypeError('Feishu workflow option disappeared')
+    return Object.freeze({
+      ...(original.optionGuid === undefined
+        ? {}
+        : { optionGuid: checkedResourceId(original.optionGuid, 'Feishu option guid') }),
+      ...option,
+    })
+  })
+  return Object.freeze({
+    fieldGuid: checkedResourceId(input.fieldGuid, 'Feishu field guid'),
+    expectedRemoteVersion: checkedRequiredText(
+      input.expectedRemoteVersion,
+      64,
+      'Feishu field remote version',
+    ),
+    name: checkedRequiredText(input.name, MAX_CUSTOM_FIELD_NAME_LENGTH, 'Feishu field name'),
+    options: Object.freeze(options),
+  })
+}
+
+function checkedWorkflowOptions(
+  options: readonly { readonly name: string; readonly colorIndex: number }[],
+): readonly { readonly name: string; readonly colorIndex: number }[] {
+  if (!Array.isArray(options) || options.length < 2 || options.length > MAX_CUSTOM_FIELD_OPTIONS) {
+    throw new TypeError('Feishu workflow options are invalid')
+  }
+  const names = new Set<string>()
+  return Object.freeze(options.map((option) => {
+    if (record(option) === null || !Number.isInteger(option.colorIndex)
+      || option.colorIndex < 0 || option.colorIndex > 54) {
+      throw new TypeError('Feishu workflow option is invalid')
+    }
+    const name = checkedRequiredText(
+      option.name,
+      MAX_CUSTOM_FIELD_NAME_LENGTH,
+      'Feishu option name',
+    )
+    if (names.has(name)) throw new TypeError('Feishu workflow option names must be unique')
+    names.add(name)
+    return Object.freeze({ name, colorIndex: option.colorIndex })
+  }))
+}
+
 function checkedTaskUpdate(input: Readonly<{
   readonly taskGuid: string
   readonly expectedRemoteVersion: string
@@ -1096,13 +1408,14 @@ function checkedTaskUpdate(input: Readonly<{
   if (changes === null) throw new TypeError('Feishu task changes are invalid')
   const keys = Object.keys(changes)
   if (keys.length < 1 || keys.some(key =>
-    key !== 'summary' && key !== 'description' && key !== 'completed')) {
+    key !== 'summary' && key !== 'description' && key !== 'completed' && key !== 'workflow')) {
     throw new TypeError('Feishu task changes are invalid')
   }
   const normalized: {
     summary?: string
     description?: string
     completed?: boolean
+    workflow?: { fieldGuid: string; optionGuid: string }
   } = {}
   if (changes.summary !== undefined) {
     normalized.summary = checkedRequiredText(
@@ -1121,6 +1434,17 @@ function checkedTaskUpdate(input: Readonly<{
   if (changes.completed !== undefined) {
     if (typeof changes.completed !== 'boolean') throw new TypeError('Feishu completion is invalid')
     normalized.completed = changes.completed
+  }
+  if (changes.workflow !== undefined) {
+    const workflow = record(changes.workflow)
+    if (workflow === null || Object.keys(workflow).some(key =>
+      key !== 'fieldGuid' && key !== 'optionGuid')) {
+      throw new TypeError('Feishu workflow task change is invalid')
+    }
+    normalized.workflow = Object.freeze({
+      fieldGuid: checkedResourceId(workflow.fieldGuid, 'Feishu workflow field guid'),
+      optionGuid: checkedResourceId(workflow.optionGuid, 'Feishu workflow option guid'),
+    })
   }
   return Object.freeze({
     taskGuid: checkedResourceId(input.taskGuid, 'Feishu task guid'),

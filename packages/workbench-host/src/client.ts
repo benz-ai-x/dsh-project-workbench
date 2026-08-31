@@ -1276,6 +1276,87 @@ export interface FeishuTaskMutationEffectProjection {
   readonly updatedAt: string
 }
 
+/** One logical template state. Stable IDs survive display-name and color changes. */
+export interface ProjectTaskWorkflowStateDefinition {
+  readonly stateId: string
+  readonly name: string
+  readonly colorIndex: number
+  readonly allowedNextStateIds: readonly string[]
+}
+
+/** Owner-defined workflow schema mapped to one Feishu single-select custom field. */
+export interface ProjectTaskWorkflowDefinition {
+  readonly fieldName: string
+  readonly initialStateId: string
+  readonly terminalStateIds: readonly string[]
+  readonly states: readonly ProjectTaskWorkflowStateDefinition[]
+}
+
+/** Stable Feishu option identity retained for one logical template state. */
+export interface ProjectTaskWorkflowOptionProjection {
+  readonly stateId: string
+  readonly optionGuid: string
+  readonly name: string
+  readonly colorIndex: number
+  readonly hidden: boolean
+  readonly usedTaskCount: number
+}
+
+export interface ProjectTaskWorkflowCompatibilityIssue {
+  readonly code:
+    | 'field-missing'
+    | 'field-type-mismatch'
+    | 'field-version-changed'
+    | 'option-missing'
+    | 'option-hidden'
+    | 'option-name-changed'
+    | 'used-state-removal'
+    | 'duplicate-visible-option-name'
+    | 'task-state-unmapped'
+  readonly severity: 'attention' | 'blocked'
+  readonly stateId: string | null
+  readonly taskGuid: string | null
+  readonly message: string
+}
+
+/** Feishu-authoritative workflow value for one projected task. */
+export interface ProjectTaskWorkflowValueProjection {
+  readonly taskGuid: string
+  readonly stateId: string | null
+  readonly optionGuid: string | null
+  readonly stateName: string | null
+  readonly recognized: boolean
+}
+
+/** Terminal workflow state is a suggestion only; completion still needs an Owner command. */
+export interface FeishuTaskCompletionSuggestionProjection {
+  readonly taskGuid: string
+  readonly stateId: string
+  readonly stateName: string
+  readonly reason: 'terminal-state-awaiting-owner-confirmation'
+}
+
+/** Complete template-to-Feishu workflow mapping for one Project. */
+export interface ProjectTaskWorkflowProjection {
+  readonly revision: number
+  readonly definition: ProjectTaskWorkflowDefinition
+  readonly field: {
+    readonly fieldGuid: string
+    readonly name: string
+    readonly type: 'single_select'
+    readonly remoteVersion: string
+  }
+  readonly options: readonly ProjectTaskWorkflowOptionProjection[]
+  readonly values: readonly ProjectTaskWorkflowValueProjection[]
+  readonly compatibility: {
+    readonly state: 'compatible' | 'attention' | 'blocked'
+    readonly issues: readonly ProjectTaskWorkflowCompatibilityIssue[]
+  }
+  readonly completionSuggestions: readonly FeishuTaskCompletionSuggestionProjection[]
+  readonly configuredAt: string
+  readonly updatedAt: string
+}
+
 /** Complete Host-owned task workspace projection for one visible Project. */
 export interface ProjectTasksProjection {
   readonly projectId: string
@@ -1284,6 +1365,7 @@ export interface ProjectTasksProjection {
   readonly tasks: readonly ProjectTaskProjection[]
   readonly sync: ProjectTaskSyncProjection
   readonly effects: readonly FeishuTaskMutationEffectProjection[]
+  readonly workflow: ProjectTaskWorkflowProjection | null
 }
 
 export interface ProjectTasksQuery {
@@ -1477,10 +1559,13 @@ export interface UpdateFeishuTaskRequest {
   readonly taskGuid: string
   readonly expectedRevision: number
   readonly expectedRemoteVersion: string
+  /** Required exactly when `changes.workflowStateId` is present. */
+  readonly expectedWorkflowRevision?: number
   readonly changes: {
     readonly summary?: string
     readonly description?: string
     readonly completed?: boolean
+    readonly workflowStateId?: string
   }
   readonly idempotencyKey: string
   readonly causationId: string
@@ -1526,10 +1611,115 @@ export type UpdateFeishuTaskResult =
   | {
     readonly ok: false
     readonly error: {
+      readonly code:
+        | 'workflow-unconfigured'
+        | 'workflow-revision-conflict'
+        | 'workflow-transition-forbidden'
+        | 'workflow-state-unmapped'
+        | 'workflow-value-unrecognized'
+      readonly message: string
+      readonly expectedWorkflowRevision?: number
+      readonly currentWorkflowRevision?: number
+      readonly currentStateId?: string | null
+      readonly requestedStateId?: string
+    }
+  }
+  | {
+    readonly ok: false
+    readonly error: {
       readonly code: 'remote-outcome-unknown' | 'remote-rejected'
       readonly message: string
       readonly effect: FeishuTaskMutationEffectProjection
       readonly issue: FeishuConnectionIssue
+    }
+  }
+
+/** One safe custom-field option returned by explicit workflow-field discovery. */
+export interface FeishuTaskWorkflowFieldOptionCandidate {
+  readonly optionGuid: string
+  readonly name: string
+  readonly colorIndex: number
+  readonly hidden: boolean
+}
+
+/** One task-list custom field; non-single-select fields are visible but cannot be mapped. */
+export interface FeishuTaskWorkflowFieldCandidate {
+  readonly fieldGuid: string
+  readonly name: string
+  readonly type: string
+  readonly remoteVersion: string
+  readonly options: readonly FeishuTaskWorkflowFieldOptionCandidate[]
+}
+
+export interface DiscoverFeishuTaskWorkflowFieldsRequest {
+  readonly projectId: string
+  readonly expectedTaskRevision: number
+}
+
+export interface FeishuTaskWorkflowFieldDiscoveryProjection {
+  readonly projectId: string
+  readonly taskListGuid: string
+  readonly taskRevision: number
+  readonly items: readonly FeishuTaskWorkflowFieldCandidate[]
+}
+
+export type ConfigureFeishuTaskWorkflowMapping =
+  | { readonly mode: 'create' }
+  | {
+    readonly mode: 'existing'
+    readonly fieldGuid: string
+    readonly options: readonly {
+      readonly stateId: string
+      readonly optionGuid: string
+    }[]
+  }
+  | { readonly mode: 'migrate' }
+
+export interface PreviewFeishuTaskWorkflowRequest {
+  readonly projectId: string
+  readonly expectedTaskRevision: number
+  readonly expectedWorkflowRevision: number | null
+  readonly definition: ProjectTaskWorkflowDefinition
+  readonly mapping: ConfigureFeishuTaskWorkflowMapping
+}
+
+export interface FeishuTaskWorkflowCompatibilityPreview {
+  readonly projectId: string
+  readonly taskRevision: number
+  readonly workflowRevision: number | null
+  readonly definition: ProjectTaskWorkflowDefinition
+  readonly mapping: ConfigureFeishuTaskWorkflowMapping
+  readonly compatibility: ProjectTaskWorkflowProjection['compatibility']
+  readonly usedStateIds: readonly string[]
+}
+
+export interface ConfigureFeishuTaskWorkflowRequest extends PreviewFeishuTaskWorkflowRequest {
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-task-workflow-configure'
+}
+
+export type ConfigureFeishuTaskWorkflowResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectTasksProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | {
+    readonly ok: false
+    readonly error: {
+      readonly code:
+        | 'task-list-unbound'
+        | 'task-projection-revision-conflict'
+        | 'workflow-revision-conflict'
+        | 'workflow-compatibility-blocked'
+        | 'remote-outcome-unknown'
+        | 'remote-rejected'
+      readonly message: string
+      readonly compatibility?: ProjectTaskWorkflowProjection['compatibility']
+      readonly issue?: FeishuConnectionIssue
     }
   }
 
@@ -1579,6 +1769,7 @@ export type WorkbenchFeishuTaskReason =
   | 'owner-feishu-task-list-bind'
   | 'owner-feishu-task-reference'
   | 'owner-feishu-task-update'
+  | 'owner-feishu-task-workflow-configure'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
@@ -1604,6 +1795,7 @@ export type WorkbenchAuditAction =
   | 'workbench.feishu-task-list.bound'
   | 'workbench.feishu-task.referenced'
   | 'workbench.feishu-task.update-requested'
+  | 'workbench.feishu-task-workflow.configured'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
@@ -1613,6 +1805,7 @@ export type WorkbenchAuditObjectType =
   | 'feishu-connection'
   | 'feishu-task-list-binding'
   | 'feishu-task'
+  | 'feishu-task-workflow'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
@@ -1633,6 +1826,7 @@ export type WorkbenchActivitySummaryCode =
   | 'feishu-task-list-bound'
   | 'feishu-task-referenced'
   | 'feishu-task-update-requested'
+  | 'feishu-task-workflow-configured'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

@@ -1,6 +1,7 @@
 import type {
   AddProjectMemberResult,
   ConfigureFeishuIdentityRouteResult,
+  ConfigureFeishuTaskWorkflowResult,
   CreateProjectResult,
   DecideSuggestedChangeResult,
   BindFeishuTaskListResult,
@@ -21,6 +22,8 @@ import type {
   ProjectStartFilter,
   ProjectStartProjection,
   ProjectTaskProjection,
+  ProjectTaskWorkflowDefinition,
+  ProjectTaskWorkflowProjection,
   ProjectTaskListBindingProjection,
   ProjectTasksProjection,
   ProjectTeamProjection,
@@ -52,6 +55,7 @@ import type {
   WorkbenchFeishuTaskRoute,
   WorkbenchFeishuTaskSnapshot,
 } from './feishu-task-federation.ts'
+import type { WorkbenchFeishuTaskWorkflowValueObservation } from './feishu-task-workflow.ts'
 
 /** Authenticated actor copied from the Host-only authorization scope. */
 export interface WorkbenchCommandActor {
@@ -360,6 +364,55 @@ export interface WorkbenchFeishuTaskReconciliationTarget {
   readonly route: WorkbenchFeishuTaskRoute
 }
 
+/** Host-only workflow context; raw custom values never cross the Remote boundary. */
+export interface WorkbenchFeishuTaskWorkflowContext {
+  readonly project: ProjectTasksProjection
+  readonly target: WorkbenchFeishuTaskReconciliationTarget
+  readonly taskValues: readonly WorkbenchFeishuTaskWorkflowValueObservation[]
+}
+
+export interface WorkbenchFeishuTaskWorkflowMappedField {
+  readonly fieldGuid: string
+  readonly name: string
+  readonly remoteVersion: string
+  readonly options: readonly {
+    readonly stateId: string
+    readonly optionGuid: string
+    readonly name: string
+    readonly colorIndex: number
+    readonly hidden: boolean
+  }[]
+}
+
+/** Exact authoritative field observation committed after create/map/migrate. */
+export interface WorkbenchFeishuTaskWorkflowConfigurationMutation {
+  readonly projectId: string
+  readonly expectedTaskRevision: number
+  readonly expectedWorkflowRevision: number | null
+  readonly definition: ProjectTaskWorkflowDefinition
+  readonly mapping: import('./client.ts').ConfigureFeishuTaskWorkflowMapping
+  readonly field: WorkbenchFeishuTaskWorkflowMappedField
+  readonly compatibility: ProjectTaskWorkflowProjection['compatibility']
+  readonly configuredAt: string
+  readonly command: WorkbenchCommandMetadata & {
+    readonly reason: 'owner-feishu-task-workflow-configure'
+  }
+}
+
+export interface WorkbenchFeishuTaskWorkflowReplayQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly expectedTaskRevision: number
+  readonly expectedWorkflowRevision: number | null
+  readonly definition: ProjectTaskWorkflowDefinition
+  readonly mapping: import('./client.ts').ConfigureFeishuTaskWorkflowMapping
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-feishu-task-workflow-configure'
+}
+
 /** Add one task outside the primary list through an explicit, audited Project reference. */
 export interface WorkbenchFeishuTaskReferenceMutation {
   readonly projectId: string
@@ -385,7 +438,8 @@ export interface WorkbenchFeishuTaskUpdateReservationMutation {
   readonly taskGuid: string
   readonly expectedRevision: number
   readonly expectedRemoteVersion: string
-  readonly changes: WorkbenchFeishuTaskPatch
+  readonly expectedWorkflowRevision?: number
+  readonly changes: import('./client.ts').UpdateFeishuTaskRequest['changes']
   readonly preparedAt: string
   readonly command: WorkbenchCommandMetadata & {
     readonly reason: 'owner-feishu-task-update'
@@ -396,6 +450,8 @@ export type WorkbenchFeishuTaskUpdateReservation =
   | {
     readonly state: 'deliver'
     readonly route: WorkbenchFeishuTaskRoute
+    /** Exact provider patch frozen at reservation time for one-attempt delivery/recovery. */
+    readonly patch: WorkbenchFeishuTaskPatch
     readonly effect: FeishuTaskMutationEffectProjection
     readonly receipt: import('./client.ts').WorkbenchCommandReceipt
   }
@@ -573,6 +629,21 @@ export interface WorkbenchRepository {
     query: WorkbenchProjectTasksReadQuery,
     signal: AbortSignal,
   ): Promise<WorkbenchFeishuTaskReconciliationTarget | null>
+  /** Read exact route, current mapping, and detached provider values for workflow planning. */
+  readFeishuTaskWorkflowContext(
+    query: WorkbenchProjectTasksReadQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskWorkflowContext | null>
+  /** Receipt-first replay check before any workflow field create or PATCH. */
+  replayFeishuTaskWorkflowConfiguration(
+    query: WorkbenchFeishuTaskWorkflowReplayQuery,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult | null>
+  /** Atomically install a stable field/option mapping and its immutable version. */
+  commitFeishuTaskWorkflowConfiguration(
+    mutation: WorkbenchFeishuTaskWorkflowConfigurationMutation,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult>
   /** Resolve a prior binding result before any remote create/read side effect. */
   replayFeishuTaskListBinding(
     query: WorkbenchFeishuTaskListBindingReplayQuery,
@@ -647,6 +718,7 @@ export function projectTasksProjection(value: ProjectTasksProjection): ProjectTa
     })
   const tasks = Object.freeze(value.tasks.map(projectTaskProjection))
   const effects = Object.freeze(value.effects.map(effect => Object.freeze({ ...effect })))
+  const workflow = value.workflow === null ? null : projectTaskWorkflowProjection(value.workflow)
   return Object.freeze({
     projectId: value.projectId,
     revision: value.revision,
@@ -665,6 +737,39 @@ export function projectTasksProjection(value: ProjectTasksProjection): ProjectTa
         }),
     }),
     effects,
+    workflow,
+  })
+}
+
+/** Detach all nested workflow collections before crossing a process boundary. */
+export function projectTaskWorkflowProjection(
+  value: ProjectTaskWorkflowProjection,
+): ProjectTaskWorkflowProjection {
+  return Object.freeze({
+    revision: value.revision,
+    definition: Object.freeze({
+      fieldName: value.definition.fieldName,
+      initialStateId: value.definition.initialStateId,
+      terminalStateIds: Object.freeze([...value.definition.terminalStateIds]),
+      states: Object.freeze(value.definition.states.map(state => Object.freeze({
+        stateId: state.stateId,
+        name: state.name,
+        colorIndex: state.colorIndex,
+        allowedNextStateIds: Object.freeze([...state.allowedNextStateIds]),
+      }))),
+    }),
+    field: Object.freeze({ ...value.field }),
+    options: Object.freeze(value.options.map(option => Object.freeze({ ...option }))),
+    values: Object.freeze(value.values.map(item => Object.freeze({ ...item }))),
+    compatibility: Object.freeze({
+      state: value.compatibility.state,
+      issues: Object.freeze(value.compatibility.issues.map(issue => Object.freeze({ ...issue }))),
+    }),
+    completionSuggestions: Object.freeze(value.completionSuggestions.map(
+      suggestion => Object.freeze({ ...suggestion }),
+    )),
+    configuredAt: value.configuredAt,
+    updatedAt: value.updatedAt,
   })
 }
 

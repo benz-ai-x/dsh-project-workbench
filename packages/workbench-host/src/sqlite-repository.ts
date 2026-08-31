@@ -8,6 +8,7 @@ import type {
   AddProjectMemberResult,
   BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteResult,
+  ConfigureFeishuTaskWorkflowResult,
   CreateProjectResult,
   DecideSuggestedChangeResult,
   FEISHU_CONNECTION_ID,
@@ -19,6 +20,10 @@ import type {
   FeishuTaskMutationEffectProjection,
   ProjectTaskListBindingProjection,
   ProjectTaskProjection,
+  ProjectTaskWorkflowCompatibilityIssue,
+  ProjectTaskWorkflowDefinition,
+  ProjectTaskWorkflowOptionProjection,
+  ProjectTaskWorkflowProjection,
   ProjectTasksProjection,
   FeishuResourceProbeProjection,
   FeishuScopeObservation,
@@ -102,6 +107,9 @@ import {
   type WorkbenchFeishuTaskReconciliationFailureMutation,
   type WorkbenchFeishuTaskReconciliationMutation,
   type WorkbenchFeishuTaskReconciliationTarget,
+  type WorkbenchFeishuTaskWorkflowConfigurationMutation,
+  type WorkbenchFeishuTaskWorkflowContext,
+  type WorkbenchFeishuTaskWorkflowReplayQuery,
   type WorkbenchFeishuTaskReferenceMutation,
   type WorkbenchFeishuTaskUpdateReservation,
   type WorkbenchFeishuTaskUpdateReservationMutation,
@@ -130,8 +138,13 @@ import type {
   WorkbenchFeishuTaskListSnapshot,
   WorkbenchFeishuTaskSnapshot,
 } from './feishu-task-federation.ts'
+import type { WorkbenchFeishuTaskCustomFieldValue } from './feishu-task-workflow.ts'
+import {
+  projectTaskWorkflowDefinition,
+  workflowTransitionAllowed,
+} from './feishu-task-workflow.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 7
+export const WORKBENCH_SCHEMA_VERSION = 8
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -215,20 +228,26 @@ const FEISHU_VERIFY_OUTBOX_TOPIC = 'workbench.feishu-route.verified.v1'
 const FEISHU_TASK_LIST_BIND_COMMAND_TYPE = 'workbench.feishu-task-list.bind'
 const FEISHU_TASK_REFERENCE_COMMAND_TYPE = 'workbench.feishu-task.reference'
 const FEISHU_TASK_UPDATE_COMMAND_TYPE = 'workbench.feishu-task.update'
+const FEISHU_TASK_WORKFLOW_COMMAND_TYPE = 'workbench.feishu-task-workflow.configure'
 const FEISHU_TASK_LIST_BIND_AUDIT_ACTION = 'workbench.feishu-task-list.bound'
 const FEISHU_TASK_REFERENCE_AUDIT_ACTION = 'workbench.feishu-task.referenced'
 const FEISHU_TASK_UPDATE_AUDIT_ACTION = 'workbench.feishu-task.update-requested'
+const FEISHU_TASK_WORKFLOW_AUDIT_ACTION = 'workbench.feishu-task-workflow.configured'
 const FEISHU_TASK_LIST_BIND_REASON = 'owner-feishu-task-list-bind'
 const FEISHU_TASK_REFERENCE_REASON = 'owner-feishu-task-reference'
 const FEISHU_TASK_UPDATE_REASON = 'owner-feishu-task-update'
+const FEISHU_TASK_WORKFLOW_REASON = 'owner-feishu-task-workflow-configure'
 const FEISHU_TASK_LIST_BIND_SUMMARY = 'feishu-task-list-bound'
 const FEISHU_TASK_REFERENCE_SUMMARY = 'feishu-task-referenced'
 const FEISHU_TASK_UPDATE_SUMMARY = 'feishu-task-update-requested'
+const FEISHU_TASK_WORKFLOW_SUMMARY = 'feishu-task-workflow-configured'
 const FEISHU_TASK_LIST_BIND_OBJECT_TYPE = 'feishu-task-list-binding'
 const FEISHU_TASK_OBJECT_TYPE = 'feishu-task'
+const FEISHU_TASK_WORKFLOW_OBJECT_TYPE = 'feishu-task-workflow'
 const FEISHU_TASK_LIST_BIND_OUTBOX_TOPIC = 'workbench.feishu-task-list.bound.v1'
 const FEISHU_TASK_REFERENCE_OUTBOX_TOPIC = 'workbench.feishu-task.referenced.v1'
 const FEISHU_TASK_UPDATE_OUTBOX_TOPIC = 'workbench.feishu-task.update.v1'
+const FEISHU_TASK_WORKFLOW_OUTBOX_TOPIC = 'workbench.feishu-task-workflow.configured.v1'
 const MAX_REVIEW_CENTER_LIMIT = 50
 const MAX_SUGGESTED_CHANGE_EVIDENCE = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
@@ -500,6 +519,32 @@ interface FeishuTaskEffectRow {
   readonly updated_at: string
 }
 
+interface FeishuTaskWorkflowRow {
+  readonly project_id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly revision: number
+  readonly field_guid: string
+  readonly field_name: string
+  readonly field_type: string
+  readonly field_remote_version: string
+  readonly definition_json: string
+  readonly options_json: string
+  readonly compatibility_state: string
+  readonly compatibility_issues_json: string
+  readonly configured_at: string
+  readonly updated_at: string
+}
+
+interface FeishuTaskCustomValueRow {
+  readonly project_id: string
+  readonly task_guid: string
+  readonly field_guid: string
+  readonly field_type: string
+  readonly single_select_option_guid: string | null
+  readonly observed_at: string
+}
+
 interface TemplateVersionRow {
   readonly template_id: string
   readonly template_version: number
@@ -729,6 +774,10 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_feishu_task_reconciliation_no_delete',
   'workbench_feishu_task_effect_intent_no_update',
   'workbench_feishu_task_effect_no_delete',
+  'workbench_feishu_task_workflow_scope_no_update',
+  'workbench_feishu_task_workflow_no_delete',
+  'workbench_feishu_task_workflow_version_no_update',
+  'workbench_feishu_task_workflow_version_no_delete',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -2438,6 +2487,278 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     return target
   }
 
+  async readFeishuTaskWorkflowContext(
+    query: WorkbenchProjectTasksReadQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchFeishuTaskWorkflowContext | null> {
+    throwIfAborted(signal)
+    validateProjectTasksReadQuery(query)
+    const database = this.requireDatabase()
+    const project = readProjectTasksProjection(database, query)
+    if (project === null || project.binding === null) return null
+    const binding = readTaskBindingRow(database, query.projectId)
+    if (binding === null) throw new Error('Workbench workflow context lost its task binding')
+    const target = Object.freeze({
+      projectId: binding.project_id,
+      revision: binding.revision,
+      taskListGuid: binding.tasklist_guid,
+      route: taskRouteFromBinding(database, binding.project_id),
+    })
+    const rows = database.prepare(`
+      SELECT value.project_id, value.task_guid, value.field_guid, value.field_type,
+        value.single_select_option_guid, value.observed_at
+      FROM workbench_feishu_task_custom_value AS value
+      INNER JOIN workbench_feishu_task_projection AS task
+        ON task.project_id = value.project_id AND task.task_guid = value.task_guid
+      WHERE value.project_id = ? AND task.visible = 1
+      ORDER BY value.task_guid, value.field_guid
+      LIMIT ${MAX_FEISHU_TASKS_PER_PROJECT * MAX_CUSTOM_FIELDS_PER_TASK + 1}
+    `).all(query.projectId) as unknown as FeishuTaskCustomValueRow[]
+    if (rows.length > MAX_FEISHU_TASKS_PER_PROJECT * MAX_CUSTOM_FIELDS_PER_TASK) {
+      throw new Error('Workbench workflow custom values exceed their bounded limit')
+    }
+    const byTask = new Map<string, WorkbenchFeishuTaskCustomFieldValue[]>()
+    for (const row of rows) {
+      const values = byTask.get(row.task_guid) ?? []
+      values.push(Object.freeze({
+        fieldGuid: row.field_guid,
+        type: row.field_type,
+        singleSelectOptionGuid: row.single_select_option_guid,
+      }))
+      byTask.set(row.task_guid, values)
+    }
+    const taskValues = Object.freeze(project.tasks.map(task => Object.freeze({
+      taskGuid: task.taskGuid,
+      values: Object.freeze(byTask.get(task.taskGuid) ?? []),
+    })))
+    throwIfAborted(signal)
+    return Object.freeze({ project, target, taskValues })
+  }
+
+  async replayFeishuTaskWorkflowConfiguration(
+    query: WorkbenchFeishuTaskWorkflowReplayQuery,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult | null> {
+    throwIfAborted(signal)
+    validateTaskWorkflowReplayQuery(query)
+    const database = this.requireDatabase()
+    const command: WorkbenchCommandMetadata = {
+      commandId: 'replay-placeholder-command',
+      auditEventId: 'replay-placeholder-audit',
+      outboxId: 'replay-placeholder-outbox',
+      idempotencyKey: query.idempotencyKey,
+      causationId: query.causationId,
+      reason: query.reason,
+      actor: {
+        kind: 'owner',
+        id: query.actorId,
+        organizationId: query.organizationId,
+        teamId: query.teamId,
+      },
+      occurredAt: '1970-01-01T00:00:00.000Z',
+    }
+    const receipt = findFeishuReceipt(database, command, idempotencyKeyHash(query.idempotencyKey))
+    if (receipt === undefined) return null
+    if (receipt.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
+      || receipt.request_hash !== taskWorkflowRequestHash(query)) {
+      return taskIdempotencyConflict()
+    }
+    assertValidLedger(database)
+    throwIfAborted(signal)
+    return decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
+  }
+
+  async commitFeishuTaskWorkflowConfiguration(
+    mutation: WorkbenchFeishuTaskWorkflowConfigurationMutation,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult> {
+    throwIfAborted(signal)
+    validateTaskWorkflowConfigurationMutation(mutation)
+    const database = this.requireDatabase()
+    const keyHash = idempotencyKeyHash(mutation.command.idempotencyKey)
+    const requestHash = taskWorkflowRequestHash(mutation)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      if (receipt !== undefined) {
+        if (receipt.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
+          || receipt.request_hash !== requestHash) {
+          database.exec('ROLLBACK')
+          began = false
+          return taskIdempotencyConflict()
+        }
+        assertValidLedger(database)
+        const replay = decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+      assertValidLedger(database)
+      const binding = readTaskBindingRow(database, mutation.projectId)
+      if (binding === null) {
+        const project = readProjectScopeRow(
+          database,
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          mutation.projectId,
+        )
+        database.exec('ROLLBACK')
+        began = false
+        return project === null ? taskProjectNotFound(mutation.projectId) : taskListUnbound()
+      }
+      if (binding.organization_id !== mutation.command.actor.organizationId
+        || binding.team_id !== mutation.command.actor.teamId) {
+        throw new Error('Workbench workflow mutation escaped its authorized Project')
+      }
+      if (binding.revision !== mutation.expectedTaskRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return taskProjectionRevisionConflict(mutation.expectedTaskRevision, binding.revision)
+      }
+      const current = readTaskWorkflowRow(database, mutation.projectId)
+      const currentRevision = current?.revision ?? null
+      if (currentRevision !== mutation.expectedWorkflowRevision) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          ok: false,
+          error: Object.freeze({
+            code: 'workflow-revision-conflict' as const,
+            message: 'Task workflow revision changed before configuration committed',
+          }),
+        })
+      }
+      if (current !== null && current.field_guid !== mutation.field.fieldGuid) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          ok: false,
+          error: Object.freeze({
+            code: 'workflow-compatibility-blocked' as const,
+            message: 'An existing workflow cannot silently change its Feishu field identity',
+          }),
+        })
+      }
+      if (mutation.compatibility.state === 'blocked') {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({
+          ok: false,
+          error: Object.freeze({
+            code: 'workflow-compatibility-blocked' as const,
+            message: 'Workflow compatibility checks blocked configuration',
+            compatibility: mutation.compatibility,
+          }),
+        })
+      }
+      const workflowRevision = currentRevision === null
+        ? 1
+        : incrementRevision(currentRevision, 'Feishu workflow')
+      const taskRevision = incrementRevision(binding.revision, 'Feishu task projection')
+      const definitionJson = canonicalizeJson(mutation.definition)
+      const optionsJson = canonicalizeJson(mutation.field.options)
+      const issuesJson = canonicalizeJson(mutation.compatibility.issues)
+      if (current === null) {
+        const inserted = database.prepare(`
+          INSERT INTO workbench_feishu_task_workflow (
+            project_id, organization_id, team_id, revision, field_guid, field_name,
+            field_type, field_remote_version, definition_json, options_json,
+            compatibility_state, compatibility_issues_json, configured_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'single_select', ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          mutation.projectId,
+          mutation.command.actor.organizationId,
+          mutation.command.actor.teamId,
+          workflowRevision,
+          mutation.field.fieldGuid,
+          mutation.field.name,
+          mutation.field.remoteVersion,
+          definitionJson,
+          optionsJson,
+          mutation.compatibility.state,
+          issuesJson,
+          mutation.configuredAt,
+          mutation.configuredAt,
+        )
+        if (inserted.changes !== 1) throw new Error('Workbench workflow was not inserted')
+      } else {
+        const updated = database.prepare(`
+          UPDATE workbench_feishu_task_workflow SET revision = ?, field_name = ?,
+            field_remote_version = ?, definition_json = ?, options_json = ?,
+            compatibility_state = ?, compatibility_issues_json = ?, updated_at = ?
+          WHERE project_id = ? AND revision = ?
+        `).run(
+          workflowRevision,
+          mutation.field.name,
+          mutation.field.remoteVersion,
+          definitionJson,
+          optionsJson,
+          mutation.compatibility.state,
+          issuesJson,
+          mutation.configuredAt,
+          mutation.projectId,
+          current.revision,
+        )
+        if (updated.changes !== 1) throw new Error('Workbench workflow update lost its CAS')
+      }
+      const version = database.prepare(`
+        INSERT INTO workbench_feishu_task_workflow_version (
+          project_id, revision, field_guid, field_remote_version, definition_json,
+          mapping_json, options_json, compatibility_state, compatibility_issues_json,
+          command_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        mutation.projectId,
+        workflowRevision,
+        mutation.field.fieldGuid,
+        mutation.field.remoteVersion,
+        definitionJson,
+        canonicalizeJson(mutation.mapping),
+        optionsJson,
+        mutation.compatibility.state,
+        issuesJson,
+        mutation.command.commandId,
+        mutation.configuredAt,
+      )
+      if (version.changes !== 1) throw new Error('Workbench workflow version was not appended')
+      advanceTaskBindingRevision(database, binding, taskRevision, mutation.configuredAt)
+      const value = readProjectTasksProjection(database, {
+        organizationId: mutation.command.actor.organizationId,
+        teamId: mutation.command.actor.teamId,
+        projectId: mutation.projectId,
+      })
+      if (value === null || value.workflow === null) {
+        throw new Error('Workbench configured workflow projection disappeared')
+      }
+      const committed = Object.freeze({
+        ok: true,
+        value,
+        receipt: taskReceipt(mutation.command),
+      }) satisfies Extract<ConfigureFeishuTaskWorkflowResult, { readonly ok: true }>
+      appendFeishuTaskLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_WORKFLOW_AUDIT_ACTION,
+        summaryCode: FEISHU_TASK_WORKFLOW_SUMMARY,
+        objectType: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+        objectId: mutation.projectId,
+        objectVersion: workflowRevision,
+        changedFields: ['workflowDefinition', 'fieldMapping', 'compatibility'],
+        outboxTopic: FEISHU_TASK_WORKFLOW_OUTBOX_TOPIC,
+        result: committed,
+      })
+      database.exec('COMMIT')
+      began = false
+      return committed
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
+  }
+
   async replayFeishuTaskListBinding(
     query: WorkbenchFeishuTaskListBindingReplayQuery,
     signal: AbortSignal,
@@ -3090,6 +3411,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
           return Object.freeze({
             state: 'deliver',
             route,
+            patch: providerTaskPatchFromStored(effect.changes_json),
             effect: taskEffectProjection(effect),
             receipt: taskReceiptFromRow(effect),
           })
@@ -3148,6 +3470,12 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
           ),
         })
       }
+      const planned = planTaskUpdateChanges(database, binding, task, mutation)
+      if (!planned.ok) {
+        database.exec('ROLLBACK')
+        began = false
+        return Object.freeze({ state: 'rejected', result: planned.result })
+      }
       const route = taskRouteFromBinding(database, mutation.projectId)
       const inserted = database.prepare(`
         INSERT INTO workbench_feishu_task_effect (
@@ -3166,7 +3494,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         mutation.taskGuid,
         mutation.expectedRevision,
         mutation.expectedRemoteVersion,
-        canonicalizeJson(mutation.changes),
+        canonicalizeJson(planned.storedChanges),
         requestHash,
         keyHash,
         mutation.command.commandId,
@@ -3207,6 +3535,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       return Object.freeze({
         state: 'deliver',
         route,
+        patch: planned.providerPatch,
         effect,
         receipt: taskReceipt(mutation.command),
       })
@@ -5805,6 +6134,81 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     `)
     return
   }
+  if (targetVersion === 8) {
+    database.exec(`
+      CREATE TABLE workbench_feishu_task_workflow (
+        project_id TEXT PRIMARY KEY CHECK (length(project_id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        field_guid TEXT NOT NULL CHECK (length(field_guid) BETWEEN 1 AND 256),
+        field_name TEXT NOT NULL CHECK (length(field_name) BETWEEN 1 AND 50),
+        field_type TEXT NOT NULL CHECK (field_type = 'single_select'),
+        field_remote_version TEXT NOT NULL CHECK (length(field_remote_version) BETWEEN 1 AND 64),
+        definition_json TEXT NOT NULL CHECK (length(definition_json) > 0),
+        options_json TEXT NOT NULL CHECK (length(options_json) > 0),
+        compatibility_state TEXT NOT NULL
+          CHECK (compatibility_state IN ('compatible', 'attention', 'blocked')),
+        compatibility_issues_json TEXT NOT NULL CHECK (length(compatibility_issues_json) > 0),
+        configured_at TEXT NOT NULL CHECK (length(configured_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (project_id, organization_id, team_id),
+        FOREIGN KEY (project_id, organization_id, team_id)
+          REFERENCES workbench_feishu_task_binding (project_id, organization_id, team_id)
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_workflow_version (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        field_guid TEXT NOT NULL CHECK (length(field_guid) BETWEEN 1 AND 256),
+        field_remote_version TEXT NOT NULL CHECK (length(field_remote_version) BETWEEN 1 AND 64),
+        definition_json TEXT NOT NULL CHECK (length(definition_json) > 0),
+        mapping_json TEXT NOT NULL CHECK (length(mapping_json) > 0),
+        options_json TEXT NOT NULL CHECK (length(options_json) > 0),
+        compatibility_state TEXT NOT NULL
+          CHECK (compatibility_state IN ('compatible', 'attention', 'blocked')),
+        compatibility_issues_json TEXT NOT NULL CHECK (length(compatibility_issues_json) > 0),
+        command_id TEXT NOT NULL UNIQUE REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        PRIMARY KEY (project_id, revision),
+        FOREIGN KEY (project_id) REFERENCES workbench_feishu_task_workflow (project_id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_feishu_task_custom_value (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        task_guid TEXT NOT NULL CHECK (length(task_guid) BETWEEN 1 AND 256),
+        field_guid TEXT NOT NULL CHECK (length(field_guid) BETWEEN 1 AND 256),
+        field_type TEXT NOT NULL CHECK (length(field_type) BETWEEN 1 AND 64),
+        single_select_option_guid TEXT
+          CHECK (single_select_option_guid IS NULL
+            OR length(single_select_option_guid) BETWEEN 1 AND 256),
+        observed_at TEXT NOT NULL CHECK (length(observed_at) > 0),
+        PRIMARY KEY (project_id, task_guid, field_guid),
+        FOREIGN KEY (project_id, task_guid)
+          REFERENCES workbench_feishu_task_projection (project_id, task_guid)
+      ) STRICT;
+
+      CREATE INDEX workbench_feishu_task_custom_value_field
+        ON workbench_feishu_task_custom_value (project_id, field_guid, single_select_option_guid);
+
+      CREATE TRIGGER workbench_feishu_task_workflow_scope_no_update BEFORE UPDATE OF
+        project_id, organization_id, team_id, field_guid, field_type, configured_at
+        ON workbench_feishu_task_workflow
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu workflow scope is immutable'); END;
+      CREATE TRIGGER workbench_feishu_task_workflow_no_delete
+        BEFORE DELETE ON workbench_feishu_task_workflow
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu workflow mappings cannot be deleted'); END;
+      CREATE TRIGGER workbench_feishu_task_workflow_version_no_update
+        BEFORE UPDATE ON workbench_feishu_task_workflow_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu workflow versions are append-only'); END;
+      CREATE TRIGGER workbench_feishu_task_workflow_version_no_delete
+        BEFORE DELETE ON workbench_feishu_task_workflow_version
+      BEGIN SELECT RAISE(ABORT, 'workbench Feishu workflow versions cannot be deleted'); END
+    `)
+    return
+  }
   throw new Error(`missing Workbench migration ${targetVersion}`)
 }
 
@@ -5908,6 +6312,18 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare(`
     SELECT id, project_id, task_guid, state, attempt_count, command_id
     FROM workbench_feishu_task_effect LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, revision, field_guid, field_remote_version, compatibility_state
+    FROM workbench_feishu_task_workflow LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, revision, field_guid, mapping_json, command_id
+    FROM workbench_feishu_task_workflow_version LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, task_guid, field_guid, field_type, single_select_option_guid
+    FROM workbench_feishu_task_custom_value LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
@@ -9065,6 +9481,68 @@ function assertValidFeishuTasks(database: DatabaseSync): void {
       }
     }
 
+    const workflowRow = readTaskWorkflowRow(database, binding.project_id)
+    if (workflowRow !== null) {
+      const visibleTasks = taskRows.filter(row => row.visible === 1).map(taskProjectionFromRow)
+      const workflow = readTaskWorkflowProjection(database, binding, visibleTasks)
+      if (workflow === null || workflow.revision !== workflowRow.revision) {
+        throw new Error('Workbench Feishu workflow projection is inconsistent')
+      }
+      const versions = database.prepare(`
+        SELECT revision, field_guid, field_remote_version, definition_json, mapping_json,
+          options_json, compatibility_state, compatibility_issues_json, command_id, created_at
+        FROM workbench_feishu_task_workflow_version WHERE project_id = ? ORDER BY revision
+      `).all(binding.project_id) as unknown as Array<{
+        readonly revision: number
+        readonly field_guid: string
+        readonly field_remote_version: string
+        readonly definition_json: string
+        readonly mapping_json: string
+        readonly options_json: string
+        readonly compatibility_state: string
+        readonly compatibility_issues_json: string
+        readonly command_id: string
+        readonly created_at: string
+      }>
+      if (versions.length !== workflow.revision) {
+        throw new Error('Workbench Feishu workflow version history is incomplete')
+      }
+      for (let index = 0; index < versions.length; index += 1) {
+        const version = versions[index]
+        if (version === undefined || version.revision !== index + 1
+          || version.field_guid !== workflow.field.fieldGuid) {
+          throw new Error('Workbench Feishu workflow version history is invalid')
+        }
+        decodeWorkflowDefinition(version.definition_json)
+        validateWorkflowMapping(JSON.parse(version.mapping_json) as
+          import('./client.ts').ConfigureFeishuTaskWorkflowMapping)
+        decodeWorkflowCompatibilityIssues(version.compatibility_issues_json)
+        canonicalInstant(version.created_at, 'Stored workflow version createdAt')
+      }
+    }
+
+    const customValues = database.prepare(`
+      SELECT project_id, task_guid, field_guid, field_type,
+        single_select_option_guid, observed_at
+      FROM workbench_feishu_task_custom_value WHERE project_id = ?
+      ORDER BY task_guid, field_guid
+      LIMIT ${MAX_FEISHU_TASKS_PER_PROJECT * MAX_CUSTOM_FIELDS_PER_TASK + 1}
+    `).all(binding.project_id) as unknown as FeishuTaskCustomValueRow[]
+    if (customValues.length > MAX_FEISHU_TASKS_PER_PROJECT * MAX_CUSTOM_FIELDS_PER_TASK) {
+      throw new Error('Workbench Feishu task custom values exceed their bound')
+    }
+    for (const value of customValues) {
+      validateTaskCustomFieldValues([Object.freeze({
+        fieldGuid: value.field_guid,
+        type: value.field_type,
+        singleSelectOptionGuid: value.single_select_option_guid,
+      })], 'Stored Feishu task')
+      canonicalInstant(value.observed_at, 'Stored task custom value observedAt')
+      if (readTaskProjectionRow(database, value.project_id, value.task_guid) === null) {
+        throw new Error('Workbench task custom value lost its task projection')
+      }
+    }
+
     const references = database.prepare(`
       SELECT project_id, task_guid, command_id, referenced_at
       FROM workbench_feishu_task_reference WHERE project_id = ? ORDER BY task_guid
@@ -9665,6 +10143,52 @@ function assertValidFeishuTaskReceipt(
       reason: vocabulary.reason,
       causationId: row.audit_causation_id,
     }))
+  } else if (row.command_type === FEISHU_TASK_WORKFLOW_COMMAND_TYPE) {
+    const decoded = decodeTaskWorkflowConfigurationResult(row.result_json, row)
+    const workflow = decoded.value.workflow
+    if (workflow === null || decoded.value.projectId !== row.audit_project_id
+      || row.audit_object_id !== decoded.value.projectId
+      || row.audit_object_version !== workflow.revision) {
+      throw new Error('Workbench workflow receipt does not match its projection')
+    }
+    const version = database.prepare(`
+      SELECT revision, definition_json, mapping_json, field_guid, field_remote_version,
+        options_json, compatibility_state, compatibility_issues_json, created_at
+      FROM workbench_feishu_task_workflow_version WHERE command_id = ?
+    `).get(row.command_id) as {
+      readonly revision: number
+      readonly definition_json: string
+      readonly mapping_json: string
+      readonly field_guid: string
+      readonly field_remote_version: string
+      readonly options_json: string
+      readonly compatibility_state: string
+      readonly compatibility_issues_json: string
+      readonly created_at: string
+    } | undefined
+    if (version === undefined || version.revision !== workflow.revision
+      || version.created_at !== row.audit_occurred_at) {
+      throw new Error('Workbench workflow receipt lost its immutable version')
+    }
+    let mapping: unknown
+    try { mapping = JSON.parse(version.mapping_json) } catch {
+      throw new Error('Workbench workflow version contains invalid mapping JSON')
+    }
+    expectedRequestHash = digest(canonicalizeJson({
+      commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+      target: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+      scope: {
+        organizationId: row.audit_organization_id,
+        teamId: row.audit_team_id,
+        projectId: row.audit_project_id,
+      },
+      expectedTaskRevision: decoded.value.revision - 1,
+      expectedWorkflowRevision: workflow.revision === 1 ? null : workflow.revision - 1,
+      definition: workflow.definition,
+      mapping,
+      reason: vocabulary.reason,
+      causationId: row.audit_causation_id,
+    }))
   } else {
     let parsed: unknown
     try { parsed = JSON.parse(row.result_json) } catch {
@@ -9693,10 +10217,7 @@ function assertValidFeishuTaskReceipt(
       || effect.project_id !== row.audit_project_id) {
       throw new Error('Workbench task update receipt does not match its durable effect')
     }
-    let changes: unknown
-    try { changes = JSON.parse(effect.changes_json) } catch {
-      throw new Error('Workbench task update effect contains invalid changes JSON')
-    }
+    const requested = publicTaskChangesFromStored(effect.changes_json)
     expectedRequestHash = digest(canonicalizeJson({
       commandType: FEISHU_TASK_UPDATE_COMMAND_TYPE,
       target: FEISHU_TASK_OBJECT_TYPE,
@@ -9708,7 +10229,10 @@ function assertValidFeishuTaskReceipt(
       taskGuid: effect.task_guid,
       expectedRevision: effect.expected_project_revision,
       expectedRemoteVersion: effect.expected_remote_version,
-      changes,
+      ...(requested.expectedWorkflowRevision === undefined
+        ? {}
+        : { expectedWorkflowRevision: requested.expectedWorkflowRevision }),
+      changes: requested.changes,
       reason: vocabulary.reason,
       causationId: row.audit_causation_id,
     }))
@@ -10839,23 +11363,28 @@ interface StoredFeishuTaskVocabulary {
     | typeof FEISHU_TASK_LIST_BIND_COMMAND_TYPE
     | typeof FEISHU_TASK_REFERENCE_COMMAND_TYPE
     | typeof FEISHU_TASK_UPDATE_COMMAND_TYPE
+    | typeof FEISHU_TASK_WORKFLOW_COMMAND_TYPE
   readonly auditAction:
     | typeof FEISHU_TASK_LIST_BIND_AUDIT_ACTION
     | typeof FEISHU_TASK_REFERENCE_AUDIT_ACTION
     | typeof FEISHU_TASK_UPDATE_AUDIT_ACTION
+    | typeof FEISHU_TASK_WORKFLOW_AUDIT_ACTION
   readonly reason:
     | typeof FEISHU_TASK_LIST_BIND_REASON
     | typeof FEISHU_TASK_REFERENCE_REASON
     | typeof FEISHU_TASK_UPDATE_REASON
+    | typeof FEISHU_TASK_WORKFLOW_REASON
   readonly summaryCode:
     | typeof FEISHU_TASK_LIST_BIND_SUMMARY
     | typeof FEISHU_TASK_REFERENCE_SUMMARY
     | typeof FEISHU_TASK_UPDATE_SUMMARY
+    | typeof FEISHU_TASK_WORKFLOW_SUMMARY
   readonly changedFields: readonly string[]
   readonly outboxTopic: string
   readonly objectType:
     | typeof FEISHU_TASK_LIST_BIND_OBJECT_TYPE
     | typeof FEISHU_TASK_OBJECT_TYPE
+    | typeof FEISHU_TASK_WORKFLOW_OBJECT_TYPE
 }
 
 function storedFeishuTaskVocabulary(commandType: string): StoredFeishuTaskVocabulary | null {
@@ -10889,6 +11418,16 @@ function storedFeishuTaskVocabulary(commandType: string): StoredFeishuTaskVocabu
         changedFields: ['remoteVersion', 'changes', 'effectState'],
         outboxTopic: FEISHU_TASK_UPDATE_OUTBOX_TOPIC,
         objectType: FEISHU_TASK_OBJECT_TYPE,
+      }
+    case FEISHU_TASK_WORKFLOW_COMMAND_TYPE:
+      return {
+        commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_WORKFLOW_AUDIT_ACTION,
+        reason: FEISHU_TASK_WORKFLOW_REASON,
+        summaryCode: FEISHU_TASK_WORKFLOW_SUMMARY,
+        changedFields: ['workflowDefinition', 'fieldMapping', 'compatibility'],
+        outboxTopic: FEISHU_TASK_WORKFLOW_OUTBOX_TOPIC,
+        objectType: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
       }
     default: return null
   }
@@ -12033,9 +12572,238 @@ function taskUpdateRequestHash(mutation: WorkbenchFeishuTaskUpdateReservationMut
     taskGuid: mutation.taskGuid,
     expectedRevision: mutation.expectedRevision,
     expectedRemoteVersion: mutation.expectedRemoteVersion,
+    ...(mutation.expectedWorkflowRevision === undefined
+      ? {}
+      : { expectedWorkflowRevision: mutation.expectedWorkflowRevision }),
     changes: mutation.changes,
     reason: mutation.command.reason,
     causationId: mutation.command.causationId,
+  }))
+}
+
+interface StoredTaskUpdateChanges {
+  readonly summary?: string
+  readonly description?: string
+  readonly completed?: boolean
+  readonly workflowStateId?: string
+  readonly expectedWorkflowRevision?: number
+  readonly workflow?: {
+    readonly fieldGuid: string
+    readonly optionGuid: string
+  }
+}
+
+function planTaskUpdateChanges(
+  database: DatabaseSync,
+  binding: FeishuTaskBindingRow,
+  task: FeishuTaskProjectionRow,
+  mutation: WorkbenchFeishuTaskUpdateReservationMutation,
+):
+  | {
+    readonly ok: true
+    readonly storedChanges: StoredTaskUpdateChanges
+    readonly providerPatch: WorkbenchFeishuTaskPatch
+  }
+  | { readonly ok: false; readonly result: UpdateFeishuTaskResult } {
+  const providerPatch: {
+    summary?: string
+    description?: string
+    completed?: boolean
+    workflow?: { fieldGuid: string; optionGuid: string }
+  } = {
+    ...(mutation.changes.summary === undefined ? {} : { summary: mutation.changes.summary }),
+    ...(mutation.changes.description === undefined
+      ? {}
+      : { description: mutation.changes.description }),
+    ...(mutation.changes.completed === undefined ? {} : { completed: mutation.changes.completed }),
+  }
+  const storedChanges: {
+    summary?: string
+    description?: string
+    completed?: boolean
+    workflowStateId?: string
+    expectedWorkflowRevision?: number
+    workflow?: { fieldGuid: string; optionGuid: string }
+  } = { ...providerPatch }
+  const requestedStateId = mutation.changes.workflowStateId
+  if (requestedStateId !== undefined) {
+    const workflow = readTaskWorkflowProjection(database, binding, [taskProjectionFromRow(task)])
+    if (workflow === null) {
+      return { ok: false, result: taskWorkflowUpdateConflict('workflow-unconfigured', {
+        message: 'Project has no configured task workflow',
+        requestedStateId,
+      }) }
+    }
+    if (mutation.expectedWorkflowRevision !== workflow.revision) {
+      return { ok: false, result: taskWorkflowUpdateConflict('workflow-revision-conflict', {
+        message: 'Project task workflow changed before the task update',
+        ...(mutation.expectedWorkflowRevision === undefined
+          ? {}
+          : { expectedWorkflowRevision: mutation.expectedWorkflowRevision }),
+        currentWorkflowRevision: workflow.revision,
+        requestedStateId,
+      }) }
+    }
+    const value = workflow.values[0]
+    if (value === undefined || value.taskGuid !== task.task_guid) {
+      throw new Error('Workbench workflow update lost its task value')
+    }
+    if (!value.recognized) {
+      return { ok: false, result: taskWorkflowUpdateConflict('workflow-value-unrecognized', {
+        message: 'Current Feishu task workflow value is not mapped',
+        currentStateId: null,
+        requestedStateId,
+      }) }
+    }
+    const target = workflow.options.find(option => option.stateId === requestedStateId)
+    if (target === undefined || target.hidden) {
+      return { ok: false, result: taskWorkflowUpdateConflict('workflow-state-unmapped', {
+        message: 'Requested workflow state has no visible Feishu option mapping',
+        currentStateId: value.stateId,
+        requestedStateId,
+      }) }
+    }
+    const transitionAllowed = value.stateId === null
+      ? requestedStateId === workflow.definition.initialStateId
+      : workflowTransitionAllowed(workflow.definition, value.stateId, requestedStateId)
+    if (!transitionAllowed) {
+      return { ok: false, result: taskWorkflowUpdateConflict('workflow-transition-forbidden', {
+        message: 'Requested workflow transition is not allowed by the Project schema',
+        currentStateId: value.stateId,
+        requestedStateId,
+      }) }
+    }
+    const workflowPatch = Object.freeze({
+      fieldGuid: workflow.field.fieldGuid,
+      optionGuid: target.optionGuid,
+    })
+    providerPatch.workflow = workflowPatch
+    storedChanges.workflowStateId = requestedStateId
+    storedChanges.expectedWorkflowRevision = workflow.revision
+    storedChanges.workflow = workflowPatch
+  }
+  return Object.freeze({
+    ok: true,
+    storedChanges: Object.freeze(storedChanges),
+    providerPatch: Object.freeze(providerPatch),
+  })
+}
+
+function taskWorkflowUpdateConflict(
+  code: 'workflow-unconfigured' | 'workflow-revision-conflict'
+    | 'workflow-transition-forbidden' | 'workflow-state-unmapped'
+    | 'workflow-value-unrecognized',
+  details: Readonly<{
+    readonly message: string
+    readonly expectedWorkflowRevision?: number
+    readonly currentWorkflowRevision?: number
+    readonly currentStateId?: string | null
+    readonly requestedStateId?: string
+  }>,
+): UpdateFeishuTaskResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, ...details }) })
+}
+
+function decodeStoredTaskUpdateChanges(value: string): StoredTaskUpdateChanges {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch {
+    throw new Error('Stored Feishu task effect changes contain invalid JSON')
+  }
+  const record = objectValue(parsed, 'Stored Feishu task effect changes')
+  const keys = Object.keys(record)
+  if (keys.length < 1 || keys.some(key => key !== 'summary' && key !== 'description'
+    && key !== 'completed' && key !== 'workflowStateId'
+    && key !== 'expectedWorkflowRevision' && key !== 'workflow')) {
+    throw new Error('Stored Feishu task effect changes contain unsupported fields')
+  }
+  const providerPatch: WorkbenchFeishuTaskPatch = Object.freeze({
+    ...(record.summary === undefined ? {} : { summary: record.summary as string }),
+    ...(record.description === undefined ? {} : { description: record.description as string }),
+    ...(record.completed === undefined ? {} : { completed: record.completed as boolean }),
+    ...(record.workflow === undefined ? {} : {
+      workflow: Object.freeze({
+        fieldGuid: stringValue(
+          objectValue(record.workflow, 'Stored workflow task patch').fieldGuid,
+          'Stored workflow field guid',
+        ),
+        optionGuid: stringValue(
+          objectValue(record.workflow, 'Stored workflow task patch').optionGuid,
+          'Stored workflow option guid',
+        ),
+      }),
+    }),
+  })
+  validateTaskPatch(providerPatch)
+  if (record.workflowStateId === undefined) {
+    if (record.expectedWorkflowRevision !== undefined || record.workflow !== undefined) {
+      throw new Error('Stored Feishu task effect has orphan workflow delivery metadata')
+    }
+    return providerPatch
+  }
+  const workflowStateId = stringValue(record.workflowStateId, 'Stored workflow state id')
+  if (!/^[a-z][a-z0-9-]{0,63}$/u.test(workflowStateId)
+    || record.workflow === undefined
+    || !Number.isSafeInteger(record.expectedWorkflowRevision)
+    || (record.expectedWorkflowRevision as number) < 1) {
+    throw new Error('Stored Feishu task effect workflow intent is invalid')
+  }
+  return Object.freeze({
+    ...providerPatch,
+    workflowStateId,
+    expectedWorkflowRevision: record.expectedWorkflowRevision as number,
+  })
+}
+
+function providerTaskPatchFromStored(value: string): WorkbenchFeishuTaskPatch {
+  const stored = decodeStoredTaskUpdateChanges(value)
+  return Object.freeze({
+    ...(stored.summary === undefined ? {} : { summary: stored.summary }),
+    ...(stored.description === undefined ? {} : { description: stored.description }),
+    ...(stored.completed === undefined ? {} : { completed: stored.completed }),
+    ...(stored.workflow === undefined ? {} : { workflow: Object.freeze({ ...stored.workflow }) }),
+  })
+}
+
+function publicTaskChangesFromStored(value: string): Readonly<{
+  readonly changes: import('./client.ts').UpdateFeishuTaskRequest['changes']
+  readonly expectedWorkflowRevision?: number
+}> {
+  const stored = decodeStoredTaskUpdateChanges(value)
+  return Object.freeze({
+    changes: Object.freeze({
+      ...(stored.summary === undefined ? {} : { summary: stored.summary }),
+      ...(stored.description === undefined ? {} : { description: stored.description }),
+      ...(stored.completed === undefined ? {} : { completed: stored.completed }),
+      ...(stored.workflowStateId === undefined ? {} : { workflowStateId: stored.workflowStateId }),
+    }),
+    ...(stored.expectedWorkflowRevision === undefined
+      ? {}
+      : { expectedWorkflowRevision: stored.expectedWorkflowRevision }),
+  })
+}
+
+function taskWorkflowRequestHash(
+  mutation: WorkbenchFeishuTaskWorkflowConfigurationMutation
+    | WorkbenchFeishuTaskWorkflowReplayQuery,
+): string {
+  const organizationId = 'command' in mutation
+    ? mutation.command.actor.organizationId
+    : mutation.organizationId
+  const teamId = 'command' in mutation ? mutation.command.actor.teamId : mutation.teamId
+  const reason = 'command' in mutation ? mutation.command.reason : mutation.reason
+  const causationId = 'command' in mutation
+    ? mutation.command.causationId
+    : mutation.causationId
+  return digest(canonicalizeJson({
+    commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+    target: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+    scope: { organizationId, teamId, projectId: mutation.projectId },
+    expectedTaskRevision: mutation.expectedTaskRevision,
+    expectedWorkflowRevision: mutation.expectedWorkflowRevision,
+    definition: mutation.definition,
+    mapping: mutation.mapping,
+    reason,
+    causationId,
   }))
 }
 
@@ -12046,17 +12814,21 @@ interface FeishuTaskLedgerInput {
     | typeof FEISHU_TASK_LIST_BIND_COMMAND_TYPE
     | typeof FEISHU_TASK_REFERENCE_COMMAND_TYPE
     | typeof FEISHU_TASK_UPDATE_COMMAND_TYPE
+    | typeof FEISHU_TASK_WORKFLOW_COMMAND_TYPE
   readonly auditAction:
     | typeof FEISHU_TASK_LIST_BIND_AUDIT_ACTION
     | typeof FEISHU_TASK_REFERENCE_AUDIT_ACTION
     | typeof FEISHU_TASK_UPDATE_AUDIT_ACTION
+    | typeof FEISHU_TASK_WORKFLOW_AUDIT_ACTION
   readonly summaryCode:
     | typeof FEISHU_TASK_LIST_BIND_SUMMARY
     | typeof FEISHU_TASK_REFERENCE_SUMMARY
     | typeof FEISHU_TASK_UPDATE_SUMMARY
+    | typeof FEISHU_TASK_WORKFLOW_SUMMARY
   readonly objectType:
     | typeof FEISHU_TASK_LIST_BIND_OBJECT_TYPE
     | typeof FEISHU_TASK_OBJECT_TYPE
+    | typeof FEISHU_TASK_WORKFLOW_OBJECT_TYPE
   readonly objectId: string
   readonly objectVersion: number
   readonly changedFields: readonly string[]
@@ -12330,11 +13102,7 @@ function validateStoredTaskEffect(row: FeishuTaskEffectRow): void {
   validateFeishuResourceId(row.task_guid, 'Stored Feishu task effect task guid')
   positiveInteger(row.expected_project_revision, 'Stored task effect expected revision')
   validateRemoteVersion(row.expected_remote_version, 'Stored task effect remote version')
-  let changes: unknown
-  try { changes = JSON.parse(row.changes_json) } catch {
-    throw new Error('Stored Feishu task effect changes contain invalid JSON')
-  }
-  validateTaskPatch(objectValue(changes, 'Stored Feishu task effect changes'))
+  decodeStoredTaskUpdateChanges(row.changes_json)
   if (!SHA256_HEX.test(row.request_hash) || !SHA256_HEX.test(row.idempotency_key_hash)) {
     throw new Error('Stored Feishu task effect contains an invalid digest')
   }
@@ -12659,6 +13427,17 @@ function decodeTaskReferenceResult(
   return Object.freeze({ ok: true, value: decoded.value, receipt: decoded.receipt })
 }
 
+function decodeTaskWorkflowConfigurationResult(
+  resultJson: string,
+  receipt: ReceiptRow,
+): Extract<ConfigureFeishuTaskWorkflowResult, { readonly ok: true }> {
+  const decoded = decodeStoredTaskProjectionResult(resultJson, receipt)
+  if (decoded.value.workflow === null) {
+    throw new Error('Workbench workflow receipt lost its configured workflow')
+  }
+  return Object.freeze({ ok: true, value: decoded.value, receipt: decoded.receipt })
+}
+
 function decodeStoredTaskProjectionResult(
   resultJson: string,
   receipt: ReceiptRow,
@@ -12717,6 +13496,9 @@ function decodeStoredProjectTasksProjection(value: unknown): ProjectTasksProject
   const effectValues = arrayValue(row.effects, 'Stored Project task effects')
   if (effectValues.length > 100) throw new Error('Stored Project task effects exceed their limit')
   const effects = Object.freeze(effectValues.map(decodeStoredTaskEffectProjection))
+  const workflow = row.workflow === null || row.workflow === undefined
+    ? null
+    : decodeStoredTaskWorkflowProjection(row.workflow)
   if ((binding === null) !== (revision === 0) || (binding === null) !== (state === 'unbound')) {
     throw new Error('Stored Project task projection has inconsistent binding state')
   }
@@ -12736,6 +13518,90 @@ function decodeStoredProjectTasksProjection(value: unknown): ProjectTasksProject
       issue,
     }),
     effects,
+    workflow,
+  })
+}
+
+function decodeStoredTaskWorkflowProjection(value: unknown): ProjectTaskWorkflowProjection {
+  const row = objectValue(value, 'Stored task workflow projection')
+  const definition = decodeWorkflowDefinition(canonicalizeJson(row.definition))
+  const field = objectValue(row.field, 'Stored task workflow field')
+  if (field.type !== 'single_select') throw new Error('Stored workflow field type is invalid')
+  const fieldProjection = Object.freeze({
+    fieldGuid: stringValue(field.fieldGuid, 'Stored workflow field guid'),
+    name: stringValue(field.name, 'Stored workflow field name'),
+    type: 'single_select' as const,
+    remoteVersion: stringValue(field.remoteVersion, 'Stored workflow field remote version'),
+  })
+  validateFeishuResourceId(fieldProjection.fieldGuid, 'Stored workflow field guid')
+  validateSafeText(fieldProjection.name, 'Stored workflow field name', 50)
+  validateRemoteVersion(fieldProjection.remoteVersion, 'Stored workflow field remote version')
+  const baseOptions = decodeWorkflowOptions(canonicalizeJson(
+    arrayValue(row.options, 'Stored workflow options').map((candidate) => {
+      const option = objectValue(candidate, 'Stored workflow option')
+      return {
+        stateId: option.stateId,
+        optionGuid: option.optionGuid,
+        name: option.name,
+        colorIndex: option.colorIndex,
+        hidden: option.hidden,
+      }
+    }),
+  ), definition)
+  const storedOptions = arrayValue(row.options, 'Stored workflow options')
+  const options = Object.freeze(baseOptions.map((option, index) => {
+    const stored = objectValue(storedOptions[index], 'Stored workflow option')
+    return Object.freeze({
+      ...option,
+      usedTaskCount: positiveInteger(
+        stored.usedTaskCount,
+        'Stored workflow option usage count',
+        true,
+      ),
+    })
+  }))
+  const values = Object.freeze(arrayValue(row.values, 'Stored workflow values').map((candidate) => {
+    const item = objectValue(candidate, 'Stored workflow value')
+    return Object.freeze({
+      taskGuid: stringValue(item.taskGuid, 'Stored workflow value task guid'),
+      stateId: nullableString(item.stateId, 'Stored workflow value state id'),
+      optionGuid: nullableString(item.optionGuid, 'Stored workflow value option guid'),
+      stateName: nullableString(item.stateName, 'Stored workflow value state name'),
+      recognized: booleanValue(item.recognized, 'Stored workflow value recognized flag'),
+    })
+  }))
+  const compatibilityRow = objectValue(row.compatibility, 'Stored workflow compatibility')
+  const issues = decodeWorkflowCompatibilityIssues(canonicalizeJson(compatibilityRow.issues))
+  if (compatibilityRow.state !== 'compatible'
+    && compatibilityRow.state !== 'attention'
+    && compatibilityRow.state !== 'blocked') {
+    throw new Error('Stored workflow compatibility state is invalid')
+  }
+  const completionSuggestions = Object.freeze(arrayValue(
+    row.completionSuggestions,
+    'Stored workflow completion suggestions',
+  ).map((candidate) => {
+    const suggestion = objectValue(candidate, 'Stored workflow completion suggestion')
+    if (suggestion.reason !== 'terminal-state-awaiting-owner-confirmation') {
+      throw new Error('Stored workflow completion suggestion reason is invalid')
+    }
+    return Object.freeze({
+      taskGuid: stringValue(suggestion.taskGuid, 'Stored completion suggestion task guid'),
+      stateId: stringValue(suggestion.stateId, 'Stored completion suggestion state id'),
+      stateName: stringValue(suggestion.stateName, 'Stored completion suggestion state name'),
+      reason: 'terminal-state-awaiting-owner-confirmation' as const,
+    })
+  }))
+  return Object.freeze({
+    revision: positiveInteger(row.revision, 'Stored workflow revision'),
+    definition,
+    field: fieldProjection,
+    options,
+    values,
+    compatibility: Object.freeze({ state: compatibilityRow.state, issues }),
+    completionSuggestions,
+    configuredAt: canonicalInstant(row.configuredAt, 'Stored workflow configuredAt'),
+    updatedAt: canonicalInstant(row.updatedAt, 'Stored workflow updatedAt'),
   })
 }
 
@@ -12911,6 +13777,98 @@ function validateTaskListBindingIntent(
   validateSafeText(intent.name, 'Feishu task-list intent name', 100)
 }
 
+function validateTaskWorkflowReplayQuery(query: WorkbenchFeishuTaskWorkflowReplayQuery): void {
+  validateBoundedReference(query.organizationId, 'Workflow replay organization id')
+  validateBoundedReference(query.teamId, 'Workflow replay team id')
+  validateBoundedReference(query.actorId, 'Workflow replay actor id')
+  validateBoundedReference(query.projectId, 'Workflow replay Project id')
+  positiveInteger(query.expectedTaskRevision, 'Workflow replay task revision')
+  if (query.expectedWorkflowRevision !== null) {
+    positiveInteger(query.expectedWorkflowRevision, 'Workflow replay workflow revision')
+  }
+  projectTaskWorkflowDefinition(query.definition)
+  validateWorkflowMapping(query.mapping)
+  validateProjectCommandKey(query.idempotencyKey, 'Workflow replay idempotency key')
+  validateProjectCommandKey(query.causationId, 'Workflow replay causation id')
+  if (query.reason !== FEISHU_TASK_WORKFLOW_REASON) {
+    throw new TypeError('Workflow replay reason is unsupported')
+  }
+}
+
+function validateTaskWorkflowConfigurationMutation(
+  mutation: WorkbenchFeishuTaskWorkflowConfigurationMutation,
+): void {
+  validateBoundedReference(mutation.projectId, 'Workflow Project id')
+  positiveInteger(mutation.expectedTaskRevision, 'Workflow expected task revision')
+  if (mutation.expectedWorkflowRevision !== null) {
+    positiveInteger(mutation.expectedWorkflowRevision, 'Workflow expected revision')
+  }
+  const definition = projectTaskWorkflowDefinition(mutation.definition)
+  validateWorkflowMapping(mutation.mapping)
+  validateFeishuResourceId(mutation.field.fieldGuid, 'Workflow field guid')
+  validateSafeText(mutation.field.name, 'Workflow field name', 50)
+  validateRemoteVersion(mutation.field.remoteVersion, 'Workflow field remote version')
+  if (!Array.isArray(mutation.field.options)
+    || mutation.field.options.length !== definition.states.length) {
+    throw new TypeError('Workflow field must map every state exactly once')
+  }
+  const stateIds = new Set<string>()
+  const optionGuids = new Set<string>()
+  for (const option of mutation.field.options) {
+    if (!definition.states.some(state => state.stateId === option.stateId)
+      || stateIds.has(option.stateId)) {
+      throw new TypeError('Workflow field contains an invalid state mapping')
+    }
+    validateFeishuResourceId(option.optionGuid, 'Workflow option guid')
+    if (optionGuids.has(option.optionGuid)) {
+      throw new TypeError('Workflow option GUIDs must be unique')
+    }
+    validateSafeText(option.name, 'Workflow option name', 50)
+    if (!Number.isInteger(option.colorIndex) || option.colorIndex < 0 || option.colorIndex > 54
+      || typeof option.hidden !== 'boolean') {
+      throw new TypeError('Workflow option metadata is invalid')
+    }
+    stateIds.add(option.stateId)
+    optionGuids.add(option.optionGuid)
+  }
+  decodeWorkflowCompatibilityIssues(canonicalizeJson(mutation.compatibility.issues))
+  const derivedState = mutation.compatibility.issues.some(issue => issue.severity === 'blocked')
+    ? 'blocked'
+    : mutation.compatibility.issues.length > 0 ? 'attention' : 'compatible'
+  if (mutation.compatibility.state !== derivedState) {
+    throw new TypeError('Workflow compatibility state does not match its issues')
+  }
+  validateInstant(mutation.configuredAt, 'Workflow configuredAt')
+  validateFeishuCommand(mutation.command)
+  if (mutation.command.reason !== FEISHU_TASK_WORKFLOW_REASON
+    || mutation.command.occurredAt !== mutation.configuredAt) {
+    throw new TypeError('Workflow command metadata is inconsistent')
+  }
+}
+
+function validateWorkflowMapping(
+  mapping: import('./client.ts').ConfigureFeishuTaskWorkflowMapping,
+): void {
+  if (mapping.mode === 'create' || mapping.mode === 'migrate') return
+  if (mapping.mode !== 'existing') throw new TypeError('Workflow mapping mode is unsupported')
+  validateFeishuResourceId(mapping.fieldGuid, 'Workflow mapped field guid')
+  if (!Array.isArray(mapping.options) || mapping.options.length < 2
+    || mapping.options.length > 100) {
+    throw new TypeError('Workflow option mapping is invalid')
+  }
+  const stateIds = new Set<string>()
+  const optionGuids = new Set<string>()
+  for (const option of mapping.options) {
+    validateSafeText(option.stateId, 'Workflow mapped state id', 64)
+    validateFeishuResourceId(option.optionGuid, 'Workflow mapped option guid')
+    if (stateIds.has(option.stateId) || optionGuids.has(option.optionGuid)) {
+      throw new TypeError('Workflow option mapping must be one-to-one')
+    }
+    stateIds.add(option.stateId)
+    optionGuids.add(option.optionGuid)
+  }
+}
+
 function validateTaskReconciliationMutation(
   mutation: WorkbenchFeishuTaskReconciliationMutation,
 ): void {
@@ -12971,12 +13929,39 @@ function validateTaskUpdateReservationMutation(
   validateFeishuResourceId(mutation.taskGuid, 'Feishu task update task guid')
   positiveInteger(mutation.expectedRevision, 'Feishu task update expected revision')
   validateRemoteVersion(mutation.expectedRemoteVersion, 'Feishu task expected remote version')
-  validateTaskPatch(mutation.changes)
+  validateTaskRequestedChanges(mutation.changes)
+  if (mutation.changes.workflowStateId === undefined) {
+    if (mutation.expectedWorkflowRevision !== undefined) {
+      throw new TypeError('Feishu task update has an unused workflow revision')
+    }
+  } else {
+    positiveInteger(mutation.expectedWorkflowRevision, 'Feishu task expected workflow revision')
+  }
   validateInstant(mutation.preparedAt, 'Feishu task update preparedAt')
   validateFeishuCommand(mutation.command)
   if (mutation.command.reason !== FEISHU_TASK_UPDATE_REASON
     || mutation.command.occurredAt !== mutation.preparedAt) {
     throw new TypeError('Feishu task update command metadata is inconsistent')
+  }
+}
+
+function validateTaskRequestedChanges(
+  changes: WorkbenchFeishuTaskUpdateReservationMutation['changes'],
+): void {
+  const keys = Object.keys(changes)
+  if (keys.length < 1 || keys.some(key => key !== 'summary' && key !== 'description'
+    && key !== 'completed' && key !== 'workflowStateId')) {
+    throw new TypeError('Feishu task update must contain supported requested fields')
+  }
+  const provider: WorkbenchFeishuTaskPatch = Object.freeze({
+    ...(changes.summary === undefined ? {} : { summary: changes.summary }),
+    ...(changes.description === undefined ? {} : { description: changes.description }),
+    ...(changes.completed === undefined ? {} : { completed: changes.completed }),
+  })
+  if (Object.keys(provider).length > 0) validateTaskPatch(provider)
+  if (changes.workflowStateId !== undefined
+    && !/^[a-z][a-z0-9-]{0,63}$/u.test(changes.workflowStateId)) {
+    throw new TypeError('Feishu task workflow state id is invalid')
   }
 }
 
@@ -13062,6 +14047,31 @@ function validateTaskSnapshot(task: WorkbenchFeishuTaskSnapshot, label: string):
   }
   validateCanonicalFeishuUrl(task.canonicalUrl, `${label} URL`)
   validateRemoteVersion(task.remoteVersion, `${label} remote version`)
+  validateTaskCustomFieldValues(task.customFieldValues ?? Object.freeze([]), label)
+}
+
+function validateTaskCustomFieldValues(
+  values: readonly WorkbenchFeishuTaskCustomFieldValue[],
+  label: string,
+): void {
+  if (!Array.isArray(values) || values.length > MAX_CUSTOM_FIELDS_PER_TASK) {
+    throw new TypeError(`${label} custom fields must be bounded`)
+  }
+  const fieldGuids = new Set<string>()
+  for (const value of values) {
+    validateFeishuResourceId(value.fieldGuid, `${label} custom-field guid`)
+    validateSafeText(value.type, `${label} custom-field type`, 64)
+    if (value.singleSelectOptionGuid !== null) {
+      validateFeishuResourceId(value.singleSelectOptionGuid, `${label} custom-field option guid`)
+      if (value.type !== 'single_select') {
+        throw new TypeError(`${label} non-select custom field cannot contain a select option`)
+      }
+    }
+    if (fieldGuids.has(value.fieldGuid)) {
+      throw new TypeError(`${label} custom-field guids must be unique`)
+    }
+    fieldGuids.add(value.fieldGuid)
+  }
 }
 
 function validateTaskMembers(
@@ -13089,7 +14099,7 @@ function validateTaskMember(member: FeishuTaskMemberProjection, label: string): 
 function validateTaskPatch(patch: WorkbenchFeishuTaskPatch): void {
   const keys = Object.keys(patch)
   if (keys.length < 1 || keys.some(key =>
-    key !== 'summary' && key !== 'description' && key !== 'completed')) {
+    key !== 'summary' && key !== 'description' && key !== 'completed' && key !== 'workflow')) {
     throw new TypeError('Feishu task update must contain supported changed fields')
   }
   if (patch.summary !== undefined) {
@@ -13100,6 +14110,15 @@ function validateTaskPatch(patch: WorkbenchFeishuTaskPatch): void {
   }
   if (patch.completed !== undefined && typeof patch.completed !== 'boolean') {
     throw new TypeError('Feishu task update completion must be boolean')
+  }
+  if (patch.workflow !== undefined) {
+    const workflowKeys = Object.keys(patch.workflow)
+    if (workflowKeys.length !== 2
+      || workflowKeys.some(key => key !== 'fieldGuid' && key !== 'optionGuid')) {
+      throw new TypeError('Feishu task workflow update contains unsupported fields')
+    }
+    validateFeishuResourceId(patch.workflow.fieldGuid, 'Feishu workflow field guid')
+    validateFeishuResourceId(patch.workflow.optionGuid, 'Feishu workflow option guid')
   }
 }
 
@@ -13160,6 +14179,16 @@ function readTaskBindingRow(database: DatabaseSync, projectId: string): FeishuTa
   if (row === undefined) return null
   validateStoredTaskBinding(row)
   return row
+}
+
+function readTaskWorkflowRow(database: DatabaseSync, projectId: string): FeishuTaskWorkflowRow | null {
+  const row = database.prepare(`
+    SELECT project_id, organization_id, team_id, revision, field_guid, field_name,
+      field_type, field_remote_version, definition_json, options_json,
+      compatibility_state, compatibility_issues_json, configured_at, updated_at
+    FROM workbench_feishu_task_workflow WHERE project_id = ?
+  `).get(projectId) as FeishuTaskWorkflowRow | undefined
+  return row ?? null
 }
 
 function validateStoredTaskBinding(row: FeishuTaskBindingRow): void {
@@ -13240,6 +14269,7 @@ function readProjectTasksProjection(
         issue: null,
       }),
       effects: Object.freeze([]),
+      workflow: null,
     })
   }
   if (binding.organization_id !== query.organizationId || binding.team_id !== query.teamId) {
@@ -13269,6 +14299,7 @@ function readProjectTasksProjection(
     ORDER BY created_at DESC, id LIMIT 100
   `).all(query.projectId) as unknown as FeishuTaskEffectRow[]
   const issue = binding.sync_issue_json === null ? null : decodeFeishuIssue(binding.sync_issue_json)
+  const tasks = Object.freeze(taskRows.map(taskProjectionFromRow))
   const result: ProjectTasksProjection = {
     projectId: binding.project_id,
     revision: binding.revision,
@@ -13287,7 +14318,7 @@ function readProjectTasksProjection(
       remoteVersion: binding.remote_version,
       boundAt: binding.bound_at,
     }),
-    tasks: Object.freeze(taskRows.map(taskProjectionFromRow)),
+    tasks,
     sync: Object.freeze({
       state: binding.sync_state as 'healthy' | 'attention' | 'unknown',
       lastEventAt: binding.last_event_at,
@@ -13296,8 +14327,216 @@ function readProjectTasksProjection(
       issue,
     }),
     effects: Object.freeze(effects.map(taskEffectProjection)),
+    workflow: readTaskWorkflowProjection(database, binding, tasks),
   }
   return projectTasksProjection(result)
+}
+
+function readTaskWorkflowProjection(
+  database: DatabaseSync,
+  binding: FeishuTaskBindingRow,
+  tasks: readonly ProjectTaskProjection[],
+): ProjectTaskWorkflowProjection | null {
+  const row = database.prepare(`
+    SELECT project_id, organization_id, team_id, revision, field_guid, field_name,
+      field_type, field_remote_version, definition_json, options_json,
+      compatibility_state, compatibility_issues_json, configured_at, updated_at
+    FROM workbench_feishu_task_workflow WHERE project_id = ?
+  `).get(binding.project_id) as FeishuTaskWorkflowRow | undefined
+  if (row === undefined) return null
+  if (row.organization_id !== binding.organization_id || row.team_id !== binding.team_id
+    || row.field_type !== 'single_select') {
+    throw new Error('Workbench Feishu workflow escaped its Project or field type')
+  }
+  positiveInteger(row.revision, 'Feishu workflow revision')
+  validateFeishuResourceId(row.field_guid, 'Feishu workflow field guid')
+  validateSafeText(row.field_name, 'Feishu workflow field name', 50)
+  validateRemoteVersion(row.field_remote_version, 'Feishu workflow field remote version')
+  const definition = decodeWorkflowDefinition(row.definition_json)
+  const storedOptions = decodeWorkflowOptions(row.options_json, definition)
+  const usageRows = database.prepare(`
+    SELECT value.single_select_option_guid AS option_guid, COUNT(*) AS task_count
+    FROM workbench_feishu_task_custom_value AS value
+    INNER JOIN workbench_feishu_task_projection AS task
+      ON task.project_id = value.project_id AND task.task_guid = value.task_guid
+    WHERE value.project_id = ? AND value.field_guid = ? AND task.visible = 1
+      AND value.single_select_option_guid IS NOT NULL
+    GROUP BY value.single_select_option_guid
+  `).all(binding.project_id, row.field_guid) as unknown as Array<{
+    readonly option_guid: string
+    readonly task_count: number
+  }>
+  const usage = new Map(usageRows.map(item => [item.option_guid, item.task_count] as const))
+  const options: readonly ProjectTaskWorkflowOptionProjection[] = Object.freeze(
+    storedOptions.map(option => Object.freeze({
+      ...option,
+      usedTaskCount: usage.get(option.optionGuid) ?? 0,
+    })),
+  )
+  const mappedByGuid = new Map(options.map(option => [option.optionGuid, option] as const))
+  const customRows = database.prepare(`
+    SELECT value.project_id, value.task_guid, value.field_guid, value.field_type,
+      value.single_select_option_guid, value.observed_at
+    FROM workbench_feishu_task_custom_value AS value
+    INNER JOIN workbench_feishu_task_projection AS task
+      ON task.project_id = value.project_id AND task.task_guid = value.task_guid
+    WHERE value.project_id = ? AND value.field_guid = ? AND task.visible = 1
+  `).all(binding.project_id, row.field_guid) as unknown as FeishuTaskCustomValueRow[]
+  const customByTask = new Map(customRows.map(item => [item.task_guid, item] as const))
+  const dynamicIssues: ProjectTaskWorkflowCompatibilityIssue[] = []
+  const values = Object.freeze(tasks.map((task) => {
+    const custom = customByTask.get(task.taskGuid)
+    const optionGuid = custom?.single_select_option_guid ?? null
+    const mapped = optionGuid === null ? null : mappedByGuid.get(optionGuid) ?? null
+    if (optionGuid !== null && mapped === null) {
+      dynamicIssues.push(Object.freeze({
+        code: 'task-state-unmapped' as const,
+        severity: 'blocked' as const,
+        stateId: null,
+        taskGuid: task.taskGuid,
+        message: 'A task uses an option that is not mapped to a workflow state',
+      }))
+    }
+    return Object.freeze({
+      taskGuid: task.taskGuid,
+      stateId: mapped?.stateId ?? null,
+      optionGuid,
+      stateName: mapped?.name ?? null,
+      recognized: optionGuid === null || mapped !== null,
+    })
+  }))
+  const storedIssues = decodeWorkflowCompatibilityIssues(row.compatibility_issues_json)
+  const issues = Object.freeze([...storedIssues, ...dynamicIssues])
+  const compatibilityState = issues.some(item => item.severity === 'blocked')
+    ? 'blocked' as const
+    : issues.length > 0 ? 'attention' as const : 'compatible' as const
+  if (row.compatibility_state !== 'compatible'
+    && row.compatibility_state !== 'attention'
+    && row.compatibility_state !== 'blocked') {
+    throw new Error('Workbench Feishu workflow compatibility state is invalid')
+  }
+  const terminal = new Set(definition.terminalStateIds)
+  const completedByGuid = new Map(tasks.map(task => [task.taskGuid, task.completed] as const))
+  const completionSuggestions = Object.freeze(values.flatMap((value) => {
+    if (value.stateId === null || value.stateName === null
+      || !terminal.has(value.stateId) || completedByGuid.get(value.taskGuid) === true) return []
+    return [Object.freeze({
+      taskGuid: value.taskGuid,
+      stateId: value.stateId,
+      stateName: value.stateName,
+      reason: 'terminal-state-awaiting-owner-confirmation' as const,
+    })]
+  }))
+  return Object.freeze({
+    revision: row.revision,
+    definition,
+    field: Object.freeze({
+      fieldGuid: row.field_guid,
+      name: row.field_name,
+      type: 'single_select' as const,
+      remoteVersion: row.field_remote_version,
+    }),
+    options,
+    values,
+    compatibility: Object.freeze({ state: compatibilityState, issues }),
+    completionSuggestions,
+    configuredAt: canonicalInstant(row.configured_at, 'Feishu workflow configuredAt'),
+    updatedAt: canonicalInstant(row.updated_at, 'Feishu workflow updatedAt'),
+  })
+}
+
+function decodeWorkflowDefinition(value: string): ProjectTaskWorkflowDefinition {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch { throw new Error('Stored workflow definition is invalid JSON') }
+  const row = objectValue(parsed, 'Stored workflow definition')
+  const states = arrayValue(row.states, 'Stored workflow states').map((candidate) => {
+    const state = objectValue(candidate, 'Stored workflow state')
+    return {
+      stateId: stringValue(state.stateId, 'Stored workflow state id'),
+      name: stringValue(state.name, 'Stored workflow state name'),
+      colorIndex: positiveInteger(state.colorIndex, 'Stored workflow color index', true),
+      allowedNextStateIds: arrayValue(
+        state.allowedNextStateIds,
+        'Stored workflow transitions',
+      ).map(target => stringValue(target, 'Stored workflow transition')),
+    }
+  })
+  const definition = projectTaskWorkflowDefinition({
+    fieldName: stringValue(row.fieldName, 'Stored workflow field name'),
+    initialStateId: stringValue(row.initialStateId, 'Stored workflow initial state'),
+    terminalStateIds: arrayValue(row.terminalStateIds, 'Stored workflow terminal states')
+      .map(stateId => stringValue(stateId, 'Stored workflow terminal state')),
+    states,
+  })
+  if (canonicalizeJson(definition) !== value) {
+    throw new Error('Stored workflow definition is not canonical')
+  }
+  return definition
+}
+
+function decodeWorkflowOptions(
+  value: string,
+  definition: ProjectTaskWorkflowDefinition,
+): readonly Omit<ProjectTaskWorkflowOptionProjection, 'usedTaskCount'>[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch { throw new Error('Stored workflow options are invalid JSON') }
+  if (!Array.isArray(parsed) || parsed.length !== definition.states.length) {
+    throw new Error('Stored workflow options do not map every current state')
+  }
+  const stateIds = new Set<string>()
+  const optionGuids = new Set<string>()
+  const options = parsed.map((candidate) => {
+    const row = objectValue(candidate, 'Stored workflow option')
+    const stateId = stringValue(row.stateId, 'Stored workflow option state id')
+    const optionGuid = stringValue(row.optionGuid, 'Stored workflow option guid')
+    if (!definition.states.some(state => state.stateId === stateId)
+      || stateIds.has(stateId) || optionGuids.has(optionGuid)) {
+      throw new Error('Stored workflow option mapping is inconsistent')
+    }
+    stateIds.add(stateId)
+    optionGuids.add(optionGuid)
+    validateFeishuResourceId(optionGuid, 'Stored workflow option guid')
+    const colorIndex = positiveInteger(row.colorIndex, 'Stored workflow option color', true)
+    if (colorIndex > 54) throw new Error('Stored workflow option color is invalid')
+    return Object.freeze({
+      stateId,
+      optionGuid,
+      name: stringValue(row.name, 'Stored workflow option name'),
+      colorIndex,
+      hidden: booleanValue(row.hidden, 'Stored workflow option hidden flag'),
+    })
+  })
+  return Object.freeze(options)
+}
+
+function decodeWorkflowCompatibilityIssues(
+  value: string,
+): readonly ProjectTaskWorkflowCompatibilityIssue[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch { throw new Error('Stored workflow issues are invalid JSON') }
+  if (!Array.isArray(parsed) || parsed.length > 1_000) {
+    throw new Error('Stored workflow issues are not bounded')
+  }
+  const codes = new Set<ProjectTaskWorkflowCompatibilityIssue['code']>([
+    'field-missing', 'field-type-mismatch', 'field-version-changed', 'option-missing',
+    'option-hidden', 'option-name-changed', 'used-state-removal',
+    'duplicate-visible-option-name', 'task-state-unmapped',
+  ])
+  return Object.freeze(parsed.map((candidate) => {
+    const row = objectValue(candidate, 'Stored workflow issue')
+    if (typeof row.code !== 'string'
+      || !codes.has(row.code as ProjectTaskWorkflowCompatibilityIssue['code'])
+      || (row.severity !== 'attention' && row.severity !== 'blocked')) {
+      throw new Error('Stored workflow issue is invalid')
+    }
+    return Object.freeze({
+      code: row.code as ProjectTaskWorkflowCompatibilityIssue['code'],
+      severity: row.severity,
+      stateId: nullableString(row.stateId, 'Stored workflow issue state id'),
+      taskGuid: nullableString(row.taskGuid, 'Stored workflow issue task guid'),
+      message: stringValue(row.message, 'Stored workflow issue message'),
+    })
+  }))
 }
 
 function taskProjectionFromRow(row: FeishuTaskProjectionRow): ProjectTaskProjection {
@@ -13424,6 +14663,46 @@ function upsertTaskProjection(
     updatedAt,
   )
   if (result.changes !== 1) throw new Error('Workbench task projection was not upserted exactly once')
+  replaceTaskCustomFieldValues(
+    database,
+    projectId,
+    task.taskGuid,
+    task.customFieldValues ?? Object.freeze([]),
+    updatedAt,
+  )
+}
+
+const MAX_CUSTOM_FIELDS_PER_TASK = 100
+
+function replaceTaskCustomFieldValues(
+  database: DatabaseSync,
+  projectId: string,
+  taskGuid: string,
+  values: readonly WorkbenchFeishuTaskCustomFieldValue[],
+  observedAt: string,
+): void {
+  const removed = database.prepare(`
+    DELETE FROM workbench_feishu_task_custom_value WHERE project_id = ? AND task_guid = ?
+  `).run(projectId, taskGuid)
+  if (removed.changes > MAX_CUSTOM_FIELDS_PER_TASK) {
+    throw new Error('Workbench task custom-field cleanup exceeded its bounded limit')
+  }
+  const insert = database.prepare(`
+    INSERT INTO workbench_feishu_task_custom_value (
+      project_id, task_guid, field_guid, field_type, single_select_option_guid, observed_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `)
+  for (const value of values) {
+    const inserted = insert.run(
+      projectId,
+      taskGuid,
+      value.fieldGuid,
+      value.type,
+      value.singleSelectOptionGuid,
+      observedAt,
+    )
+    if (inserted.changes !== 1) throw new Error('Workbench task custom-field value was not inserted')
+  }
 }
 
 function taskReferenceExists(database: DatabaseSync, projectId: string, taskGuid: string): boolean {

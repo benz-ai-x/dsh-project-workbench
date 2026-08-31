@@ -68,6 +68,12 @@ import { DshFeishuConnectionAdapter } from './feishu-connection-adapter.ts'
 export type * from './client.ts'
 export type * from './repository.ts'
 export type * from './feishu-task-federation.ts'
+export type * from './feishu-task-workflow.ts'
+export {
+  assessTaskWorkflowCompatibility,
+  projectTaskWorkflowDefinition,
+  workflowTransitionAllowed,
+} from './feishu-task-workflow.ts'
 export {
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_BYTES_V1,
   KNOWLEDGE_WORK_TEMPLATE_CANONICAL_JSON_V1,
