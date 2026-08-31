@@ -41,6 +41,34 @@ const authDependenciesFixtureEntry = resolve(
 const temporaryRoots: string[] = []
 const contexts: Context[] = []
 const servers: Server[] = []
+const WORKBENCH_REMOTE_METHODS = Object.freeze([
+  'activity',
+  'addProjectMember',
+  'auditIntegrity',
+  'bindFeishuTaskList',
+  'configureFeishuIdentityRoute',
+  'configureFeishuTaskWorkflow',
+  'createProject',
+  'decideSuggestedChange',
+  'discoverFeishuTaskLists',
+  'discoverFeishuTaskWorkflowFields',
+  'feishuConnectionCenter',
+  'previewFeishuTaskWorkflow',
+  'project',
+  'projectStart',
+  'projectTasks',
+  'projectTeam',
+  'proposeProjectResponsibilityChange',
+  'reconcileProjectTasks',
+  'referenceFeishuTask',
+  'reviewCenter',
+  'setProjectMemberStatus',
+  'setProjectResponsibility',
+  'setStatus',
+  'snapshot',
+  'updateFeishuTask',
+  'verifyFeishuIdentityRoute',
+])
 
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(async context => {
@@ -208,6 +236,9 @@ describe('built Workbench Host through the real DSH Loader', () => {
 
     const first = await load(test.configPath)
     const firstService = first.workbench
+    expect(WORKBENCH_REMOTE_METHODS.filter(
+      method => typeof Reflect.get(firstService, method) === 'function',
+    )).toEqual(WORKBENCH_REMOTE_METHODS)
     await expect(firstService.snapshot(new AbortController().signal)).rejects.toMatchObject({
       failure: { code: 'unauthorized' },
     })

@@ -84,13 +84,19 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
-    check(main.WORKBENCH_SCHEMA_VERSION === 7, `${packageName}: built SQLite authority exports Schema v7`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 8, `${packageName}: built SQLite authority exports Schema v8`)
     check(typeof main.DshFeishuConnectionAdapter === 'function', `${packageName}: production Feishu adapter is a packed main export`)
     check(main.FEISHU_CONNECTION_ADAPTER_ID === 'feishu-open-platform-v1', `${packageName}: Feishu adapter exports its stable identity`)
     check(
       typeof main.DshFeishuConnectionAdapter.prototype.startIdentityVerification === 'function'
         && !Object.hasOwn(main.DshFeishuConnectionAdapter.prototype, 'verify'),
       `${packageName}: Feishu adapter starts identity verification explicitly and has no legacy one-phase verify method`,
+    )
+    check(
+      typeof main.DshFeishuConnectionAdapter.prototype.listTaskWorkflowFields === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.createTaskWorkflowField === 'function'
+        && typeof main.DshFeishuConnectionAdapter.prototype.updateTaskWorkflowField === 'function',
+      `${packageName}: Feishu adapter ships the complete T09 workflow-field read/write surface`,
     )
   }
 
@@ -244,6 +250,7 @@ function verifyPublicHostImports(packageDir, packageName) {
     if (typeof main.default !== 'function' || main.default !== main.WorkbenchService) throw new Error('invalid Host default export')
     if (typeof main.DshFeishuConnectionAdapter !== 'function' || main.FEISHU_CONNECTION_ADAPTER_ID !== 'feishu-open-platform-v1') throw new Error('invalid Feishu adapter export')
     if (typeof main.DshFeishuConnectionAdapter.prototype.startIdentityVerification !== 'function' || Object.hasOwn(main.DshFeishuConnectionAdapter.prototype, 'verify')) throw new Error('invalid two-phase Feishu adapter surface')
+    if (typeof main.DshFeishuConnectionAdapter.prototype.listTaskWorkflowFields !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.createTaskWorkflowField !== 'function' || typeof main.DshFeishuConnectionAdapter.prototype.updateTaskWorkflowField !== 'function') throw new Error('invalid Feishu workflow-field adapter surface')
     if (typeof auth.default !== 'function' || auth.default !== auth.OwnerAuthService) throw new Error('invalid Owner auth export')
     if ('default' in contract) throw new Error('browser-safe contract has an accidental default export')
     if (contract.FEISHU_CONNECTION_ID !== 'feishu-primary') throw new Error('invalid Feishu browser contract export')
@@ -296,14 +303,17 @@ function verifyTypertFace(face, packageName, label) {
     'auditIntegrity',
     'bindFeishuTaskList',
     'configureFeishuIdentityRoute',
+    'configureFeishuTaskWorkflow',
     'createProject',
     'decideSuggestedChange',
     'discoverFeishuTaskLists',
+    'discoverFeishuTaskWorkflowFields',
     'feishuConnectionCenter',
     'project',
     'projectStart',
     'projectTasks',
     'projectTeam',
+    'previewFeishuTaskWorkflow',
     'proposeProjectResponsibilityChange',
     'reconcileProjectTasks',
     'referenceFeishuTask',
@@ -317,7 +327,7 @@ function verifyTypertFace(face, packageName, label) {
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the twenty-three T08 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the twenty-six T09 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -333,16 +343,25 @@ function verifyTypertFace(face, packageName, label) {
   const configureFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'configureFeishuIdentityRoute',
   )
+  const configureFeishuTaskWorkflow = invocations.find(
+    invocation => invocation?.method === 'configureFeishuTaskWorkflow',
+  )
   const feishuConnectionCenter = invocations.find(
     invocation => invocation?.method === 'feishuConnectionCenter',
   )
   const discoverFeishuTaskLists = invocations.find(
     invocation => invocation?.method === 'discoverFeishuTaskLists',
   )
+  const discoverFeishuTaskWorkflowFields = invocations.find(
+    invocation => invocation?.method === 'discoverFeishuTaskWorkflowFields',
+  )
   const project = invocations.find(invocation => invocation?.method === 'project')
   const projectStart = invocations.find(invocation => invocation?.method === 'projectStart')
   const projectTasks = invocations.find(invocation => invocation?.method === 'projectTasks')
   const projectTeam = invocations.find(invocation => invocation?.method === 'projectTeam')
+  const previewFeishuTaskWorkflow = invocations.find(
+    invocation => invocation?.method === 'previewFeishuTaskWorkflow',
+  )
   const proposeProjectResponsibilityChange = invocations.find(
     invocation => invocation?.method === 'proposeProjectResponsibilityChange',
   )
@@ -374,13 +393,16 @@ function verifyTypertFace(face, packageName, label) {
     auditIntegrity,
     bindFeishuTaskList,
     configureFeishuIdentityRoute,
+    configureFeishuTaskWorkflow,
     createProject,
     discoverFeishuTaskLists,
+    discoverFeishuTaskWorkflowFields,
     feishuConnectionCenter,
     project,
     projectStart,
     projectTasks,
     projectTeam,
+    previewFeishuTaskWorkflow,
     proposeProjectResponsibilityChange,
     reconcileProjectTasks,
     referenceFeishuTask,
@@ -484,6 +506,21 @@ function verifyTypertFace(face, packageName, label) {
       }),
     `${packageName}: ${label} Activity filter carries closed T08 task vocabulary without a retry action`,
   )
+  check(
+    schemaAccepts(activityFilter?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      objectType: 'feishu-task-workflow',
+      action: 'workbench.feishu-task-workflow.configured',
+      limit: 5,
+    })
+      && schemaRejects(activityFilter?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        objectType: 'feishu-task-workflow',
+        action: 'workbench.feishu-task-workflow.deleted',
+        limit: 5,
+      }),
+    `${packageName}: ${label} Activity filter carries closed T09 workflow vocabulary without destructive actions`,
+  )
   const activityShape = unwrapSchema(activity?.result?.schema)?.def?.shape
   check(
     sameStrings(schemaObjectKeys(activity?.result?.schema), ['integrity', 'items', 'nextBeforeSequence']),
@@ -512,6 +549,205 @@ function verifyTypertFace(face, packageName, label) {
   check(
     sameStrings(schemaObjectKeys(projectTasksQuery?.codec?.schema), ['projectId']),
     `${packageName}: ${label} Project Tasks query carries only Project identity`,
+  )
+  const projectTasksResult = unionOptions(projectTasks?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('projectId'))
+  check(
+    sameStrings(schemaObjectKeys(projectTasksResult), [
+      'binding',
+      'effects',
+      'projectId',
+      'revision',
+      'sync',
+      'tasks',
+      'workflow',
+    ]),
+    `${packageName}: ${label} Project Tasks result carries the optional Host workflow projection`,
+  )
+  const discoverWorkflowRequest = discoverFeishuTaskWorkflowFields?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(discoverWorkflowRequest?.codec?.schema), [
+      'expectedTaskRevision',
+      'projectId',
+    ]),
+    `${packageName}: ${label} workflow-field discovery carries only Project identity and task CAS`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(discoverFeishuTaskWorkflowFields?.result?.schema), [
+      'items',
+      'projectId',
+      'taskListGuid',
+      'taskRevision',
+    ]),
+    `${packageName}: ${label} workflow-field discovery returns one task-revision-fenced field page`,
+  )
+  const workflowFieldCandidate = arrayElementSchema(
+    unwrapSchema(discoverFeishuTaskWorkflowFields?.result?.schema)?.def?.shape?.items,
+  )
+  check(
+    sameStrings(schemaObjectKeys(workflowFieldCandidate), [
+      'fieldGuid',
+      'name',
+      'options',
+      'remoteVersion',
+      'type',
+    ]),
+    `${packageName}: ${label} discovered workflow fields retain stable field identity and opaque version`,
+  )
+  const workflowDefinition = {
+    fieldName: 'Workbench status',
+    initialStateId: 'planned',
+    terminalStateIds: ['done'],
+    states: [
+      {
+        stateId: 'planned',
+        name: 'Planned',
+        colorIndex: 1,
+        allowedNextStateIds: ['done'],
+      },
+      {
+        stateId: 'done',
+        name: 'Done',
+        colorIndex: 2,
+        allowedNextStateIds: [],
+      },
+    ],
+  }
+  const previewWorkflowRequest = previewFeishuTaskWorkflow?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(previewWorkflowRequest?.codec?.schema), [
+      'definition',
+      'expectedTaskRevision',
+      'expectedWorkflowRevision',
+      'mapping',
+      'projectId',
+    ]),
+    `${packageName}: ${label} workflow preview carries exact definition, mapping, and dual CAS fields`,
+  )
+  const previewWorkflowRequestShape = unwrapSchema(previewWorkflowRequest?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(previewWorkflowRequestShape?.definition), [
+      'fieldName',
+      'initialStateId',
+      'states',
+      'terminalStateIds',
+    ]),
+    `${packageName}: ${label} workflow definition carries field, initial, states, and terminal semantics`,
+  )
+  const workflowStateDefinition = arrayElementSchema(
+    unwrapSchema(previewWorkflowRequestShape?.definition)?.def?.shape?.states,
+  )
+  check(
+    sameStrings(schemaObjectKeys(workflowStateDefinition), [
+      'allowedNextStateIds',
+      'colorIndex',
+      'name',
+      'stateId',
+    ]),
+    `${packageName}: ${label} workflow states carry stable IDs, display metadata, and transition edges`,
+  )
+  check(
+    schemaAccepts(previewWorkflowRequest?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      expectedTaskRevision: 4,
+      expectedWorkflowRevision: null,
+      definition: workflowDefinition,
+      mapping: { mode: 'create' },
+    })
+      && schemaAccepts(previewWorkflowRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        expectedTaskRevision: 4,
+        expectedWorkflowRevision: 2,
+        definition: workflowDefinition,
+        mapping: { mode: 'migrate' },
+      })
+      && schemaAccepts(previewWorkflowRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        expectedTaskRevision: 4,
+        expectedWorkflowRevision: null,
+        definition: workflowDefinition,
+        mapping: {
+          mode: 'existing',
+          fieldGuid: 'field-built-1',
+          options: [
+            { stateId: 'planned', optionGuid: 'option-built-planned' },
+            { stateId: 'done', optionGuid: 'option-built-done' },
+          ],
+        },
+      })
+      && schemaRejects(previewWorkflowRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        expectedTaskRevision: 4,
+        expectedWorkflowRevision: null,
+        definition: workflowDefinition,
+        mapping: { mode: 'delete' },
+      }),
+    `${packageName}: ${label} workflow preview admits create/existing/migrate and rejects unknown mapping modes`,
+  )
+  check(
+    sameStrings(schemaObjectKeys(previewFeishuTaskWorkflow?.result?.schema), [
+      'compatibility',
+      'definition',
+      'mapping',
+      'projectId',
+      'taskRevision',
+      'usedStateIds',
+      'workflowRevision',
+    ]),
+    `${packageName}: ${label} workflow preview returns compatibility and observed usage under both CAS fences`,
+  )
+  const configureWorkflowRequest = configureFeishuTaskWorkflow?.parameters?.find(
+    parameter => parameter?.name === 'request',
+  )
+  check(
+    sameStrings(schemaObjectKeys(configureWorkflowRequest?.codec?.schema), [
+      'causationId',
+      'definition',
+      'expectedTaskRevision',
+      'expectedWorkflowRevision',
+      'idempotencyKey',
+      'mapping',
+      'projectId',
+      'reason',
+    ]),
+    `${packageName}: ${label} workflow configuration adds exact durable command identity fields`,
+  )
+  check(
+    schemaAccepts(configureWorkflowRequest?.codec?.schema, {
+      projectId: 'project-built-artifact',
+      expectedTaskRevision: 4,
+      expectedWorkflowRevision: null,
+      definition: workflowDefinition,
+      mapping: { mode: 'create' },
+      idempotencyKey: 'built-workflow-idempotency-0001',
+      causationId: 'built-workflow-causation-0001',
+      reason: 'owner-feishu-task-workflow-configure',
+    })
+      && schemaRejects(configureWorkflowRequest?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        expectedTaskRevision: 4,
+        expectedWorkflowRevision: null,
+        definition: workflowDefinition,
+        mapping: { mode: 'create' },
+        idempotencyKey: 'built-workflow-idempotency-0001',
+        causationId: 'built-workflow-causation-0001',
+        reason: 'owner-feishu-task-workflow-delete',
+      }),
+    `${packageName}: ${label} workflow configuration exposes only the closed T09 reason`,
+  )
+  const configureWorkflowSuccess = unionOptions(configureFeishuTaskWorkflow?.result?.schema)
+    .find(option => schemaObjectKeys(option).includes('receipt'))
+  check(
+    sameStrings(schemaObjectKeys(configureWorkflowSuccess), ['ok', 'receipt', 'value'])
+      && sameStrings(
+        schemaObjectKeys(unwrapSchema(configureWorkflowSuccess)?.def?.shape?.value),
+        ['binding', 'effects', 'projectId', 'revision', 'sync', 'tasks', 'workflow'],
+      ),
+    `${packageName}: ${label} successful workflow configuration returns receipt plus complete Project Tasks truth`,
   )
   const bindTaskListRequest = bindFeishuTaskList?.parameters?.find(
     parameter => parameter?.name === 'request',

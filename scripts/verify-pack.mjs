@@ -763,11 +763,14 @@ const recovery = await import(HOST + '/recovery')
 const bundle = (await import(BUNDLE + '/package.json', { with: { type: 'json' } })).default
 assert.equal(typeof host.default, 'function')
 assert.equal(host.default, host.WorkbenchService)
-assert.equal(host.WORKBENCH_SCHEMA_VERSION, 7)
+assert.equal(host.WORKBENCH_SCHEMA_VERSION, 8)
 assert.equal(typeof host.DshFeishuConnectionAdapter, 'function')
 assert.equal(host.FEISHU_CONNECTION_ADAPTER_ID, 'feishu-open-platform-v1')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.startIdentityVerification, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.readTaskList, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.listTaskWorkflowFields, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.createTaskWorkflowField, 'function')
+assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.updateTaskWorkflowField, 'function')
 assert.equal(typeof host.DshFeishuConnectionAdapter.prototype.updateTask, 'function')
 assert.equal(Object.hasOwn(host.DshFeishuConnectionAdapter.prototype, 'verify'), false)
 assert.equal(hostAuth.default, hostAuth.OwnerAuthService)
@@ -781,10 +784,13 @@ const remoteMethods = [
   'auditIntegrity',
   'bindFeishuTaskList',
   'configureFeishuIdentityRoute',
+  'configureFeishuTaskWorkflow',
   'createProject',
   'decideSuggestedChange',
   'discoverFeishuTaskLists',
+  'discoverFeishuTaskWorkflowFields',
   'feishuConnectionCenter',
+  'previewFeishuTaskWorkflow',
   'project',
   'projectStart',
   'projectTasks',

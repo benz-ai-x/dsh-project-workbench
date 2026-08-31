@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import WorkbenchService, {
@@ -79,6 +79,9 @@ describe('WorkbenchService', () => {
       { method: 'projectTasks', invocation: { kind: 'direct' } },
       { method: 'discoverFeishuTaskLists', invocation: { kind: 'direct' } },
       { method: 'bindFeishuTaskList', invocation: { kind: 'direct' } },
+      { method: 'discoverFeishuTaskWorkflowFields', invocation: { kind: 'direct' } },
+      { method: 'previewFeishuTaskWorkflow', invocation: { kind: 'direct' } },
+      { method: 'configureFeishuTaskWorkflow', invocation: { kind: 'direct' } },
       { method: 'reconcileProjectTasks', invocation: { kind: 'direct' } },
       { method: 'referenceFeishuTask', invocation: { kind: 'direct' } },
       { method: 'updateFeishuTask', invocation: { kind: 'direct' } },
@@ -404,6 +407,94 @@ describe('WorkbenchService', () => {
     await fiber.dispose()
     expect(ctx.get('workbench')).toBeUndefined()
     expect(service.scenario.lifecycle).toBe('closed')
+  })
+
+  it('forwards every workflow Remote request and the exact caller AbortSignal', async () => {
+    const signal = new AbortController().signal
+    const discoverRequest = Object.freeze({
+      projectId: 'project-workflow-service',
+      expectedTaskRevision: 4,
+    })
+    const discoverResult = Object.freeze({
+      projectId: 'project-workflow-service',
+      taskListGuid: 'tasklist-workflow-service',
+      taskRevision: 4,
+      items: Object.freeze([]),
+    })
+    const previewRequest = Object.freeze({
+      projectId: 'project-workflow-service',
+      expectedTaskRevision: 4,
+      expectedWorkflowRevision: null,
+      definition: Object.freeze({
+        fieldName: 'Workbench status',
+        initialStateId: 'planned',
+        terminalStateIds: Object.freeze(['done']),
+        states: Object.freeze([
+          Object.freeze({
+            stateId: 'planned',
+            name: 'Planned',
+            colorIndex: 1,
+            allowedNextStateIds: Object.freeze(['done']),
+          }),
+          Object.freeze({
+            stateId: 'done',
+            name: 'Done',
+            colorIndex: 2,
+            allowedNextStateIds: Object.freeze([]),
+          }),
+        ]),
+      }),
+      mapping: Object.freeze({ mode: 'create' as const }),
+    })
+    const previewResult = Object.freeze({
+      projectId: 'project-workflow-service',
+      taskRevision: 4,
+      workflowRevision: null,
+      definition: previewRequest.definition,
+      mapping: previewRequest.mapping,
+      compatibility: Object.freeze({ state: 'compatible' as const, issues: Object.freeze([]) }),
+      usedStateIds: Object.freeze([]),
+    })
+    const configureRequest = Object.freeze({
+      ...previewRequest,
+      idempotencyKey: 'workflow-service-idempotency-0001',
+      causationId: 'workflow-service-causation-0001',
+      reason: 'owner-feishu-task-workflow-configure' as const,
+    })
+    const configureResult = Object.freeze({
+      ok: false as const,
+      error: Object.freeze({
+        code: 'remote-rejected' as const,
+        message: 'provider rejected the fixture request',
+      }),
+    })
+    const scenario = {
+      discoverFeishuTaskWorkflowFields: vi.fn().mockResolvedValue(discoverResult),
+      previewFeishuTaskWorkflow: vi.fn().mockResolvedValue(previewResult),
+      configureFeishuTaskWorkflow: vi.fn().mockResolvedValue(configureResult),
+    }
+    const service = Object.create(WorkbenchService.prototype) as WorkbenchService
+    Object.defineProperty(service, 'scenario', { value: scenario })
+
+    await expect(service.discoverFeishuTaskWorkflowFields(
+      discoverRequest,
+      signal,
+    )).resolves.toBe(discoverResult)
+    await expect(service.previewFeishuTaskWorkflow(
+      previewRequest,
+      signal,
+    )).resolves.toBe(previewResult)
+    await expect(service.configureFeishuTaskWorkflow(
+      configureRequest,
+      signal,
+    )).resolves.toBe(configureResult)
+
+    expect(scenario.discoverFeishuTaskWorkflowFields).toHaveBeenCalledWith(
+      discoverRequest,
+      signal,
+    )
+    expect(scenario.previewFeishuTaskWorkflow).toHaveBeenCalledWith(previewRequest, signal)
+    expect(scenario.configureFeishuTaskWorkflow).toHaveBeenCalledWith(configureRequest, signal)
   })
 
   it('exports one same-named type/runtime Config with validated defaults', async () => {

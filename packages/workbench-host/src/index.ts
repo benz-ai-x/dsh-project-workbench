@@ -11,12 +11,17 @@ import type {
   BindFeishuTaskListResult,
   ConfigureFeishuIdentityRouteRequest,
   ConfigureFeishuIdentityRouteResult,
+  ConfigureFeishuTaskWorkflowRequest,
+  ConfigureFeishuTaskWorkflowResult,
   CreateProjectRequest,
   CreateProjectResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
   DiscoverFeishuTaskListsRequest,
+  DiscoverFeishuTaskWorkflowFieldsRequest,
   FeishuTaskListDiscoveryProjection,
+  FeishuTaskWorkflowCompatibilityPreview,
+  FeishuTaskWorkflowFieldDiscoveryProjection,
   FeishuConnectionCenterProjection,
   ProjectDetailProjection,
   ProjectQuery,
@@ -26,6 +31,7 @@ import type {
   ProjectTeamQuery,
   ProjectTasksProjection,
   ProjectTasksQuery,
+  PreviewFeishuTaskWorkflowRequest,
   ProposeProjectResponsibilityChangeRequest,
   ProposeProjectResponsibilityChangeResult,
   ReconcileProjectTasksRequest,
@@ -367,6 +373,33 @@ export class WorkbenchService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<BindFeishuTaskListResult> {
     return this.scenario.bindFeishuTaskList(request, signal)
+  }
+
+  /** Discover custom fields through the Project task binding's pinned identity route. */
+  @Remote
+  discoverFeishuTaskWorkflowFields(
+    request: DiscoverFeishuTaskWorkflowFieldsRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskWorkflowFieldDiscoveryProjection> {
+    return this.scenario.discoverFeishuTaskWorkflowFields(request, signal)
+  }
+
+  /** Preview workflow compatibility against current Feishu field and task usage. */
+  @Remote
+  previewFeishuTaskWorkflow(
+    request: PreviewFeishuTaskWorkflowRequest,
+    signal: AbortSignal,
+  ): Promise<FeishuTaskWorkflowCompatibilityPreview> {
+    return this.scenario.previewFeishuTaskWorkflow(request, signal)
+  }
+
+  /** Create, map, or migrate one Feishu-authoritative task workflow field. */
+  @Remote
+  configureFeishuTaskWorkflow(
+    request: ConfigureFeishuTaskWorkflowRequest,
+    signal: AbortSignal,
+  ): Promise<ConfigureFeishuTaskWorkflowResult> {
+    return this.scenario.configureFeishuTaskWorkflow(request, signal)
   }
 
   /** Run one durable full-baseline reconciliation. */
