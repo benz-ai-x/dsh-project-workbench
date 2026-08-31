@@ -16,6 +16,9 @@ const BOT_SECRET = 'calendar-bot-secret-SENTINEL'
 const TENANT_TOKEN = 'calendar-tenant-token-SENTINEL'
 const EVENT_IDEMPOTENCY_KEY = '25fdf41b-8c80-2ce1-e94c-de8b5e7aa7e6'
 const FIXED_NOW = new Date('2026-08-31T00:00:00.000Z')
+const BOT_CALENDAR_ID = 'feishu.cn_alpha@group.calendar.feishu.cn'
+const CALENDAR_PATH = '/open-apis/calendar/v4/calendars'
+const BOT_EVENT_PATH = `${CALENDAR_PATH}/${BOT_CALENDAR_ID}/events`
 
 interface CredentialHarness {
   readonly provider: CredentialProvider
@@ -107,46 +110,223 @@ function authorize(init: RequestInit | undefined): void {
   expect(init?.redirect).toBe('error')
 }
 
-describe('DshFeishuConnectionAdapter calendar federation', () => {
-  it('uses only the explicitly pinned Bot route for Calendar discovery', async () => {
-    const store = credentials()
-    store.values.set('FEISHU_CALENDAR_BOT_SECRET', { value: BOT_SECRET, source: 'file' })
-    const paths: string[] = []
-    const request: FeishuFetch = async (input, init) => {
+interface BotResourceExchange {
+  readonly method: 'GET' | 'POST' | 'PATCH'
+  readonly path: string
+  readonly query?: Readonly<Record<string, string>>
+  readonly body?: unknown
+  readonly response: unknown
+}
+
+interface BotFetchHarness {
+  readonly fetch: FeishuFetch
+  readonly paths: string[]
+  readonly resourceRequests: number
+}
+
+function botFetch(exchanges: readonly BotResourceExchange[]): BotFetchHarness {
+  const paths: string[] = []
+  let resourceRequests = 0
+  return {
+    paths,
+    get resourceRequests() { return resourceRequests },
+    fetch: async (input, init) => {
       const url = requestUrl(input)
+      const headers = new Headers(init?.headers)
       paths.push(url.pathname)
+      expect(url.pathname).not.toBe('/open-apis/authen/v1/user_info')
+      expect(headers.get('authorization')).not.toBe(`Bearer ${USER_TOKEN}`)
+      expect(String(init?.body ?? '')).not.toContain(USER_TOKEN)
       expect(init?.redirect).toBe('error')
       if (url.pathname === '/open-apis/auth/v3/tenant_access_token/internal') {
         expect(method(init)).toBe('POST')
-        expect(new Headers(init?.headers).has('authorization')).toBe(false)
-        expect(JSON.parse(String(init?.body))).toEqual({
-          app_id: APP_ID,
-          app_secret: BOT_SECRET,
-        })
+        expect(headers.has('authorization')).toBe(false)
+        expect(JSON.parse(String(init?.body))).toEqual({ app_id: APP_ID, app_secret: BOT_SECRET })
         return json({ code: 0, tenant_access_token: TENANT_TOKEN, expire: 7_200 })
       }
-      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${TENANT_TOKEN}`)
+      expect(headers.get('authorization')).toBe(`Bearer ${TENANT_TOKEN}`)
       if (url.pathname === '/open-apis/bot/v3/info') {
+        expect(method(init)).toBe('GET')
         return json({
           code: 0,
           bot: { activate_status: 2, app_name: 'Calendar Bot', open_id: 'ou_calendar_bot' },
         })
       }
-      expect(url.pathname).toBe('/open-apis/calendar/v4/calendars')
-      expect(method(init)).toBe('GET')
-      return json({ code: 0, data: { calendar_list: [], has_more: false } })
-    }
-    const adapter = new DshFeishuConnectionAdapter(store.provider, { fetch: request })
+      const exchange = exchanges[resourceRequests]
+      if (exchange === undefined) throw new Error('unexpected Calendar resource request')
+      resourceRequests += 1
+      expect(method(init)).toBe(exchange.method)
+      expect(decodeURIComponent(url.pathname)).toBe(exchange.path)
+      expect(Object.fromEntries(url.searchParams)).toEqual(exchange.query ?? {})
+      if ('body' in exchange) expect(JSON.parse(String(init?.body))).toEqual(exchange.body)
+      else expect(init?.body).toBeUndefined()
+      return json(exchange.response)
+    },
+  }
+}
 
-    await expect(adapter.listCalendars(botRoute(), new AbortController().signal))
-      .resolves.toEqual({ state: 'ok', value: [] })
+function botCalendar(description: string | null = null): Record<string, unknown> {
+  return {
+    calendar_id: BOT_CALENDAR_ID,
+    summary: 'Bot calendar',
+    description,
+    type: 'shared',
+    role: 'owner',
+    is_deleted: false,
+    is_third_party: false,
+  }
+}
+
+function botEvent(
+  eventId: string,
+  overrides: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    event_id: eventId,
+    organizer_calendar_id: BOT_CALENDAR_ID,
+    summary: 'Bot event',
+    description: null,
+    start_time: { date: '2026-09-01', timezone: 'UTC' },
+    end_time: { date: '2026-09-02', timezone: 'UTC' },
+    recurrence: '',
+    status: 'confirmed',
+    is_exception: false,
+    app_link: `https://applink.feishu.cn/client/calendar/event/${eventId}`,
+    ...overrides,
+  }
+}
+
+interface BotRouteCase {
+  readonly name: string
+  readonly exchanges: readonly BotResourceExchange[]
+  readonly run: (
+    adapter: DshFeishuConnectionAdapter,
+    signal: AbortSignal,
+  ) => Promise<unknown>
+}
+
+describe('DshFeishuConnectionAdapter calendar federation', () => {
+  const botRouteCases: readonly BotRouteCase[] = [
+    {
+      name: 'discover calendars',
+      exchanges: [{
+        method: 'GET', path: CALENDAR_PATH, query: { page_size: '50' },
+        response: { code: 0, data: { calendar_list: [], has_more: false } },
+      }],
+      run: (adapter, signal) => adapter.listCalendars(botRoute(), signal),
+    },
+    {
+      name: 'get calendar',
+      exchanges: [{
+        method: 'GET', path: `${CALENDAR_PATH}/${BOT_CALENDAR_ID}`,
+        response: { code: 0, data: botCalendar() },
+      }],
+      run: (adapter, signal) => adapter.readCalendar(botRoute(), BOT_CALENDAR_ID, signal),
+    },
+    {
+      name: 'create calendar',
+      exchanges: [{
+        method: 'POST', path: CALENDAR_PATH,
+        body: { summary: 'Bot calendar', description: 'Created by the pinned Bot actor' },
+        response: { code: 0, data: { calendar: botCalendar('Created by the pinned Bot actor') } },
+      }],
+      run: (adapter, signal) => adapter.createCalendar(botRoute(), {
+        summary: 'Bot calendar', description: 'Created by the pinned Bot actor',
+      }, signal),
+    },
+    {
+      name: 'discover events',
+      exchanges: [{
+        method: 'GET', path: BOT_EVENT_PATH,
+        query: { user_id_type: 'open_id', page_size: '50' },
+        response: { code: 0, data: { items: [], has_more: false } },
+      }],
+      run: (adapter, signal) => adapter.listCalendarEvents(botRoute(), BOT_CALENDAR_ID, signal),
+    },
+    {
+      name: 'get event',
+      exchanges: [{
+        method: 'GET', path: `${BOT_EVENT_PATH}/event-bot-read_0`,
+        query: { user_id_type: 'open_id' },
+        response: { code: 0, data: { event: botEvent('event-bot-read_0') } },
+      }],
+      run: (adapter, signal) => adapter.readCalendarEvent(
+        botRoute(), BOT_CALENDAR_ID, 'event-bot-read_0', signal,
+      ),
+    },
+    {
+      name: 'create event',
+      exchanges: [{
+        method: 'POST', path: BOT_EVENT_PATH,
+        query: { user_id_type: 'open_id', idempotency_key: EVENT_IDEMPOTENCY_KEY },
+        body: {
+          summary: 'Bot event',
+          start_time: { date: '2026-09-01', timezone: 'UTC' },
+          end_time: { date: '2026-09-02', timezone: 'UTC' },
+        },
+        response: { code: 0, data: { event: botEvent('event-bot-created_0') } },
+      }],
+      run: (adapter, signal) => adapter.createCalendarEvent(botRoute(), {
+        calendarId: BOT_CALENDAR_ID,
+        idempotencyKey: EVENT_IDEMPOTENCY_KEY,
+        summary: 'Bot event',
+        description: null,
+        schedule: { kind: 'all-day', startDate: '2026-09-01', endDate: '2026-09-02' },
+      }, signal),
+    },
+    {
+      name: 'GET-before-PATCH event schedule',
+      exchanges: [
+        {
+          method: 'GET', path: `${BOT_EVENT_PATH}/event-timed_0`,
+          query: { user_id_type: 'open_id' },
+          response: { code: 0, data: { event: botEvent('event-timed_0', {
+            summary: 'Timed launch',
+            description: 'Provider-owned date',
+            start_time: { timestamp: '1788228000', timezone: 'Asia/Shanghai' },
+            end_time: { timestamp: '1788233400', timezone: 'Asia/Shanghai' },
+            app_link: 'https://applink.feishu.cn/client/calendar/event/timed',
+          }) } },
+        },
+        {
+          method: 'PATCH', path: `${BOT_EVENT_PATH}/event-timed_0`,
+          query: { user_id_type: 'open_id' },
+          body: {
+            start_time: { date: '2026-09-05', timezone: 'UTC' },
+            end_time: { date: '2026-09-06', timezone: 'UTC' },
+          },
+          response: { code: 0, data: { event: botEvent('event-timed_0', {
+            start_time: { date: '2026-09-05', timezone: 'UTC' },
+            end_time: { date: '2026-09-06', timezone: 'UTC' },
+          }) } },
+        },
+      ],
+      run: (adapter, signal) => adapter.updateCalendarEventSchedule(botRoute(), {
+        calendarId: BOT_CALENDAR_ID,
+        eventId: 'event-timed_0',
+        expectedRemoteObservationVersion: 'sha256:cc32673b1d0671974204bef1c34608d5619f054f8f111816fdcd263f36094b1f',
+        schedule: { kind: 'all-day', startDate: '2026-09-05', endDate: '2026-09-06' },
+      }, signal),
+    },
+  ]
+
+  it.each(botRouteCases)('$name uses only the pinned tenant Bot route', async ({ exchanges, run }) => {
+    const store = credentials()
+    store.values.set('FEISHU_CALENDAR_BOT_SECRET', { value: BOT_SECRET, source: 'file' })
+    const request = botFetch(exchanges)
+    const adapter = new DshFeishuConnectionAdapter(store.provider, {
+      fetch: request.fetch,
+      now: () => FIXED_NOW,
+    })
+
+    await expect(run(adapter, new AbortController().signal)).resolves.toMatchObject({ state: 'ok' })
     expect(store.refs).toEqual(['FEISHU_CALENDAR_BOT_SECRET'])
-    expect(paths).toEqual([
+    expect(request.resourceRequests).toBe(exchanges.length)
+    expect(request.paths.slice(0, 2)).toEqual([
       '/open-apis/auth/v3/tenant_access_token/internal',
       '/open-apis/bot/v3/info',
-      '/open-apis/calendar/v4/calendars',
     ])
-    expect(paths).not.toContain('/open-apis/authen/v1/user_info')
+    expect(request.paths).not.toContain('/open-apis/authen/v1/user_info')
   })
 
   it('paginates Calendar v4 discovery through the one explicitly selected user route', async () => {
