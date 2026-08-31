@@ -675,8 +675,8 @@ function AcceptanceReviewCard({
           <h4>{t('review.acceptance.frozen')}</h4>
           <dl className={css.cardMeta}>
             <div><dt>Plan Snapshot</dt><dd><code>{request.plan.planSnapshotId}</code></dd></div>
-            <div><dt>Accountable</dt><dd>{request.plan.responsibility.accountable.displayName}</dd></div>
-            <div><dt>Acceptor</dt><dd>{request.plan.responsibility.acceptor.displayName}</dd></div>
+            <div><dt>{t('deliverables.role.accountable')}</dt><dd>{request.plan.responsibility.accountable.displayName}</dd></div>
+            <div><dt>{t('deliverables.role.acceptor')}</dt><dd>{request.plan.responsibility.acceptor.displayName}</dd></div>
             <div><dt>Event observation</dt><dd><code>{request.calendar.remoteObservationVersion}</code></dd></div>
           </dl>
           <h5>{t('review.acceptance.candidates')}</h5>

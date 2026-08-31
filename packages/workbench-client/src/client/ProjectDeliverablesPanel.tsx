@@ -220,7 +220,7 @@ export function ProjectDeliverablesPanel({
                         <legend>{t('deliverables.create.responsibility')}</legend>
                         <div className={css.twoColumn}>
                           <label className={css.field}>
-                            <span>Accountable</span>
+                            <span>{t('deliverables.role.accountable')}</span>
                             <select
                               value={draft.accountableMemberId}
                               required
@@ -241,7 +241,7 @@ export function ProjectDeliverablesPanel({
                             </select>
                           </label>
                           <label className={css.field}>
-                            <span>Acceptor</span>
+                            <span>{t('deliverables.role.acceptor')}</span>
                             <select
                               value={draft.acceptorMemberId}
                               required
@@ -571,8 +571,8 @@ function DeliverableCard({
       <dl className={css.meta}>
         <div><dt>{t('deliverables.plan.snapshot')}</dt><dd><code>{item.plan.planSnapshotId}</code></dd></div>
         <div><dt>{t('deliverables.plan.revision')}</dt><dd>{item.revision}</dd></div>
-        <div><dt>Accountable</dt><dd>{item.plan.responsibility.accountable.displayName}</dd></div>
-        <div><dt>Acceptor</dt><dd>{item.plan.responsibility.acceptor.displayName}</dd></div>
+        <div><dt>{t('deliverables.role.accountable')}</dt><dd>{item.plan.responsibility.accountable.displayName}</dd></div>
+        <div><dt>{t('deliverables.role.acceptor')}</dt><dd>{item.plan.responsibility.acceptor.displayName}</dd></div>
       </dl>
       <section className={css.cardSection}>
         <h5>{t('deliverables.plan.criteria')}</h5>
