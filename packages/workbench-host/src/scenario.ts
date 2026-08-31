@@ -1001,8 +1001,7 @@ export class WorkbenchScenario {
           return this.options.repository.settleFeishuTaskWorkflowOperation(
             operationId as string,
             Object.freeze({
-              state: 'failed',
-              issue: workflowFieldConflictIssue(),
+              state: 'conflict',
               settledAt: commandInstant(this.options.clock),
             }),
             new AbortController().signal,
@@ -4073,16 +4072,6 @@ function unknownTaskUpdateResult(
 }
 
 function ambiguousTaskTransportIssue(): FeishuConnectionIssue {
-  return Object.freeze({
-    code: 'unknown-provider-error',
-    recovery: 'inspect-provider',
-    missingScopes: Object.freeze([]),
-    grantPlane: null,
-    retryAt: null,
-  })
-}
-
-function workflowFieldConflictIssue(): FeishuConnectionIssue {
   return Object.freeze({
     code: 'unknown-provider-error',
     recovery: 'inspect-provider',

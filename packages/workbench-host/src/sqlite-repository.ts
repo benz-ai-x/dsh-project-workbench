@@ -2786,19 +2786,27 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
 
   async settleFeishuTaskWorkflowOperation(
     operationId: string,
-    settlement: Readonly<{
-      readonly state: 'unknown' | 'failed'
-      readonly issue: FeishuConnectionIssue
-      readonly settledAt: string
-    }>,
+    settlement:
+      | Readonly<{
+        readonly state: 'unknown' | 'failed'
+        readonly issue: FeishuConnectionIssue
+        readonly settledAt: string
+      }>
+      | Readonly<{
+        readonly state: 'conflict'
+        readonly settledAt: string
+      }>,
     signal: AbortSignal,
   ): Promise<ConfigureFeishuTaskWorkflowResult> {
     throwIfAborted(signal)
     validateBoundedReference(operationId, 'Feishu workflow operation id')
-    if (settlement.state !== 'unknown' && settlement.state !== 'failed') {
+    if (settlement.state !== 'unknown' && settlement.state !== 'failed'
+      && settlement.state !== 'conflict') {
       throw new TypeError('Feishu workflow operation settlement is unsupported')
     }
-    safeFeishuIssue(settlement.issue, 'Feishu workflow operation issue')
+    if (settlement.state !== 'conflict') {
+      safeFeishuIssue(settlement.issue, 'Feishu workflow operation issue')
+    }
     canonicalInstant(settlement.settledAt, 'Feishu workflow operation settledAt')
     const database = this.requireDatabase()
     let began = false
@@ -2807,7 +2815,8 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       began = true
       const operation = readTaskWorkflowOperation(database, operationId)
       if (operation === null) throw new Error('Workbench workflow operation was not found')
-      if (operation.state === 'unknown' || operation.state === 'failed') {
+      if (operation.state === 'unknown' || operation.state === 'failed'
+        || operation.state === 'conflict') {
         const replay = taskWorkflowOperationResult(operation)
         database.exec('COMMIT')
         began = false
@@ -2822,7 +2831,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         WHERE id = ? AND state = 'inflight' AND attempt_count = 1
       `).run(
         settlement.state,
-        canonicalizeJson(settlement.issue),
+        settlement.state === 'conflict' ? null : canonicalizeJson(settlement.issue),
         settlement.settledAt,
         operationId,
       )
@@ -6536,7 +6545,7 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
         request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
         idempotency_key_hash TEXT NOT NULL CHECK (length(idempotency_key_hash) = 64),
         state TEXT NOT NULL
-          CHECK (state IN ('prepared', 'inflight', 'delivered', 'unknown', 'failed')),
+          CHECK (state IN ('prepared', 'inflight', 'delivered', 'unknown', 'failed', 'conflict')),
         issue_json TEXT,
         attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 1),
         command_id TEXT NOT NULL UNIQUE CHECK (length(command_id) BETWEEN 1 AND 256),
@@ -14714,7 +14723,7 @@ function validateStoredTaskWorkflowOperation(row: FeishuTaskWorkflowOperationRow
     throw new Error('Stored workflow operation contains an invalid digest')
   }
   if (row.state !== 'prepared' && row.state !== 'inflight' && row.state !== 'delivered'
-    && row.state !== 'unknown' && row.state !== 'failed') {
+    && row.state !== 'unknown' && row.state !== 'failed' && row.state !== 'conflict') {
     throw new Error('Stored workflow operation state is invalid')
   }
   if (!Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0 || row.attempt_count > 1
@@ -14782,6 +14791,9 @@ function taskWorkflowOperationResult(
   operation: FeishuTaskWorkflowOperationRow,
 ): ConfigureFeishuTaskWorkflowResult {
   validateStoredTaskWorkflowOperation(operation)
+  if (operation.state === 'conflict') {
+    return workflowFieldVersionChangedResult()
+  }
   if (operation.state !== 'unknown' && operation.state !== 'failed') {
     throw new Error('Workbench workflow operation has no replayable terminal failure')
   }
@@ -14796,6 +14808,27 @@ function taskWorkflowOperationResult(
         ? 'Feishu workflow-field write outcome is unknown; inspect and map the resulting field'
         : 'Feishu rejected the workflow-field write',
       issue: cloneFeishuIssue(issue),
+    }),
+  })
+}
+
+function workflowFieldVersionChangedResult(): ConfigureFeishuTaskWorkflowResult {
+  const message = 'Feishu workflow field changed after the migration preflight'
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'workflow-compatibility-blocked',
+      message,
+      compatibility: Object.freeze({
+        state: 'blocked',
+        issues: Object.freeze([Object.freeze({
+          code: 'field-version-changed',
+          severity: 'blocked',
+          stateId: null,
+          taskGuid: null,
+          message,
+        })]),
+      }),
     }),
   })
 }

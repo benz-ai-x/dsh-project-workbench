@@ -499,11 +499,14 @@ function configureExisting(scenario: WorkbenchScenario) {
 
 function dropV8WorkflowSchema(database: DatabaseSync): void {
   database.exec(`
+    DROP TRIGGER workbench_feishu_task_workflow_operation_no_delete;
+    DROP TRIGGER workbench_feishu_task_workflow_operation_intent_no_update;
     DROP TRIGGER workbench_feishu_task_workflow_version_no_delete;
     DROP TRIGGER workbench_feishu_task_workflow_version_no_update;
     DROP TRIGGER workbench_feishu_task_workflow_no_delete;
     DROP TRIGGER workbench_feishu_task_workflow_scope_no_update;
     DROP TABLE workbench_feishu_task_custom_value;
+    DROP TABLE workbench_feishu_task_workflow_operation;
     DROP TABLE workbench_feishu_task_workflow_version;
     DROP TABLE workbench_feishu_task_workflow;
     PRAGMA user_version = 7;
@@ -567,6 +570,7 @@ describe('T09 workflow reliability', () => {
       ORDER BY name
     `).all()).toEqual([
       { name: 'workbench_feishu_task_workflow' },
+      { name: 'workbench_feishu_task_workflow_operation' },
       { name: 'workbench_feishu_task_workflow_version' },
     ])
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({

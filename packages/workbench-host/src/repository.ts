@@ -677,11 +677,16 @@ export interface WorkbenchRepository {
   ): Promise<boolean>
   settleFeishuTaskWorkflowOperation(
     operationId: string,
-    settlement: Readonly<{
-      readonly state: 'unknown' | 'failed'
-      readonly issue: FeishuConnectionIssue
-      readonly settledAt: string
-    }>,
+    settlement:
+      | Readonly<{
+        readonly state: 'unknown' | 'failed'
+        readonly issue: FeishuConnectionIssue
+        readonly settledAt: string
+      }>
+      | Readonly<{
+        readonly state: 'conflict'
+        readonly settledAt: string
+      }>,
     signal: AbortSignal,
   ): Promise<ConfigureFeishuTaskWorkflowResult>
   /** Atomically install a stable field/option mapping and its immutable version. */
