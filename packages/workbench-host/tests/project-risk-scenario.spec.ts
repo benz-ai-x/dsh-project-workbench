@@ -141,9 +141,15 @@ describe('Project Risk Scenario with real SQLite', () => {
     expect((await repository.commitProject(projectMutation(), signal)).ok).toBe(true)
     expect((await repository.commitProjectMember(memberMutation(), signal)).ok).toBe(true)
     const actions: WorkbenchAction[] = []
+    let abortAfterFirstRiskAuthorization: AbortController | null = null
     const authorization: WorkbenchAuthorization = {
       require: async (action) => {
         actions.push(action)
+        if (action === 'workbench.project.risk.read'
+          && abortAfterFirstRiskAuthorization !== null) {
+          abortAfterFirstRiskAuthorization.abort()
+          abortAfterFirstRiskAuthorization = null
+        }
         return {
           ownerId: 'owner-risk-scenario',
           organizationId: 'organization-risk-scenario',
@@ -164,6 +170,29 @@ describe('Project Risk Scenario with real SQLite', () => {
     })
     await scenario.open()
     try {
+      const preAborted = new AbortController()
+      preAborted.abort()
+      const authorizationCountBeforeCancellation = actions.length
+      const preAbortedCalls: ReadonlyArray<() => Promise<unknown>> = [
+        () => scenario.projectRisks({ projectId: 'project-risk-scenario' }, preAborted.signal),
+        () => scenario.createProjectRisk({} as never, preAborted.signal),
+        () => scenario.reviseProjectRisk({} as never, preAborted.signal),
+        () => scenario.transitionProjectRisk({} as never, preAborted.signal),
+      ]
+      for (const call of preAbortedCalls) {
+        await expect(call()).rejects.toMatchObject({ failure: { code: 'cancelled' } })
+      }
+      expect(actions).toHaveLength(authorizationCountBeforeCancellation)
+
+      const cancelledBetweenCapabilities = new AbortController()
+      abortAfterFirstRiskAuthorization = cancelledBetweenCapabilities
+      const capabilityStart = actions.length
+      await expect(scenario.projectRisks(
+        { projectId: 'project-risk-scenario' },
+        cancelledBetweenCapabilities.signal,
+      )).rejects.toMatchObject({ failure: { code: 'cancelled' } })
+      expect(actions.slice(capabilityStart)).toEqual(['workbench.project.risk.read'])
+
       await expect(scenario.projectRisks({
         projectId: 'project-risk-scenario',
         disposition: 'accept',

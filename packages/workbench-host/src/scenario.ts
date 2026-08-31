@@ -1851,6 +1851,7 @@ export class WorkbenchScenario {
     return this.execute(async (lifetimeSignal) => {
       requireSignal(signal, 'createProjectRisk')
       const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
       const scope = await this.options.authorization.require(
         'workbench.project.risk.write',
         operationSignal,
@@ -1937,6 +1938,7 @@ export class WorkbenchScenario {
     return this.execute(async (lifetimeSignal) => {
       requireSignal(signal, 'reviseProjectRisk')
       const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
       const scope = await this.options.authorization.require(
         'workbench.project.risk.write',
         operationSignal,
@@ -2031,6 +2033,7 @@ export class WorkbenchScenario {
     return this.execute(async (lifetimeSignal) => {
       requireSignal(signal, 'transitionProjectRisk')
       const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      throwIfCancelled(operationSignal)
       const scope = await this.options.authorization.require(
         'workbench.project.risk.write',
         operationSignal,
@@ -5852,8 +5855,11 @@ async function requireIdenticalScopes(
   second: WorkbenchAction,
   signal: AbortSignal,
 ): Promise<AuthorizedScope> {
+  throwIfCancelled(signal)
   const left = await authorization.require(first, signal)
+  throwIfCancelled(signal)
   const right = await authorization.require(second, signal)
+  throwIfCancelled(signal)
   if (left.ownerId !== right.ownerId || left.organizationId !== right.organizationId
     || left.teamId !== right.teamId) {
     throw forbidden('Workbench authorization capabilities resolved to different scopes')
