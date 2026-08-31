@@ -1328,10 +1328,10 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
     [endDate, 'Deliverable end date'],
   ]) await assertVisibleKeyboardFocus(control, label)
 
-  const advanced = createForm.locator('details').filter({
-    has: createForm.getByLabel(/使用已有飞书事件|existing Feishu event/iu),
+  const advancedSummary = createForm.locator('summary').filter({
+    hasText: /更多事件选项|More event options/iu,
   })
-  const advancedSummary = advanced.locator('summary')
+  const advanced = advancedSummary.locator('..')
   await advancedSummary.waitFor({ state: 'visible' })
   assert.equal(await advanced.getAttribute('open'), null, 'advanced Deliverable schedule opened by default')
   await assertVisibleKeyboardFocus(advancedSummary, 'Deliverable schedule disclosure')
@@ -1401,8 +1401,8 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
     name: expected.criterion,
     exact: true,
   })
-  const met = criterionDecision.getByRole('radio', { name: /满足|Met/iu })
-  const notMet = criterionDecision.getByRole('radio', { name: /未满足|Not met/iu })
+  const met = criterionDecision.getByRole('radio', { name: /^(?:满足|Met)$/iu })
+  const notMet = criterionDecision.getByRole('radio', { name: /^(?:未满足|Not met)$/iu })
   const feedback = acceptanceCard.getByLabel(/反馈|Feedback/iu)
   await Promise.all([
     met.waitFor({ state: 'visible' }),
@@ -1410,7 +1410,14 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
     feedback.waitFor({ state: 'visible' }),
   ])
   await assertVisibleKeyboardFocus(met, 'Deliverable criterion met outcome')
-  await assertVisibleKeyboardFocus(notMet, 'Deliverable criterion not-met outcome')
+  await met.press('ArrowRight')
+  const notMetFocus = await notMet.evaluate(element => ({
+    active: document.activeElement === element,
+    focusVisible: element.matches(':focus-visible'),
+  }))
+  assert.equal(notMetFocus.active, true, 'ArrowRight did not reach the not-met radio option')
+  assert.equal(notMetFocus.focusVisible, true, 'not-met radio focus is not visibly represented')
+  await notMet.press('ArrowLeft')
   await assertVisibleKeyboardFocus(feedback, 'Deliverable acceptance feedback')
   await met.check()
   await feedback.fill(expected.feedback)
@@ -1436,7 +1443,7 @@ async function assertAcceptedDeliverableBrowserProjection(page, expected) {
     .waitFor({ state: 'visible' })
   const card = panel.getByRole('article', { name: expected.name, exact: true })
   await card.waitFor({ state: 'visible' })
-  await card.getByText(/已接受|Accepted/iu).first().waitFor({ state: 'visible' })
+  await card.getByText(/^(?:已验收|Accepted)$/iu).first().waitFor({ state: 'visible' })
   await card.getByText(/Final Release/iu).waitFor({ state: 'visible' })
   await card.getByText('声明版本（未验证）', { exact: true }).first().waitFor({ state: 'visible' })
   await card.getByText(expected.longToken, { exact: true }).first().waitFor({ state: 'visible' })
@@ -1453,20 +1460,20 @@ async function assertAcceptedDeliverableBrowserProjection(page, expected) {
   assert.equal(activityEntries.length, 3, 'Deliverable responsibility chain is incomplete')
   for (const [entry, expectedValues] of [
     [activityEntries[0], [
-      'acceptance-approved',
+      '验收已批准',
       'deliverable-plan-browser-1',
       'acceptance-request-browser-1',
       'acceptance-decision-browser-1',
       'audit-deliverable-3',
     ]],
     [activityEntries[1], [
-      'acceptance-requested',
+      '已申请验收',
       'deliverable-plan-browser-1',
       'acceptance-request-browser-1',
       'audit-deliverable-2',
     ]],
     [activityEntries[2], [
-      'deliverable-created',
+      '已创建 Deliverable',
       'deliverable-plan-browser-1',
       'audit-deliverable-1',
     ]],

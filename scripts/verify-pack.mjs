@@ -116,6 +116,7 @@ const packageSpecs = [
       'lib/types/client/activity-controller.d.ts',
       'lib/types/client/auth-http.d.ts',
       'lib/types/client/controller.d.ts',
+      'lib/types/client/deliverable-presentation.d.ts',
       'lib/types/client/feishu-connection-controller.d.ts',
       'lib/types/client/index.d.ts',
       'lib/types/client/locales.d.ts',

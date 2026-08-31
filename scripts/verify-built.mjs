@@ -1473,9 +1473,7 @@ function verifyTypertFace(face, packageName, label) {
   const deliverableProjection = arrayElementSchema(deliverablesProjectionShape?.deliverables)
   const deliverableProjectionShape = unwrapSchema(deliverableProjection)?.def?.shape
   const deliverablePlanShape = unwrapSchema(deliverableProjectionShape?.plan)?.def?.shape
-  const deliverableResponsibilityShape = unwrapSchema(
-    deliverablePlanShape?.responsibility,
-  )?.def?.shape
+  const deliverableResponsibility = deliverablePlanShape?.responsibility
   const acceptanceRound = arrayElementSchema(deliverableProjectionShape?.acceptanceRequests)
   const acceptanceRoundShape = unwrapSchema(acceptanceRound)?.def?.shape
   const projectedCandidate = arrayElementSchema(acceptanceRoundShape?.candidateVersions)
@@ -1507,7 +1505,7 @@ function verifyTypertFace(face, packageName, label) {
         'responsibility',
         'taskGuids',
       ])
-      && sameStrings(schemaObjectKeys(deliverableResponsibilityShape), [
+      && sameStrings(schemaObjectKeys(deliverableResponsibility), [
         'acceptor',
         'accountable',
         'contributors',
