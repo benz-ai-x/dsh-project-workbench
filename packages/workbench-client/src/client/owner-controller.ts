@@ -30,6 +30,10 @@ import {
   WorkbenchProjectTasksController,
   type WorkbenchProjectTasksRemote,
 } from './task-controller.ts'
+import {
+  WorkbenchProjectMilestonesController,
+  type WorkbenchProjectMilestonesRemote,
+} from './milestone-controller.ts'
 
 /** User-visible shell modes. */
 export type OwnerPhase =
@@ -63,6 +67,7 @@ export interface OwnerClientState {
   readonly review: WorkbenchReviewController | null
   readonly feishuConnection: WorkbenchFeishuConnectionController | null
   readonly projectTasks: WorkbenchProjectTasksController | null
+  readonly projectMilestones: WorkbenchProjectMilestonesController | null
   readonly activity: WorkbenchActivityController | null
   readonly recoveryCode: string | null
   readonly issue: OwnerIssue | null
@@ -77,6 +82,7 @@ const INITIAL_STATE: OwnerClientState = Object.freeze({
   review: null,
   feishuConnection: null,
   projectTasks: null,
+  projectMilestones: null,
   activity: null,
   recoveryCode: null,
   issue: null,
@@ -105,6 +111,7 @@ export class OwnerController {
   private review: WorkbenchReviewController | null = null
   private feishuConnection: WorkbenchFeishuConnectionController | null = null
   private projectTasks: WorkbenchProjectTasksController | null = null
+  private projectMilestones: WorkbenchProjectMilestonesController | null = null
   private activity: WorkbenchActivityController | null = null
   private projectSelectionOff: (() => void) | null = null
   private authEpoch = 0
@@ -116,7 +123,8 @@ export class OwnerController {
   constructor(
     private readonly auth: OwnerAuthHttp,
     private readonly remote: WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
-      & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote & WorkbenchProjectTasksRemote,
+      & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote & WorkbenchProjectTasksRemote
+      & WorkbenchProjectMilestonesRemote,
     private readonly options: OwnerControllerOptions = {},
   ) {}
 
@@ -142,6 +150,7 @@ export class OwnerController {
     this.review?.markDisconnected()
     this.feishuConnection?.markDisconnected()
     this.projectTasks?.markDisconnected()
+    this.projectMilestones?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -192,6 +201,7 @@ export class OwnerController {
     this.review?.markDisconnected()
     this.feishuConnection?.markDisconnected()
     this.projectTasks?.markDisconnected()
+    this.projectMilestones?.markDisconnected()
     this.activity?.markDisconnected()
 
     const unavailable = ownerIssue(connectionFallbackOperation(this.state.phase), 'unavailable')
@@ -215,6 +225,7 @@ export class OwnerController {
     this.review?.markDisconnected()
     this.feishuConnection?.markDisconnected()
     this.projectTasks?.markDisconnected()
+    this.projectMilestones?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -233,6 +244,7 @@ export class OwnerController {
     const currentReview = this.review
     const currentFeishuConnection = this.feishuConnection
     const currentProjectTasks = this.projectTasks
+    const currentProjectMilestones = this.projectMilestones
     const currentActivity = this.activity
     this.projectSelectionOff?.()
     this.projectSelectionOff = null
@@ -242,6 +254,7 @@ export class OwnerController {
     this.review = null
     this.feishuConnection = null
     this.projectTasks = null
+    this.projectMilestones = null
     this.activity = null
     const statusDisposal = currentStatus?.dispose()
     const projectDisposal = currentProjects?.dispose()
@@ -249,6 +262,7 @@ export class OwnerController {
     const reviewDisposal = currentReview?.dispose()
     const feishuConnectionDisposal = currentFeishuConnection?.dispose()
     const projectTasksDisposal = currentProjectTasks?.dispose()
+    const projectMilestonesDisposal = currentProjectMilestones?.dispose()
     const activityDisposal = currentActivity?.dispose()
     this.state = INITIAL_STATE
     this.listeners.clear()
@@ -259,6 +273,7 @@ export class OwnerController {
     if (reviewDisposal !== undefined) pending.push(reviewDisposal)
     if (feishuConnectionDisposal !== undefined) pending.push(feishuConnectionDisposal)
     if (projectTasksDisposal !== undefined) pending.push(projectTasksDisposal)
+    if (projectMilestonesDisposal !== undefined) pending.push(projectMilestonesDisposal)
     if (activityDisposal !== undefined) pending.push(activityDisposal)
     this.disposal = Promise.allSettled(pending).then(() => undefined)
     return this.disposal
@@ -314,6 +329,7 @@ export class OwnerController {
             review: null,
             feishuConnection: null,
             projectTasks: null,
+            projectMilestones: null,
             activity: null,
             recoveryCode: null,
             issue,
@@ -333,6 +349,7 @@ export class OwnerController {
         review: null,
         feishuConnection: null,
         projectTasks: null,
+        projectMilestones: null,
         activity: null,
         recoveryCode: result.value.recoveryCode,
         issue: null,
@@ -388,6 +405,7 @@ export class OwnerController {
     this.review?.markDisconnected()
     this.feishuConnection?.markDisconnected()
     this.projectTasks?.markDisconnected()
+    this.projectMilestones?.markDisconnected()
     this.activity?.markDisconnected()
     this.publish({ ...this.state, phase: 'logout-pending', issue: null })
     try {
@@ -415,6 +433,7 @@ export class OwnerController {
         review: null,
         feishuConnection: null,
         projectTasks: null,
+        projectMilestones: null,
         activity: null,
         recoveryCode: null,
         issue: null,
@@ -462,6 +481,7 @@ export class OwnerController {
           review: null,
           feishuConnection: null,
           projectTasks: null,
+          projectMilestones: null,
           activity: null,
           recoveryCode: this.state.recoveryCode,
           issue: null,
@@ -484,6 +504,7 @@ export class OwnerController {
       review: null,
       feishuConnection: null,
       projectTasks: null,
+      projectMilestones: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -500,6 +521,7 @@ export class OwnerController {
     const existingAccess = this.state.access
     if ((this.status !== null || this.projects !== null || this.projectTeam !== null
       || this.review !== null || this.feishuConnection !== null || this.projectTasks !== null
+      || this.projectMilestones !== null
       || this.activity !== null)
       && existingAccess?.state === 'signed-in'
       && existingAccess.ownerId !== access.ownerId) {
@@ -508,13 +530,15 @@ export class OwnerController {
     }
     const created = this.status === null || this.projects === null
       || this.projectTeam === null || this.review === null
-      || this.feishuConnection === null || this.projectTasks === null || this.activity === null
+      || this.feishuConnection === null || this.projectTasks === null
+      || this.projectMilestones === null || this.activity === null
     const status = this.status ?? this.createStatusController()
     const projects = this.projects ?? this.createProjectController()
     const projectTeam = this.projectTeam ?? this.createProjectTeamController()
     const review = this.review ?? this.createReviewController()
     const feishuConnection = this.feishuConnection ?? this.createFeishuConnectionController()
     const projectTasks = this.projectTasks ?? this.createProjectTasksController()
+    const projectMilestones = this.projectMilestones ?? this.createProjectMilestonesController()
     const activity = this.activity ?? this.createActivityController()
     this.status = status
     this.projects = projects
@@ -522,6 +546,7 @@ export class OwnerController {
     this.review = review
     this.feishuConnection = feishuConnection
     this.projectTasks = projectTasks
+    this.projectMilestones = projectMilestones
     this.activity = activity
     this.publish({
       phase: 'authenticated',
@@ -532,11 +557,12 @@ export class OwnerController {
       review,
       feishuConnection,
       projectTasks,
+      projectMilestones,
       activity,
       recoveryCode: null,
       issue: null,
     })
-    this.bindProjectSelection(projects, projectTeam, review, projectTasks)
+    this.bindProjectSelection(projects, projectTeam, review, projectTasks, projectMilestones)
     this.scheduleExpiry(access)
     if (created || refreshStatus) {
       await Promise.all([
@@ -546,6 +572,7 @@ export class OwnerController {
         created ? Promise.resolve() : review.connectionReset(),
         created ? feishuConnection.refresh() : feishuConnection.connectionReset(),
         created ? Promise.resolve() : projectTasks.connectionReset(),
+        created ? Promise.resolve() : projectMilestones.connectionReset(),
         activity.refresh(),
       ])
     }
@@ -612,11 +639,20 @@ export class OwnerController {
     })
   }
 
+  private createProjectMilestonesController(): WorkbenchProjectMilestonesController {
+    return new WorkbenchProjectMilestonesController(this.remote, {
+      onBeforeProtectedOperation: () => this.admitProtectedOperation(),
+      onTransportFailure: () => { this.revalidateAfterStatusFailure() },
+      onCommitted: () => { void this.activity?.refresh() },
+    })
+  }
+
   private bindProjectSelection(
     projects: WorkbenchProjectController,
     projectTeam: WorkbenchProjectTeamController,
     review: WorkbenchReviewController,
     projectTasks: WorkbenchProjectTasksController,
+    projectMilestones: WorkbenchProjectMilestonesController,
   ): void {
     this.projectSelectionOff?.()
     const sync = () => {
@@ -625,10 +661,12 @@ export class OwnerController {
         projectTeam.clearSelection()
         review.clearSelection()
         projectTasks.clearSelection()
+        projectMilestones.clearSelection()
       } else {
         void projectTeam.selectProject(detail.project.projectId, detail.project.name)
         void review.selectProject(detail.project.projectId, detail.project.name)
         void projectTasks.selectProject(detail.project.projectId, detail.project.name)
+        void projectMilestones.selectProject(detail.project.projectId, detail.project.name)
       }
     }
     this.projectSelectionOff = projects.subscribe(sync)
@@ -652,6 +690,7 @@ export class OwnerController {
     const currentReview = this.review
     const currentFeishuConnection = this.feishuConnection
     const currentProjectTasks = this.projectTasks
+    const currentProjectMilestones = this.projectMilestones
     const currentActivity = this.activity
     this.projectSelectionOff?.()
     this.projectSelectionOff = null
@@ -661,6 +700,7 @@ export class OwnerController {
     this.review = null
     this.feishuConnection = null
     this.projectTasks = null
+    this.projectMilestones = null
     this.activity = null
     return Promise.allSettled([
       currentStatus?.dispose() ?? Promise.resolve(),
@@ -669,6 +709,7 @@ export class OwnerController {
       currentReview?.dispose() ?? Promise.resolve(),
       currentFeishuConnection?.dispose() ?? Promise.resolve(),
       currentProjectTasks?.dispose() ?? Promise.resolve(),
+      currentProjectMilestones?.dispose() ?? Promise.resolve(),
       currentActivity?.dispose() ?? Promise.resolve(),
     ]).then(() => undefined)
   }
@@ -738,6 +779,7 @@ export class OwnerController {
       review: null,
       feishuConnection: null,
       projectTasks: null,
+      projectMilestones: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -760,6 +802,7 @@ export class OwnerController {
       && this.review !== null
       && this.feishuConnection !== null
       && this.projectTasks !== null
+      && this.projectMilestones !== null
       && this.activity !== null) {
       this.publish({
         ...this.state,
@@ -770,6 +813,7 @@ export class OwnerController {
         review: this.review,
         feishuConnection: this.feishuConnection,
         projectTasks: this.projectTasks,
+        projectMilestones: this.projectMilestones,
         activity: this.activity,
         issue,
       })

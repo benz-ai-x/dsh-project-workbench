@@ -14,6 +14,7 @@ import type { WorkbenchProjectTeamRemote } from './project-team-controller.ts'
 import type { WorkbenchReviewRemote } from './review-controller.ts'
 import type { WorkbenchFeishuConnectionRemote } from './feishu-connection-controller.ts'
 import type { WorkbenchProjectTasksRemote } from './task-controller.ts'
+import type { WorkbenchProjectMilestonesRemote } from './milestone-controller.ts'
 import { OwnerController } from './owner-controller.ts'
 import { OwnerPage } from './OwnerPage.tsx'
 import { en, NS, zh, type WorkbenchKey } from './locales.ts'
@@ -43,6 +44,7 @@ export function registerWorkbenchUi(
     & WorkbenchReviewRemote
     & WorkbenchFeishuConnectionRemote
     & WorkbenchProjectTasksRemote
+    & WorkbenchProjectMilestonesRemote
   const connection = ctx.get('connection') as ConnectionHandle
   const controller = new OwnerController(auth, workbench)
 

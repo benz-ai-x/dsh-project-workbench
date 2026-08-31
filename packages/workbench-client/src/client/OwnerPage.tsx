@@ -19,6 +19,7 @@ import {
   type FeishuConnectionPanelCopy,
 } from './FeishuConnectionPanel.tsx'
 import { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
+import { ProjectMilestonesPanel } from './ProjectMilestonesPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -233,6 +234,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.review !== null
     && state.feishuConnection !== null
     && state.projectTasks !== null
+    && state.projectMilestones !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -276,6 +278,11 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
           />
           <ProjectTasksPanel
             controller={state.projectTasks}
+            connectionController={state.feishuConnection}
+            t={t}
+          />
+          <ProjectMilestonesPanel
+            controller={state.projectMilestones}
             connectionController={state.feishuConnection}
             t={t}
           />
@@ -386,6 +393,8 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectFeishuTaskListBinding: t('activity.object.feishuTaskListBinding'),
     objectFeishuTask: t('activity.object.feishuTask'),
     objectFeishuTaskWorkflow: t('activity.object.feishuTaskWorkflow'),
+    objectProjectCalendarBinding: t('activity.object.projectCalendarBinding'),
+    objectProjectMilestone: t('activity.object.projectMilestone'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
@@ -407,6 +416,11 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     actionFeishuTaskReferenced: t('activity.action.feishuTaskReferenced'),
     actionFeishuTaskUpdateRequested: t('activity.action.feishuTaskUpdateRequested'),
     actionFeishuTaskWorkflowConfigured: t('activity.action.feishuTaskWorkflowConfigured'),
+    actionProjectCalendarBound: t('activity.action.projectCalendarBound'),
+    actionProjectMilestoneCreated: t('activity.action.projectMilestoneCreated'),
+    actionProjectMilestoneDateUpdateRequested: t(
+      'activity.action.projectMilestoneDateUpdateRequested',
+    ),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
     stale: t('activity.stale'),
@@ -446,6 +460,11 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     summaryFeishuTaskReferenced: t('activity.summary.feishuTaskReferenced'),
     summaryFeishuTaskUpdateRequested: t('activity.summary.feishuTaskUpdateRequested'),
     summaryFeishuTaskWorkflowConfigured: t('activity.summary.feishuTaskWorkflowConfigured'),
+    summaryProjectCalendarBound: t('activity.summary.projectCalendarBound'),
+    summaryProjectMilestoneCreated: t('activity.summary.projectMilestoneCreated'),
+    summaryProjectMilestoneDateUpdateRequested: t(
+      'activity.summary.projectMilestoneDateUpdateRequested',
+    ),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -470,6 +489,11 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonOwnerFeishuTaskReference: t('activity.reason.ownerFeishuTaskReference'),
     reasonOwnerFeishuTaskUpdate: t('activity.reason.ownerFeishuTaskUpdate'),
     reasonOwnerFeishuTaskWorkflowConfigure: t('activity.reason.ownerFeishuTaskWorkflowConfigure'),
+    reasonOwnerProjectCalendarBind: t('activity.reason.ownerProjectCalendarBind'),
+    reasonOwnerProjectMilestoneCreate: t('activity.reason.ownerProjectMilestoneCreate'),
+    reasonOwnerProjectMilestoneDateUpdate: t(
+      'activity.reason.ownerProjectMilestoneDateUpdate',
+    ),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),
     attemptsPrefix: t('activity.prefix.attempts'),

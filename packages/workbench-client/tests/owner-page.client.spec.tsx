@@ -7,6 +7,7 @@ import type {
   OwnerAccessProjection,
   OwnerAuthResponse,
   ProjectStartProjection,
+  ProjectMilestonesProjection,
   ProjectTasksProjection,
   WorkbenchActivityProjection,
   WorkbenchStatusSnapshot,
@@ -19,6 +20,7 @@ import type { WorkbenchRemote } from '../src/client/controller.ts'
 import type { WorkbenchProjectRemote } from '../src/client/project-controller.ts'
 import type { WorkbenchFeishuConnectionRemote } from '../src/client/feishu-connection-controller.ts'
 import type { WorkbenchProjectTasksRemote } from '../src/client/task-controller.ts'
+import type { WorkbenchProjectMilestonesRemote } from '../src/client/milestone-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 import { OwnerPage } from '../src/client/OwnerPage.tsx'
 import { zh, type WorkbenchKey } from '../src/client/locales.ts'
@@ -91,6 +93,20 @@ function unboundProjectTasks(projectId: string): ProjectTasksProjection {
   }
 }
 
+function unboundProjectMilestones(projectId: string): ProjectMilestonesProjection {
+  return {
+    projectId,
+    revision: 0,
+    binding: null,
+    milestones: [],
+    sync: {
+      state: 'unbound', lastEventAt: null, lastReconciledAt: null, lastAttemptAt: null, issue: null,
+    },
+    effects: [],
+    recentChanges: [],
+  }
+}
+
 function unconfiguredFeishuCenter(): FeishuConnectionCenterProjection {
   const route = (kind: 'bot' | 'user') => ({
     kind,
@@ -153,7 +169,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
 }
 
 type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchFeishuConnectionRemote
-  & WorkbenchProjectTasksRemote
+  & WorkbenchProjectTasksRemote & WorkbenchProjectMilestonesRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -235,6 +251,42 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       ?? vi.fn(() => Promise.resolve(remoteOk({
         ok: false as const,
         error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    getProjectMilestones: overrides.getProjectMilestones
+      ?? vi.fn(query => Promise.resolve(remoteOk(unboundProjectMilestones(query.projectId)))),
+    discoverFeishuCalendars: overrides.discoverFeishuCalendars
+      ?? vi.fn(request => Promise.resolve(remoteOk({
+        projectId: request.projectId,
+        connectionRevision: request.expectedConnectionRevision,
+        kind: request.kind,
+        routeGeneration: request.expectedRouteGeneration,
+        items: [],
+      }))),
+    bindProjectCalendar: overrides.bindProjectCalendar ?? vi.fn(() => Promise.resolve(remoteOk({
+      ok: false as const,
+      error: { code: 'idempotency-conflict' as const, message: 'unused' },
+    }))),
+    discoverFeishuCalendarEvents: overrides.discoverFeishuCalendarEvents
+      ?? vi.fn(request => Promise.resolve(remoteOk({
+        projectId: request.projectId,
+        revision: request.expectedRevision,
+        calendarId: 'calendar-unused',
+        items: [],
+      }))),
+    createProjectMilestone: overrides.createProjectMilestone
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    updateProjectMilestoneDate: overrides.updateProjectMilestoneDate
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    reconcileProjectCalendar: overrides.reconcileProjectCalendar
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'calendar-unbound' as const, message: 'unused' },
       }))),
   }
 }
@@ -353,6 +405,8 @@ describe('OwnerPage', () => {
     expect(screen.getByRole('heading', { name: 'Bot 身份路由' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'User 身份路由' })).toBeTruthy()
     expect(screen.getAllByText('未配置')).toHaveLength(2)
+    expect(screen.getByRole('heading', { name: 'Project Milestones' })).toBeTruthy()
+    expect(screen.getByText('先打开一个 Project，再配置或阅读它的里程碑。')).toBeTruthy()
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     expect(screen.getByText('审计链验证通过')).toBeTruthy()
     expect(screen.queryByText(recoveryCode)).toBeNull()
@@ -400,6 +454,7 @@ describe('OwnerPage', () => {
     expect(screen.getByRole('heading', { name: 'Review Center' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '飞书 Bot / User 连接中心' })).toBeTruthy()
     expect(screen.getAllByText('未配置')).toHaveLength(2)
+    expect(screen.getByRole('heading', { name: 'Project Milestones' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '活动记录' })).toBeTruthy()
     fireEvent.change(screen.getByRole('textbox', { name: '项目状态' }), {
       target: { value: '退出后必须清除的草稿' },
@@ -417,6 +472,7 @@ describe('OwnerPage', () => {
     expect(screen.queryByRole('heading', { name: 'Project Team' })).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Review Center' })).toBeNull()
     expect(screen.queryByRole('heading', { name: '飞书 Bot / User 连接中心' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Project Milestones' })).toBeNull()
     expect(screen.queryByRole('heading', { name: '活动记录' })).toBeNull()
     expect(statusController?.getSnapshot()).toMatchObject({ snapshot: null, draft: '' })
     expect(activityController?.getSnapshot()).toMatchObject({

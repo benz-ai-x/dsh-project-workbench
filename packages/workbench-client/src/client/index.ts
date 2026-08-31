@@ -96,6 +96,29 @@ export type {
   WorkbenchProjectTasksTransportCode,
   WorkbenchProjectTasksTransportIssue,
 } from './task-controller.ts'
+export {
+  INITIAL_WORKBENCH_PROJECT_MILESTONES_STATE,
+  MAX_PROJECT_CALENDAR_DESCRIPTION_LENGTH,
+  MAX_PROJECT_CALENDAR_SUMMARY_LENGTH,
+  MAX_PROJECT_MILESTONE_DESCRIPTION_LENGTH,
+  MAX_PROJECT_MILESTONE_NAME_LENGTH,
+  validProjectCalendarSchedule,
+  WorkbenchProjectMilestonesController,
+} from './milestone-controller.ts'
+export type {
+  WorkbenchProjectMilestonesClientState,
+  WorkbenchProjectMilestonesConflictCode,
+  WorkbenchProjectMilestonesConflictIssue,
+  WorkbenchProjectMilestonesControllerOptions,
+  WorkbenchProjectMilestonesInputIssue,
+  WorkbenchProjectMilestonesIssue,
+  WorkbenchProjectMilestonesOperation,
+  WorkbenchProjectMilestonesPhase,
+  WorkbenchProjectMilestonesRemote,
+  WorkbenchProjectMilestonesSelection,
+  WorkbenchProjectMilestonesTransportCode,
+  WorkbenchProjectMilestonesTransportIssue,
+} from './milestone-controller.ts'
 export type {
   WorkbenchReviewClientState,
   WorkbenchReviewConflictCode,
@@ -182,6 +205,8 @@ export type {
 } from './FeishuConnectionPanel.tsx'
 export { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
 export type { ProjectTasksPanelProps } from './ProjectTasksPanel.tsx'
+export { ProjectMilestonesPanel } from './ProjectMilestonesPanel.tsx'
+export type { ProjectMilestonesPanelProps } from './ProjectMilestonesPanel.tsx'
 export { ProjectTaskWorkflowPanel } from './ProjectTaskWorkflowPanel.tsx'
 export type { ProjectTaskWorkflowPanelProps } from './ProjectTaskWorkflowPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'

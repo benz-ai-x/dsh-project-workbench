@@ -35,6 +35,8 @@ export interface ActivityPanelCopy {
   readonly objectFeishuTaskListBinding: string
   readonly objectFeishuTask: string
   readonly objectFeishuTaskWorkflow: string
+  readonly objectProjectCalendarBinding: string
+  readonly objectProjectMilestone: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -56,6 +58,9 @@ export interface ActivityPanelCopy {
   readonly actionFeishuTaskReferenced: string
   readonly actionFeishuTaskUpdateRequested: string
   readonly actionFeishuTaskWorkflowConfigured: string
+  readonly actionProjectCalendarBound: string
+  readonly actionProjectMilestoneCreated: string
+  readonly actionProjectMilestoneDateUpdateRequested: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -95,6 +100,9 @@ export interface ActivityPanelCopy {
   readonly summaryFeishuTaskReferenced: string
   readonly summaryFeishuTaskUpdateRequested: string
   readonly summaryFeishuTaskWorkflowConfigured: string
+  readonly summaryProjectCalendarBound: string
+  readonly summaryProjectMilestoneCreated: string
+  readonly summaryProjectMilestoneDateUpdateRequested: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -119,6 +127,9 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerFeishuTaskReference: string
   readonly reasonOwnerFeishuTaskUpdate: string
   readonly reasonOwnerFeishuTaskWorkflowConfigure: string
+  readonly reasonOwnerProjectCalendarBind: string
+  readonly reasonOwnerProjectMilestoneCreate: string
+  readonly reasonOwnerProjectMilestoneDateUpdate: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -149,6 +160,8 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectFeishuTaskListBinding: 'Feishu task-list binding',
   objectFeishuTask: 'Feishu task',
   objectFeishuTaskWorkflow: 'Feishu task workflow',
+  objectProjectCalendarBinding: 'Project calendar binding',
+  objectProjectMilestone: 'Project Milestone',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -170,6 +183,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionFeishuTaskReferenced: 'Feishu task referenced',
   actionFeishuTaskUpdateRequested: 'Feishu task update requested',
   actionFeishuTaskWorkflowConfigured: 'Feishu task workflow configured',
+  actionProjectCalendarBound: 'Project calendar bound',
+  actionProjectMilestoneCreated: 'Project Milestone created',
+  actionProjectMilestoneDateUpdateRequested: 'Project Milestone date update requested',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -209,6 +225,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summaryFeishuTaskReferenced: 'Outside-list Feishu task referenced',
   summaryFeishuTaskUpdateRequested: 'Feishu task update requested',
   summaryFeishuTaskWorkflowConfigured: 'Feishu task workflow configured',
+  summaryProjectCalendarBound: 'Project calendar bound',
+  summaryProjectMilestoneCreated: 'Project Milestone created',
+  summaryProjectMilestoneDateUpdateRequested: 'Project Milestone date update requested',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -233,6 +252,9 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerFeishuTaskReference: 'Owner Feishu task reference',
   reasonOwnerFeishuTaskUpdate: 'Owner Feishu task update',
   reasonOwnerFeishuTaskWorkflowConfigure: 'Owner Feishu task workflow configuration',
+  reasonOwnerProjectCalendarBind: 'Owner Project calendar binding',
+  reasonOwnerProjectMilestoneCreate: 'Owner Project Milestone creation',
+  reasonOwnerProjectMilestoneDateUpdate: 'Owner Project Milestone date update',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -261,6 +283,8 @@ function isActivityObjectType(
     || value === 'feishu-task-list-binding'
     || value === 'feishu-task'
     || value === 'feishu-task-workflow'
+    || value === 'project-calendar-binding'
+    || value === 'project-milestone'
 }
 
 function isActivityAction(
@@ -284,6 +308,9 @@ function isActivityAction(
     || value === 'workbench.feishu-task.referenced'
     || value === 'workbench.feishu-task.update-requested'
     || value === 'workbench.feishu-task-workflow.configured'
+    || value === 'workbench.project-calendar.bound'
+    || value === 'workbench.project-milestone.created'
+    || value === 'workbench.project-milestone.date-update-requested'
 }
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
@@ -429,6 +456,10 @@ export function ActivityPanel({
                 <option value="feishu-task-list-binding">{copy.objectFeishuTaskListBinding}</option>
                 <option value="feishu-task">{copy.objectFeishuTask}</option>
                 <option value="feishu-task-workflow">{copy.objectFeishuTaskWorkflow}</option>
+                <option value="project-calendar-binding">
+                  {copy.objectProjectCalendarBinding}
+                </option>
+                <option value="project-milestone">{copy.objectProjectMilestone}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -496,6 +527,15 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.feishu-task-workflow.configured">
                   {copy.actionFeishuTaskWorkflowConfigured}
+                </option>
+                <option value="workbench.project-calendar.bound">
+                  {copy.actionProjectCalendarBound}
+                </option>
+                <option value="workbench.project-milestone.created">
+                  {copy.actionProjectMilestoneCreated}
+                </option>
+                <option value="workbench.project-milestone.date-update-requested">
+                  {copy.actionProjectMilestoneDateUpdateRequested}
                 </option>
               </select>
             </label>
@@ -622,7 +662,7 @@ function ActivityRow({
           </div>
           <div>
             <dt>{copy.objectPrefix}</dt>
-            <dd>{item.object.type} · {item.object.id}</dd>
+            <dd>{objectLabel(item, copy)} · {item.object.id}</dd>
           </div>
           <div>
             <dt>{copy.revisionPrefix}</dt>
@@ -682,6 +722,11 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'feishu-task-referenced': return copy.summaryFeishuTaskReferenced
     case 'feishu-task-update-requested': return copy.summaryFeishuTaskUpdateRequested
     case 'feishu-task-workflow-configured': return copy.summaryFeishuTaskWorkflowConfigured
+    case 'project-calendar-bound': return copy.summaryProjectCalendarBound
+    case 'project-milestone-created': return copy.summaryProjectMilestoneCreated
+    case 'project-milestone-date-update-requested': {
+      return copy.summaryProjectMilestoneDateUpdateRequested
+    }
   }
 }
 
@@ -705,6 +750,27 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-feishu-task-reference': return copy.reasonOwnerFeishuTaskReference
     case 'owner-feishu-task-update': return copy.reasonOwnerFeishuTaskUpdate
     case 'owner-feishu-task-workflow-configure': return copy.reasonOwnerFeishuTaskWorkflowConfigure
+    case 'owner-project-calendar-bind': return copy.reasonOwnerProjectCalendarBind
+    case 'owner-project-milestone-create': return copy.reasonOwnerProjectMilestoneCreate
+    case 'owner-project-milestone-date-update': {
+      return copy.reasonOwnerProjectMilestoneDateUpdate
+    }
+  }
+}
+
+function objectLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
+  switch (item.object.type) {
+    case 'workbench-status': return copy.objectStatus
+    case 'project': return copy.objectProject
+    case 'project-member': return copy.objectProjectMember
+    case 'project-responsibility': return copy.objectProjectResponsibility
+    case 'suggested-change': return copy.objectSuggestedChange
+    case 'feishu-connection': return copy.objectFeishuConnection
+    case 'feishu-task-list-binding': return copy.objectFeishuTaskListBinding
+    case 'feishu-task': return copy.objectFeishuTask
+    case 'feishu-task-workflow': return copy.objectFeishuTaskWorkflow
+    case 'project-calendar-binding': return copy.objectProjectCalendarBinding
+    case 'project-milestone': return copy.objectProjectMilestone
   }
 }
 

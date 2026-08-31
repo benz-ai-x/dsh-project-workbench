@@ -106,6 +106,35 @@ function suggestedChangeItem(): WorkbenchActivityItem {
   }
 }
 
+function projectCalendarItems(): readonly WorkbenchActivityItem[] {
+  return [
+    {
+      ...item(10, 'delivered'),
+      projectId: 'project-10',
+      action: 'workbench.project-calendar.bound',
+      reason: 'owner-project-calendar-bind',
+      object: { type: 'project-calendar-binding', id: 'project-10', version: 1 },
+      summaryCode: 'project-calendar-bound',
+    },
+    {
+      ...item(11, 'delivered'),
+      projectId: 'project-10',
+      action: 'workbench.project-milestone.created',
+      reason: 'owner-project-milestone-create',
+      object: { type: 'project-milestone', id: 'milestone-10', version: 1 },
+      summaryCode: 'project-milestone-created',
+    },
+    {
+      ...item(12, 'unknown'),
+      projectId: 'project-10',
+      action: 'workbench.project-milestone.date-update-requested',
+      reason: 'owner-project-milestone-date-update',
+      object: { type: 'project-milestone', id: 'milestone-10', version: 2 },
+      summaryCode: 'project-milestone-date-update-requested',
+    },
+  ]
+}
+
 function ready(
   items: readonly WorkbenchActivityItem[] = [],
   integrity: WorkbenchAuditIntegrityProjection = {
@@ -331,6 +360,42 @@ describe('ActivityPanel', () => {
     expect(controller.setFilter).toHaveBeenCalledWith({
       objectType: 'suggested-change',
       action: 'workbench.suggested-change.edited-accepted',
+    })
+  })
+
+  it('renders and filters the closed Project Calendar and Milestone vocabulary without delete actions', () => {
+    const controller = new PanelController(ready(projectCalendarItems()))
+    render(<ActivityPanel controller={controller} copy={DEFAULT_ACTIVITY_PANEL_COPY} />)
+
+    expect(screen.getByRole('heading', { name: 'Project calendar bound' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Project Milestone created' })).toBeTruthy()
+    expect(screen.getByRole('heading', {
+      name: 'Project Milestone date update requested',
+    })).toBeTruthy()
+    expect(screen.getByText('Owner Project calendar binding')).toBeTruthy()
+    expect(screen.getByText('Owner Project Milestone creation')).toBeTruthy()
+    expect(screen.getByText('Owner Project Milestone date update')).toBeTruthy()
+    expect(screen.getAllByText(/Project calendar binding/u).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/Project Milestone/u).length).toBeGreaterThan(0)
+
+    expect(screen.getByRole('option', { name: 'Project calendar binding' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Project Milestone' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Project calendar bound' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Project Milestone created' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Project Milestone date update requested' })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: /delete|remove/u })).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Object type'), {
+      target: { value: 'project-milestone' },
+    })
+    fireEvent.change(screen.getByLabelText('Action'), {
+      target: { value: 'workbench.project-milestone.date-update-requested' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }))
+
+    expect(controller.setFilter).toHaveBeenCalledWith({
+      objectType: 'project-milestone',
+      action: 'workbench.project-milestone.date-update-requested',
     })
   })
 

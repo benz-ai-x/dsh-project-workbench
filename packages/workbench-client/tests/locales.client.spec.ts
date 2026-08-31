@@ -48,4 +48,45 @@ describe('Project Workbench locale contract', () => {
       'Confirm task completion',
     ])
   })
+
+  it('stabilizes bilingual Project Calendar and Milestone Activity vocabulary', () => {
+    expect([
+      zh['activity.object.projectCalendarBinding'],
+      zh['activity.object.projectMilestone'],
+      zh['activity.action.projectCalendarBound'],
+      zh['activity.action.projectMilestoneCreated'],
+      zh['activity.action.projectMilestoneDateUpdateRequested'],
+      zh['activity.summary.projectCalendarBound'],
+      zh['activity.summary.projectMilestoneCreated'],
+      zh['activity.summary.projectMilestoneDateUpdateRequested'],
+      zh['activity.reason.ownerProjectCalendarBind'],
+      zh['activity.reason.ownerProjectMilestoneCreate'],
+      zh['activity.reason.ownerProjectMilestoneDateUpdate'],
+    ]).toEqual([
+      'Project 日历绑定',
+      'Project Milestone',
+      'Project 日历已绑定',
+      'Project Milestone 已创建',
+      '已请求更新 Project Milestone 日期',
+      '已绑定 Project 权威日历',
+      '已创建 Project Milestone',
+      '已请求更新 Project Milestone 权威日期',
+      'Owner 绑定 Project 日历',
+      'Owner 创建 Project Milestone',
+      'Owner 更新 Project Milestone 日期',
+    ])
+    expect([
+      en['activity.object.projectCalendarBinding'],
+      en['activity.object.projectMilestone'],
+      en['activity.action.projectCalendarBound'],
+      en['activity.action.projectMilestoneCreated'],
+      en['activity.action.projectMilestoneDateUpdateRequested'],
+    ]).toEqual([
+      'Project calendar binding',
+      'Project Milestone',
+      'Project calendar bound',
+      'Project Milestone created',
+      'Project Milestone date update requested',
+    ])
+  })
 })

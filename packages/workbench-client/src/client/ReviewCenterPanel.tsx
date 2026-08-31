@@ -1055,6 +1055,9 @@ function evidenceSummaryKey(
     'feishu-task-referenced': 'activity.summary.feishuTaskReferenced',
     'feishu-task-update-requested': 'activity.summary.feishuTaskUpdateRequested',
     'feishu-task-workflow-configured': 'activity.summary.feishuTaskWorkflowConfigured',
+    'project-calendar-bound': 'activity.summary.projectCalendarBound',
+    'project-milestone-created': 'activity.summary.projectMilestoneCreated',
+    'project-milestone-date-update-requested': 'activity.summary.projectMilestoneDateUpdateRequested',
   } satisfies Record<SuggestedChangeEvidenceProjection['summaryCode'], WorkbenchKey>
   return keys[summary]
 }
