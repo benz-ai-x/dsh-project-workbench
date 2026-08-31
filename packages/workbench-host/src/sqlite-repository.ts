@@ -208,7 +208,7 @@ import {
   workflowTransitionAllowed,
 } from './feishu-task-workflow.ts'
 
-export const WORKBENCH_SCHEMA_VERSION = 10
+export const WORKBENCH_SCHEMA_VERSION = 11
 export const WORKBENCH_SQLITE_APPLICATION_ID = 0x44535742
 
 const STATUS_COMMAND_TYPE = 'workbench.status.set'
@@ -1214,6 +1214,22 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_deliverable_activity_no_delete',
   'workbench_deliverable_calendar_effect_intent_no_update',
   'workbench_deliverable_calendar_effect_no_delete',
+  'workbench_project_risk_head_scope_no_update',
+  'workbench_project_risk_head_no_delete',
+  'workbench_project_risk_identity_no_update',
+  'workbench_project_risk_no_delete',
+  'workbench_project_risk_assessment_no_update',
+  'workbench_project_risk_assessment_no_delete',
+  'workbench_project_risk_evidence_no_update',
+  'workbench_project_risk_evidence_no_delete',
+  'workbench_project_risk_dependency_no_update',
+  'workbench_project_risk_dependency_no_delete',
+  'workbench_project_risk_task_no_update',
+  'workbench_project_risk_task_no_delete',
+  'workbench_project_risk_transition_no_update',
+  'workbench_project_risk_transition_no_delete',
+  'workbench_project_risk_activity_no_update',
+  'workbench_project_risk_activity_no_delete',
 ] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
@@ -8004,6 +8020,246 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
     `)
     return
   }
+  if (targetVersion === 11) {
+    database.exec(`
+      CREATE TABLE workbench_project_risk_head (
+        project_id TEXT PRIMARY KEY CHECK (length(project_id) BETWEEN 1 AND 128),
+        organization_id TEXT NOT NULL CHECK (length(organization_id) BETWEEN 1 AND 128),
+        team_id TEXT NOT NULL CHECK (length(team_id) BETWEEN 1 AND 128),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        next_risk_sequence INTEGER NOT NULL CHECK (next_risk_sequence > 0),
+        next_activity_sequence INTEGER NOT NULL CHECK (next_activity_sequence > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (project_id, organization_id, team_id),
+        FOREIGN KEY (project_id, organization_id, team_id)
+          REFERENCES workbench_project_team_head (project_id, organization_id, team_id)
+      ) STRICT;
+
+      INSERT INTO workbench_project_risk_head (
+        project_id, organization_id, team_id, revision,
+        next_risk_sequence, next_activity_sequence, updated_at
+      ) SELECT id, organization_id, team_id, 0, 1, 1, created_at FROM workbench_project;
+
+      CREATE TABLE workbench_project_risk (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        status TEXT NOT NULL CHECK (status IN ('research', 'watch', 'mitigate', 'accept', 'closed')),
+        closure_reason TEXT CHECK (closure_reason IS NULL OR closure_reason IN (
+          'no-longer-exists', 'below-threshold', 'materialized-as-issue', 'superseded'
+        )),
+        current_assessment_id TEXT NOT NULL UNIQUE CHECK (length(current_assessment_id) BETWEEN 1 AND 128),
+        next_assessment_sequence INTEGER NOT NULL CHECK (next_assessment_sequence > 1),
+        next_transition_sequence INTEGER NOT NULL CHECK (next_transition_sequence > 0),
+        next_history_sequence INTEGER NOT NULL CHECK (next_history_sequence > 1),
+        creation_command_id TEXT NOT NULL UNIQUE CHECK (length(creation_command_id) BETWEEN 1 AND 128),
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+        UNIQUE (project_id, id),
+        UNIQUE (project_id, sequence),
+        CHECK ((status = 'closed') = (closure_reason IS NOT NULL)),
+        FOREIGN KEY (project_id) REFERENCES workbench_project_risk_head (project_id),
+        FOREIGN KEY (current_assessment_id) REFERENCES workbench_project_risk_assessment (id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (creation_command_id) REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_project_risk_assessment (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        risk_id TEXT NOT NULL CHECK (length(risk_id) BETWEEN 1 AND 128),
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        history_sequence INTEGER NOT NULL CHECK (history_sequence > 0),
+        assessment_json TEXT NOT NULL CHECK (length(assessment_json) > 0),
+        assessment_digest TEXT NOT NULL
+          CHECK (length(assessment_digest) = 71 AND substr(assessment_digest, 1, 7) = 'sha256:'),
+        category TEXT NOT NULL CHECK (category IN (
+          'schedule', 'dependency', 'scope', 'capacity', 'ownership', 'quality',
+          'information', 'governance', 'external', 'other'
+        )),
+        trigger_statement TEXT NOT NULL CHECK (length(trigger_statement) BETWEEN 1 AND 1000),
+        trigger_state TEXT NOT NULL CHECK (trigger_state IN ('unknown', 'not-met', 'met')),
+        trigger_observed_at TEXT,
+        exposure_level TEXT NOT NULL CHECK (exposure_level IN ('low', 'medium', 'high')),
+        accountable_member_id TEXT NOT NULL CHECK (length(accountable_member_id) BETWEEN 1 AND 128),
+        assessment_horizon_end TEXT NOT NULL CHECK (length(assessment_horizon_end) = 10),
+        next_review_on TEXT NOT NULL CHECK (length(next_review_on) = 10),
+        actor_kind TEXT NOT NULL CHECK (actor_kind = 'owner'),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        causation_id TEXT NOT NULL CHECK (length(causation_id) BETWEEN 1 AND 128),
+        command_id TEXT NOT NULL UNIQUE CHECK (length(command_id) BETWEEN 1 AND 128),
+        audit_event_id TEXT NOT NULL UNIQUE CHECK (length(audit_event_id) BETWEEN 1 AND 128),
+        assessed_at TEXT NOT NULL CHECK (length(assessed_at) > 0),
+        UNIQUE (risk_id, sequence),
+        UNIQUE (risk_id, history_sequence),
+        UNIQUE (project_id, risk_id, id),
+        CHECK ((trigger_state = 'met') = (trigger_observed_at IS NOT NULL)),
+        CHECK (next_review_on <= assessment_horizon_end),
+        FOREIGN KEY (project_id, risk_id) REFERENCES workbench_project_risk (project_id, id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (command_id) REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (audit_event_id) REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_project_risk_evidence (
+        assessment_id TEXT NOT NULL CHECK (length(assessment_id) BETWEEN 1 AND 128),
+        ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+        kind TEXT NOT NULL CHECK (kind IN ('workbench-audit-event', 'project-schedule-change')),
+        reference_id TEXT NOT NULL CHECK (length(reference_id) BETWEEN 1 AND 128),
+        PRIMARY KEY (assessment_id, ordinal),
+        UNIQUE (assessment_id, kind, reference_id),
+        FOREIGN KEY (assessment_id) REFERENCES workbench_project_risk_assessment (id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE workbench_project_risk_dependency (
+        assessment_id TEXT NOT NULL CHECK (length(assessment_id) BETWEEN 1 AND 128),
+        risk_id TEXT NOT NULL CHECK (length(risk_id) BETWEEN 1 AND 128),
+        depends_on_risk_id TEXT NOT NULL CHECK (length(depends_on_risk_id) BETWEEN 1 AND 128),
+        PRIMARY KEY (assessment_id, depends_on_risk_id),
+        CHECK (risk_id <> depends_on_risk_id),
+        FOREIGN KEY (assessment_id) REFERENCES workbench_project_risk_assessment (id),
+        FOREIGN KEY (risk_id) REFERENCES workbench_project_risk (id),
+        FOREIGN KEY (depends_on_risk_id) REFERENCES workbench_project_risk (id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE workbench_project_risk_task (
+        assessment_id TEXT NOT NULL CHECK (length(assessment_id) BETWEEN 1 AND 128),
+        role TEXT NOT NULL CHECK (role IN ('mitigation', 'contingency')),
+        task_guid TEXT NOT NULL CHECK (length(task_guid) BETWEEN 1 AND 256),
+        PRIMARY KEY (assessment_id, role, task_guid),
+        UNIQUE (assessment_id, task_guid),
+        FOREIGN KEY (assessment_id) REFERENCES workbench_project_risk_assessment (id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE workbench_project_risk_transition (
+        id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 128),
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        risk_id TEXT NOT NULL CHECK (length(risk_id) BETWEEN 1 AND 128),
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        history_sequence INTEGER NOT NULL CHECK (history_sequence > 0),
+        from_status TEXT NOT NULL CHECK (from_status IN ('research', 'watch', 'mitigate', 'accept')),
+        to_status TEXT NOT NULL CHECK (to_status IN ('research', 'watch', 'mitigate', 'accept', 'closed')),
+        rationale TEXT NOT NULL CHECK (length(rationale) BETWEEN 1 AND 2000),
+        closure_reason TEXT CHECK (closure_reason IS NULL OR closure_reason IN (
+          'no-longer-exists', 'below-threshold', 'materialized-as-issue', 'superseded'
+        )),
+        actor_kind TEXT NOT NULL CHECK (actor_kind = 'owner'),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        causation_id TEXT NOT NULL CHECK (length(causation_id) BETWEEN 1 AND 128),
+        command_id TEXT NOT NULL UNIQUE CHECK (length(command_id) BETWEEN 1 AND 128),
+        audit_event_id TEXT NOT NULL UNIQUE CHECK (length(audit_event_id) BETWEEN 1 AND 128),
+        occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
+        UNIQUE (risk_id, sequence),
+        UNIQUE (risk_id, history_sequence),
+        CHECK (from_status <> to_status),
+        CHECK ((to_status = 'closed') = (closure_reason IS NOT NULL)),
+        FOREIGN KEY (project_id, risk_id) REFERENCES workbench_project_risk (project_id, id),
+        FOREIGN KEY (command_id) REFERENCES workbench_audit_event (command_id)
+          DEFERRABLE INITIALLY DEFERRED,
+        FOREIGN KEY (audit_event_id) REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT;
+
+      CREATE TABLE workbench_project_risk_activity (
+        project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
+        sequence INTEGER NOT NULL CHECK (sequence > 0),
+        id TEXT NOT NULL UNIQUE CHECK (length(id) BETWEEN 1 AND 128),
+        risk_id TEXT NOT NULL CHECK (length(risk_id) BETWEEN 1 AND 128),
+        risk_revision INTEGER NOT NULL CHECK (risk_revision > 0),
+        action TEXT NOT NULL CHECK (action IN ('risk-created', 'risk-revised', 'risk-transitioned')),
+        assessment_id TEXT,
+        transition_id TEXT,
+        from_status TEXT CHECK (from_status IS NULL OR from_status IN ('research', 'watch', 'mitigate', 'accept')),
+        to_status TEXT NOT NULL CHECK (to_status IN ('research', 'watch', 'mitigate', 'accept', 'closed')),
+        rationale TEXT,
+        closure_reason TEXT CHECK (closure_reason IS NULL OR closure_reason IN (
+          'no-longer-exists', 'below-threshold', 'materialized-as-issue', 'superseded'
+        )),
+        actor_kind TEXT NOT NULL CHECK (actor_kind = 'owner'),
+        actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 128),
+        audit_event_id TEXT NOT NULL UNIQUE CHECK (length(audit_event_id) BETWEEN 1 AND 128),
+        causation_id TEXT NOT NULL CHECK (length(causation_id) BETWEEN 1 AND 128),
+        occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
+        PRIMARY KEY (project_id, sequence),
+        CHECK ((action = 'risk-transitioned') = (transition_id IS NOT NULL)),
+        CHECK ((action <> 'risk-transitioned') = (assessment_id IS NOT NULL)),
+        FOREIGN KEY (project_id, risk_id) REFERENCES workbench_project_risk (project_id, id),
+        FOREIGN KEY (assessment_id) REFERENCES workbench_project_risk_assessment (id),
+        FOREIGN KEY (transition_id) REFERENCES workbench_project_risk_transition (id),
+        FOREIGN KEY (audit_event_id) REFERENCES workbench_audit_event (id)
+          DEFERRABLE INITIALLY DEFERRED
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE INDEX workbench_project_risk_recent
+        ON workbench_project_risk (project_id, sequence DESC);
+      CREATE INDEX workbench_project_risk_filter
+        ON workbench_project_risk_assessment (
+          project_id, exposure_level, trigger_state, next_review_on, accountable_member_id
+        );
+      CREATE INDEX workbench_project_risk_trigger_search
+        ON workbench_project_risk_assessment (project_id, trigger_statement);
+      CREATE INDEX workbench_project_risk_activity_recent
+        ON workbench_project_risk_activity (project_id, sequence DESC);
+      CREATE INDEX workbench_project_risk_dependency_target
+        ON workbench_project_risk_dependency (depends_on_risk_id, risk_id);
+      CREATE INDEX workbench_project_risk_task_use
+        ON workbench_project_risk_task (task_guid, role, assessment_id);
+
+      CREATE TRIGGER workbench_project_risk_head_scope_no_update BEFORE UPDATE OF
+        project_id, organization_id, team_id ON workbench_project_risk_head
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk scope is immutable'); END;
+      CREATE TRIGGER workbench_project_risk_head_no_delete
+        BEFORE DELETE ON workbench_project_risk_head
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk heads cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_identity_no_update BEFORE UPDATE OF
+        id, project_id, sequence, creation_command_id, created_at ON workbench_project_risk
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk identity is immutable'); END;
+      CREATE TRIGGER workbench_project_risk_no_delete
+        BEFORE DELETE ON workbench_project_risk
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risks cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_assessment_no_update
+        BEFORE UPDATE ON workbench_project_risk_assessment
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk assessments are append-only'); END;
+      CREATE TRIGGER workbench_project_risk_assessment_no_delete
+        BEFORE DELETE ON workbench_project_risk_assessment
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk assessments cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_evidence_no_update
+        BEFORE UPDATE ON workbench_project_risk_evidence
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk evidence is immutable'); END;
+      CREATE TRIGGER workbench_project_risk_evidence_no_delete
+        BEFORE DELETE ON workbench_project_risk_evidence
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk evidence cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_dependency_no_update
+        BEFORE UPDATE ON workbench_project_risk_dependency
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk dependencies are immutable'); END;
+      CREATE TRIGGER workbench_project_risk_dependency_no_delete
+        BEFORE DELETE ON workbench_project_risk_dependency
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk dependencies cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_task_no_update
+        BEFORE UPDATE ON workbench_project_risk_task
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk treatment links are immutable'); END;
+      CREATE TRIGGER workbench_project_risk_task_no_delete
+        BEFORE DELETE ON workbench_project_risk_task
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk treatment links cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_transition_no_update
+        BEFORE UPDATE ON workbench_project_risk_transition
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk transitions are append-only'); END;
+      CREATE TRIGGER workbench_project_risk_transition_no_delete
+        BEFORE DELETE ON workbench_project_risk_transition
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk transitions cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_activity_no_update
+        BEFORE UPDATE ON workbench_project_risk_activity
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk Activity is append-only'); END;
+      CREATE TRIGGER workbench_project_risk_activity_no_delete
+        BEFORE DELETE ON workbench_project_risk_activity
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk Activity cannot be deleted'); END
+    `)
+    return
+  }
   throw new Error(`missing Workbench migration ${targetVersion}`)
 }
 
@@ -8193,6 +8449,40 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare(`
     SELECT id, deliverable_id, state, issue_json, local_conflict_code, attempt_count, command_id
     FROM workbench_deliverable_calendar_effect LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, organization_id, team_id, revision,
+      next_risk_sequence, next_activity_sequence
+    FROM workbench_project_risk_head LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, project_id, sequence, revision, status, current_assessment_id,
+      next_assessment_sequence, next_transition_sequence, next_history_sequence
+    FROM workbench_project_risk LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, project_id, risk_id, sequence, history_sequence, assessment_digest,
+      category, trigger_state, exposure_level, accountable_member_id, next_review_on
+    FROM workbench_project_risk_assessment LIMIT 1
+  `)
+  database.prepare(`
+    SELECT assessment_id, ordinal, kind, reference_id
+    FROM workbench_project_risk_evidence LIMIT 1
+  `)
+  database.prepare(`
+    SELECT assessment_id, risk_id, depends_on_risk_id
+    FROM workbench_project_risk_dependency LIMIT 1
+  `)
+  database.prepare(`
+    SELECT assessment_id, role, task_guid FROM workbench_project_risk_task LIMIT 1
+  `)
+  database.prepare(`
+    SELECT id, project_id, risk_id, sequence, history_sequence, from_status, to_status
+    FROM workbench_project_risk_transition LIMIT 1
+  `)
+  database.prepare(`
+    SELECT project_id, sequence, id, risk_id, risk_revision, action
+    FROM workbench_project_risk_activity LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
     SELECT name FROM sqlite_schema WHERE type = 'trigger'
@@ -8384,6 +8674,16 @@ function insertProjectDomain(
   `).run(mutation.projectId, organizationId, teamId, mutation.createdAt)
   if (insertedDeliverableHead.changes !== 1) {
     throw new Error('Workbench Project Deliverable head was not inserted exactly once')
+  }
+
+  const insertedRiskHead = database.prepare(`
+    INSERT INTO workbench_project_risk_head (
+      project_id, organization_id, team_id, revision,
+      next_risk_sequence, next_activity_sequence, updated_at
+    ) VALUES (?, ?, ?, 0, 1, 1, ?)
+  `).run(mutation.projectId, organizationId, teamId, mutation.createdAt)
+  if (insertedRiskHead.changes !== 1) {
+    throw new Error('Workbench Project Risk head was not inserted exactly once')
   }
 
   const insertedSnapshot = database.prepare(`

@@ -90,6 +90,16 @@ export interface NormalizedProjectRiskAssessment {
   readonly digest: WorkbenchDigest
 }
 
+/** Canonical caller intent used for receipt lookup before clock/current-state policy. */
+export type NormalizedProjectRiskAssessmentIntent = Readonly<
+  Omit<NormalizedProjectRiskAssessment, 'trigger' | 'assessedAt' | 'digest'> & {
+    readonly trigger: Readonly<{
+      readonly statement: string
+      readonly state: ProjectRiskTriggerProjection['state']
+    }>
+  }
+>
+
 export interface NormalizeProjectRiskTransitionOptions {
   readonly currentStatus: ProjectRiskStatus
   readonly currentNextReviewOn: string
@@ -104,6 +114,13 @@ export interface NormalizedProjectRiskTransition {
   readonly rationale: string
   readonly closureReason: ProjectRiskClosureReason | null
   readonly occurredAt: string
+}
+
+/** Canonical caller intent used for receipt lookup before lifecycle policy. */
+export interface NormalizedProjectRiskTransitionIntent {
+  readonly toStatus: ProjectRiskStatus
+  readonly rationale: string
+  readonly closureReason: ProjectRiskClosureReason | null
 }
 
 /** Derive exposure from the conservative upper endpoint of both intervals. */
@@ -143,6 +160,30 @@ export function projectRiskExposure(
     likelihoodBand: `P${String(likelihoodIndex + 1)}` as ProjectRiskExposure['likelihoodBand'],
     impactBand: `I${String(impact.upperBand)}` as ProjectRiskExposure['impactBand'],
     level,
+  })
+}
+
+/**
+ * Normalize only facts supplied by the caller. The synthetic instant is the
+ * requested review date itself, so this validates date shape/order while
+ * deliberately deferring the Project-relative current-date rule.
+ */
+export function normalizeProjectRiskAssessmentIntent(
+  value: unknown,
+): NormalizedProjectRiskAssessmentIntent {
+  const nextReviewOn = isoDate(
+    isPlainRecord(value) ? Reflect.get(value, 'nextReviewOn') : undefined,
+    'nextReviewOn',
+  )
+  const normalized = normalizeProjectRiskAssessment(value, {
+    assessedAt: `${nextReviewOn}T00:00:00.000Z`,
+    projectTimezone: 'UTC',
+    previousTrigger: null,
+  })
+  const { assessedAt: _assessedAt, digest: _digest, trigger, ...intent } = normalized
+  return Object.freeze({
+    ...intent,
+    trigger: Object.freeze({ statement: trigger.statement, state: trigger.state }),
   })
 }
 
@@ -318,29 +359,14 @@ export function normalizeProjectRiskTransition(
   if (!PROJECT_RISK_STATUSES.has(options.currentStatus)) {
     throw new TypeError('currentStatus is not supported')
   }
-  const candidateStatus = isPlainRecord(value) ? Reflect.get(value, 'status') : undefined
-  const record = exactRecord(
-    value,
-    'transition',
-    candidateStatus === 'closed'
-      ? ['status', 'rationale', 'closureReason']
-      : ['status', 'rationale'],
-  )
-  if (!PROJECT_RISK_STATUSES.has(record.status as ProjectRiskStatus)) {
-    throw new TypeError('transition.status is not supported')
-  }
-  const toStatus = record.status as ProjectRiskStatus
+  const intent = normalizeProjectRiskTransitionIntent(value)
+  const toStatus = intent.toStatus
   if (options.currentStatus === 'closed') {
     throw new TypeError('closed Project Risk status is terminal')
   }
   if (toStatus === options.currentStatus) {
     throw new TypeError('transition.status must be different from currentStatus')
   }
-  const closureReason = toStatus === 'closed'
-    ? PROJECT_RISK_CLOSURE_REASONS.has(record.closureReason as ProjectRiskClosureReason)
-      ? record.closureReason as ProjectRiskClosureReason
-      : invalid('transition.closureReason is not supported')
-    : null
   if (!Number.isSafeInteger(options.availableMitigationTaskCount)
     || options.availableMitigationTaskCount < 0) {
     throw new TypeError('availableMitigationTaskCount must be a non-negative safe integer')
@@ -357,13 +383,41 @@ export function normalizeProjectRiskTransition(
   return Object.freeze({
     fromStatus: options.currentStatus,
     toStatus,
+    rationale: intent.rationale,
+    closureReason: intent.closureReason,
+    occurredAt,
+  })
+}
+
+/** Validate caller-supplied transition facts without consulting current Risk state. */
+export function normalizeProjectRiskTransitionIntent(
+  value: unknown,
+): NormalizedProjectRiskTransitionIntent {
+  const candidateStatus = isPlainRecord(value) ? Reflect.get(value, 'status') : undefined
+  const record = exactRecord(
+    value,
+    'transition',
+    candidateStatus === 'closed'
+      ? ['status', 'rationale', 'closureReason']
+      : ['status', 'rationale'],
+  )
+  if (!PROJECT_RISK_STATUSES.has(record.status as ProjectRiskStatus)) {
+    throw new TypeError('transition.status is not supported')
+  }
+  const toStatus = record.status as ProjectRiskStatus
+  const closureReason = toStatus === 'closed'
+    ? PROJECT_RISK_CLOSURE_REASONS.has(record.closureReason as ProjectRiskClosureReason)
+      ? record.closureReason as ProjectRiskClosureReason
+      : invalid('transition.closureReason is not supported')
+    : null
+  return Object.freeze({
+    toStatus,
     rationale: boundedText(
       record.rationale,
       'transition.rationale',
       MAX_TRANSITION_RATIONALE_LENGTH,
     ),
     closureReason,
-    occurredAt,
   })
 }
 

@@ -563,6 +563,14 @@ function restartScenario(
 function dropV8WorkflowSchema(database: DatabaseSync): void {
   database.exec(`
     PRAGMA foreign_keys = OFF;
+    DROP TABLE workbench_project_risk_activity;
+    DROP TABLE workbench_project_risk_transition;
+    DROP TABLE workbench_project_risk_task;
+    DROP TABLE workbench_project_risk_dependency;
+    DROP TABLE workbench_project_risk_evidence;
+    DROP TABLE workbench_project_risk_assessment;
+    DROP TABLE workbench_project_risk;
+    DROP TABLE workbench_project_risk_head;
     DROP TABLE workbench_deliverable_calendar_effect;
     DROP TABLE workbench_deliverable_activity;
     DROP TABLE workbench_deliverable_final_release_version;
@@ -621,7 +629,7 @@ function legacyStatusMutation(): WorkbenchStatusMutation {
 }
 
 describe('T09 workflow reliability', () => {
-  it('migrates an exact Schema v7 database to v10 and survives a second restart', async () => {
+  it('migrates an exact Schema v7 database to v11 and survives a second restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-workbench-t09-v7-'))
     temporaryRoots.push(root)
     const databasePath = join(root, 'workbench.sqlite')

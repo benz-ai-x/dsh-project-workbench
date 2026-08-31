@@ -763,7 +763,7 @@ describe('T11 Deliverable Host surface', () => {
     }))
   })
 
-  it('migrates the real SQLite seam to schema v10 with CalendarCommitment storage', async () => {
+  it('migrates the real SQLite seam to schema v11 with CalendarCommitment storage', async () => {
     const root = await mkdtemp(join(tmpdir(), 'workbench-deliverable-schema-'))
     temporaryRoots.add(root)
     const databasePath = join(root, 'workbench.sqlite')
@@ -778,8 +778,8 @@ describe('T11 Deliverable Host surface', () => {
 
     const database = new DatabaseSync(databasePath)
     try {
-      expect(WORKBENCH_SCHEMA_VERSION).toBe(10)
-      expect(database.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 10 })
+      expect(WORKBENCH_SCHEMA_VERSION).toBe(11)
+      expect(database.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 11 })
       expect(database.prepare(`
         SELECT name FROM sqlite_schema
         WHERE type = 'table' AND name = 'workbench_calendar_commitment'
@@ -1529,6 +1529,14 @@ describe('T11 Deliverable Host surface', () => {
         BEGIN SELECT RAISE(ABORT, 'workbench Project schedule changes cannot be deleted'); END;
 
         DROP TABLE workbench_deliverable_calendar_effect;
+        DROP TABLE workbench_project_risk_activity;
+        DROP TABLE workbench_project_risk_transition;
+        DROP TABLE workbench_project_risk_task;
+        DROP TABLE workbench_project_risk_dependency;
+        DROP TABLE workbench_project_risk_evidence;
+        DROP TABLE workbench_project_risk_assessment;
+        DROP TABLE workbench_project_risk;
+        DROP TABLE workbench_project_risk_head;
         DROP TABLE workbench_deliverable_activity;
         DROP TABLE workbench_deliverable_final_release_version;
         DROP TABLE workbench_deliverable_final_release;
@@ -1553,7 +1561,7 @@ describe('T11 Deliverable Host surface', () => {
     try {
       const database = new DatabaseSync(databasePath)
       try {
-        expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+        expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
         expect(database.prepare(`
           SELECT target_kind, target_id, calendar_id, event_id
           FROM workbench_calendar_commitment

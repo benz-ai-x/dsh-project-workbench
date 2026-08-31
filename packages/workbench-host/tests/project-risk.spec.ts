@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   assertProjectRiskDependencyGraph,
   normalizeProjectRiskAssessment,
+  normalizeProjectRiskAssessmentIntent,
   normalizeProjectRiskTransition,
+  normalizeProjectRiskTransitionIntent,
   projectRiskExposure,
   type ProjectRiskAssessmentDraft,
 } from '../src/index.ts'
@@ -277,6 +279,23 @@ describe('project Risk policy', () => {
     }).nextReviewOn).toBe('2026-09-01')
   })
 
+  it('normalizes a replay-safe assessment intent without applying the current-date rule', () => {
+    const draft = assessmentDraft()
+    const normalized = normalizeProjectRiskAssessmentIntent({
+      ...draft,
+      assessmentHorizonEnd: '2026-08-31',
+      nextReviewOn: '2026-08-01',
+    })
+
+    expect(normalized).toMatchObject({
+      assessmentHorizonEnd: '2026-08-31',
+      nextReviewOn: '2026-08-01',
+      trigger: { statement: 'approval is not received by Friday', state: 'met' },
+      exposure: { likelihoodBand: 'P4', impactBand: 'I4', level: 'high' },
+    })
+    expect(Object.hasOwn(normalized.trigger, 'observedAt')).toBe(false)
+  })
+
   it('admits every different active-status edge and every active close edge', () => {
     const active = ['research', 'watch', 'mitigate', 'accept'] as const
     for (const currentStatus of active) {
@@ -350,6 +369,18 @@ describe('project Risk policy', () => {
       rationale: 'The Risk was superseded.',
       closureReason: 'superseded',
     }, options).toStatus).toBe('closed')
+  })
+
+  it('normalizes a replay-safe transition intent without consulting current lifecycle state', () => {
+    expect(normalizeProjectRiskTransitionIntent({
+      status: 'closed',
+      rationale: '  The Risk was superseded.  ',
+      closureReason: 'superseded',
+    })).toEqual({
+      toStatus: 'closed',
+      rationale: 'The Risk was superseded.',
+      closureReason: 'superseded',
+    })
   })
 
   it('rejects direct and transitive Risk dependency cycles', () => {

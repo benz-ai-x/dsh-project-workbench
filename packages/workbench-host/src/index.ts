@@ -106,12 +106,16 @@ export {
 export {
   assertProjectRiskDependencyGraph,
   normalizeProjectRiskAssessment,
+  normalizeProjectRiskAssessmentIntent,
   normalizeProjectRiskTransition,
+  normalizeProjectRiskTransitionIntent,
   projectRiskExposure,
 } from './project-risk.ts'
 export type {
   NormalizedProjectRiskAssessment,
+  NormalizedProjectRiskAssessmentIntent,
   NormalizedProjectRiskTransition,
+  NormalizedProjectRiskTransitionIntent,
   NormalizeProjectRiskAssessmentOptions,
   NormalizeProjectRiskTransitionOptions,
 } from './project-risk.ts'

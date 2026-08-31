@@ -89,6 +89,14 @@ function connection(workbench: SqliteWorkbenchRepository): DatabaseSync {
 function dropDeliverableSchema(database: DatabaseSync): void {
   database.exec(`
     PRAGMA foreign_keys = OFF;
+    DROP TABLE workbench_project_risk_activity;
+    DROP TABLE workbench_project_risk_transition;
+    DROP TABLE workbench_project_risk_task;
+    DROP TABLE workbench_project_risk_dependency;
+    DROP TABLE workbench_project_risk_evidence;
+    DROP TABLE workbench_project_risk_assessment;
+    DROP TABLE workbench_project_risk;
+    DROP TABLE workbench_project_risk_head;
     DROP TABLE workbench_deliverable_calendar_effect;
     DROP TABLE workbench_deliverable_activity;
     DROP TABLE workbench_deliverable_final_release_version;
@@ -1242,7 +1250,7 @@ describe('SqliteWorkbenchRepository', () => {
     await expect(workbench.open()).rejects.toThrow(/closed/u)
   })
 
-  it('migrates v2 through v10, seeds the exact template, and preserves the T03 ledger', async () => {
+  it('migrates v2 through v11, seeds the exact template, and preserves the T03 ledger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -1928,7 +1936,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates v3 through v10, backfills one empty Team per Project, and creates heads for new Projects', async () => {
+  it('migrates v3 through v11, backfills one empty Team per Project, and creates heads for new Projects', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
@@ -2013,7 +2021,7 @@ describe('SqliteWorkbenchRepository', () => {
     await restarted.close()
   })
 
-  it('migrates an exact v4 database to v10 and validates every SuggestedChange trigger', async () => {
+  it('migrates an exact v4 database to v11 and validates every SuggestedChange trigger', async () => {
     const path = await databasePath()
     const seeded = repository(path)
     await seeded.open()
