@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
+import { canonicalizeJson } from '../src/audit.ts'
 import type {
   CreateProjectRequest,
   FeishuCredentialProjection,
   FeishuTaskWorkflowFieldCandidate,
   ProjectTaskWorkflowDefinition,
   WorkbenchStatusMutation,
+  WorkbenchFeishuTaskWorkflowOperationMutation,
   WorkbenchFeishuIdentityVerificationInput,
   WorkbenchFeishuIdentityVerificationResult,
   WorkbenchFeishuResourceVerificationObservation,
@@ -386,8 +388,8 @@ function ids(): WorkbenchIdGenerator {
   })
 }
 
-function clock(): WorkbenchClock {
-  let milliseconds = Date.parse('2026-08-31T06:00:00.000Z')
+function clock(start = '2026-08-31T06:00:00.000Z'): WorkbenchClock {
+  let milliseconds = Date.parse(start)
   return Object.freeze({
     now: () => {
       milliseconds += 1_000
@@ -428,12 +430,14 @@ function projectRequest(): CreateProjectRequest {
 
 async function scenarioFixture(
   initialOptionGuid: string | null = 'option-doing',
+  databasePath = ':memory:',
 ): Promise<Readonly<{
   scenario: WorkbenchScenario
   adapter: ReliabilityAdapter
+  repository: SqliteWorkbenchRepository
 }>> {
   const repository = new SqliteWorkbenchRepository({
-    databasePath: ':memory:',
+    databasePath,
     journalMode: 'wal',
     busyTimeoutMs: 1_000,
   })
@@ -481,7 +485,7 @@ async function scenarioFixture(
     causationId: 'workflow-task-bind-cause-0001',
     reason: 'owner-feishu-task-list-bind',
   }, signal)
-  return Object.freeze({ scenario, adapter })
+  return Object.freeze({ scenario, adapter, repository })
 }
 
 function configureExisting(scenario: WorkbenchScenario) {
@@ -495,6 +499,65 @@ function configureExisting(scenario: WorkbenchScenario) {
     causationId: 'workflow-existing-configure-cause-0001',
     reason: 'owner-feishu-task-workflow-configure',
   }, signal)
+}
+
+function createWorkflowRequest(suffix: string) {
+  return Object.freeze({
+    projectId: PROJECT_ID,
+    expectedTaskRevision: 1,
+    expectedWorkflowRevision: null,
+    definition: definition(),
+    mapping: Object.freeze({ mode: 'create' as const }),
+    idempotencyKey: `workflow-create-${suffix}-idempotency`,
+    causationId: `workflow-create-${suffix}-causation`,
+    reason: 'owner-feishu-task-workflow-configure' as const,
+  })
+}
+
+function workflowOperationMutation(
+  request: ReturnType<typeof createWorkflowRequest>,
+  suffix: string,
+): WorkbenchFeishuTaskWorkflowOperationMutation {
+  const preparedAt = '2026-08-31T06:01:00.000Z'
+  return Object.freeze({
+    operationId: `operation-workflow-${suffix}`,
+    projectId: request.projectId,
+    expectedTaskRevision: request.expectedTaskRevision,
+    expectedWorkflowRevision: request.expectedWorkflowRevision,
+    definition: request.definition,
+    mapping: request.mapping,
+    preparedAt,
+    command: Object.freeze({
+      commandId: `command-workflow-${suffix}`,
+      auditEventId: `audit-workflow-${suffix}`,
+      outboxId: `outbox-workflow-${suffix}`,
+      idempotencyKey: request.idempotencyKey,
+      causationId: request.causationId,
+      reason: request.reason,
+      actor: Object.freeze({
+        kind: 'owner' as const,
+        id: 'owner-workflow-reliability',
+        organizationId: 'organization-workflow-reliability',
+        teamId: 'team-workflow-reliability',
+      }),
+      occurredAt: preparedAt,
+    }),
+  })
+}
+
+function restartScenario(
+  repository: SqliteWorkbenchRepository,
+  adapter: ReliabilityAdapter,
+): WorkbenchScenario {
+  return new WorkbenchScenario({
+    repository,
+    clock: clock('2026-08-31T06:01:00.000Z'),
+    ids: ids(),
+    adapters: Object.freeze({ feishu: adapter, feishuTasks: adapter }),
+    authorization,
+    maxStatusLength: 280,
+    taskReconciliationIntervalMs: 0,
+  })
 }
 
 function dropV8WorkflowSchema(database: DatabaseSync): void {
@@ -573,6 +636,10 @@ describe('T09 workflow reliability', () => {
       { name: 'workbench_feishu_task_workflow_operation' },
       { name: 'workbench_feishu_task_workflow_version' },
     ])
+    expect(upgradedDatabase.prepare(`
+      SELECT name FROM pragma_table_info('workbench_feishu_task_workflow_operation')
+      WHERE name IN ('definition_json', 'mapping_json') ORDER BY name
+    `).all()).toEqual([{ name: 'definition_json' }, { name: 'mapping_json' }])
     await expect(upgraded.snapshot(signal)).resolves.toMatchObject({
       id: 'status-before-v8',
       message: 'Preserved across the T09 migration',
@@ -597,6 +664,202 @@ describe('T09 workflow reliability', () => {
     expect((Reflect.get(restarted, 'database') as DatabaseSync)
       .prepare('PRAGMA user_version').get()).toEqual({ user_version: 8 })
     await restarted.close()
+  })
+
+  it('resumes a prepared workflow operation after restart with its original ledger identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-workbench-t09-prepared-'))
+    temporaryRoots.push(root)
+    const databasePath = join(root, 'workbench.sqlite')
+    const seeded = await scenarioFixture(null, databasePath)
+    seeded.adapter.workflowFields = Object.freeze([])
+    const request = createWorkflowRequest('prepared-restart-0001')
+    const mutation = workflowOperationMutation(request, 'prepared-restart-0001')
+
+    await expect(seeded.repository.reserveFeishuTaskWorkflowOperation(mutation, signal))
+      .resolves.toEqual({
+        state: 'deliver',
+        operationId: mutation.operationId,
+        command: mutation.command,
+      })
+    const seededDatabase = Reflect.get(seeded.repository, 'database') as DatabaseSync
+    expect(seededDatabase.prepare(`
+      SELECT state, attempt_count, command_id, audit_event_id, outbox_id
+      FROM workbench_feishu_task_workflow_operation WHERE id = ?
+    `).get(mutation.operationId)).toEqual({
+      state: 'prepared',
+      attempt_count: 0,
+      command_id: mutation.command.commandId,
+      audit_event_id: mutation.command.auditEventId,
+      outbox_id: mutation.command.outboxId,
+    })
+    const reservedOutbox = seededDatabase.prepare(`
+      SELECT state, attempt_count, error_code, payload_json
+      FROM workbench_outbox WHERE id = ?
+    `).get(mutation.command.outboxId) as {
+      readonly state: string
+      readonly attempt_count: number
+      readonly error_code: string | null
+      readonly payload_json: string
+    }
+    expect(reservedOutbox).toMatchObject({ state: 'pending', attempt_count: 0, error_code: null })
+    expect(reservedOutbox.payload_json).not.toContain('Project status')
+    expect(reservedOutbox.payload_json).not.toContain('Planned')
+    await seeded.scenario.close()
+
+    const repository = new SqliteWorkbenchRepository({
+      databasePath,
+      journalMode: 'wal',
+      busyTimeoutMs: 1_000,
+    })
+    const restarted = restartScenario(repository, seeded.adapter)
+    await restarted.open()
+    const delivered = await restarted.configureFeishuTaskWorkflow(request, signal)
+    expect(delivered).toMatchObject({
+      ok: true,
+      receipt: {
+        commandId: mutation.command.commandId,
+        auditEventId: mutation.command.auditEventId,
+        outboxId: mutation.command.outboxId,
+      },
+      value: { workflow: { revision: 1, field: { fieldGuid: 'field-created-status' } } },
+    })
+    await expect(restarted.configureFeishuTaskWorkflow(request, signal)).resolves.toEqual(delivered)
+    expect(seeded.adapter.workflowCreateCalls).toBe(1)
+
+    const restartedDatabase = Reflect.get(repository, 'database') as DatabaseSync
+    expect(restartedDatabase.prepare(`
+      SELECT state, attempt_count FROM workbench_feishu_task_workflow_operation WHERE id = ?
+    `).get(mutation.operationId)).toEqual({ state: 'delivered', attempt_count: 1 })
+    expect(restartedDatabase.prepare(`
+      SELECT state, attempt_count, error_code FROM workbench_outbox WHERE id = ?
+    `).get(mutation.command.outboxId)).toEqual({
+      state: 'delivered', attempt_count: 1, error_code: null,
+    })
+    expect(restartedDatabase.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM workbench_command_receipt WHERE command_id = ?) AS receipts,
+        (SELECT COUNT(*) FROM workbench_audit_event WHERE command_id = ?) AS audits,
+        (SELECT COUNT(*) FROM workbench_outbox WHERE command_id = ?) AS outboxes
+    `).get(
+      mutation.command.commandId,
+      mutation.command.commandId,
+      mutation.command.commandId,
+    )).toEqual({ receipts: 1, audits: 1, outboxes: 1 })
+    await expect(repository.verifyAuditChain(signal)).resolves.toMatchObject({ valid: true })
+    await restarted.close()
+  })
+
+  it('recovers an inflight response-loss as unknown without redelivering after restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-workbench-t09-inflight-'))
+    temporaryRoots.push(root)
+    const databasePath = join(root, 'workbench.sqlite')
+    const seeded = await scenarioFixture(null, databasePath)
+    seeded.adapter.workflowFields = Object.freeze([])
+    const request = createWorkflowRequest('inflight-restart-0001')
+    const mutation = workflowOperationMutation(request, 'inflight-restart-0001')
+    await seeded.repository.reserveFeishuTaskWorkflowOperation(mutation, signal)
+    await expect(seeded.repository.claimFeishuTaskWorkflowOperation(
+      mutation.operationId,
+      '2026-08-31T06:01:01.000Z',
+      signal,
+    )).resolves.toBe(true)
+    await seeded.adapter.createTaskWorkflowField(
+      {} as WorkbenchFeishuTaskRoute,
+      Object.freeze({
+        taskListGuid: TASK_LIST_GUID,
+        name: request.definition.fieldName,
+        options: Object.freeze(request.definition.states.map(state => Object.freeze({
+          name: state.name,
+          colorIndex: state.colorIndex,
+        }))),
+      }),
+      signal,
+    )
+    expect(seeded.adapter.workflowCreateCalls).toBe(1)
+    await seeded.scenario.close()
+
+    const repository = new SqliteWorkbenchRepository({
+      databasePath,
+      journalMode: 'wal',
+      busyTimeoutMs: 1_000,
+    })
+    const restarted = restartScenario(repository, seeded.adapter)
+    await restarted.open()
+    await expect(restarted.configureFeishuTaskWorkflow(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    await expect(restarted.configureFeishuTaskWorkflow(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    expect(seeded.adapter.workflowCreateCalls).toBe(1)
+
+    const restartedDatabase = Reflect.get(repository, 'database') as DatabaseSync
+    expect(restartedDatabase.prepare(`
+      SELECT state, attempt_count FROM workbench_feishu_task_workflow_operation WHERE id = ?
+    `).get(mutation.operationId)).toEqual({ state: 'unknown', attempt_count: 1 })
+    const unknownOutbox = restartedDatabase.prepare(`
+      SELECT state, attempt_count, error_code, payload_json
+      FROM workbench_outbox WHERE id = ?
+    `).get(mutation.command.outboxId) as {
+      readonly state: string
+      readonly attempt_count: number
+      readonly error_code: string | null
+      readonly payload_json: string
+    }
+    expect(unknownOutbox).toMatchObject({
+      state: 'unknown', attempt_count: 1, error_code: 'transport-ambiguous',
+    })
+    expect(unknownOutbox.payload_json).not.toContain('Project status')
+    expect(unknownOutbox.payload_json).not.toContain('Planned')
+    expect(restartedDatabase.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM workbench_command_receipt WHERE command_id = ?) AS receipts,
+        (SELECT COUNT(*) FROM workbench_audit_event WHERE command_id = ?) AS audits,
+        (SELECT COUNT(*) FROM workbench_outbox WHERE command_id = ?) AS outboxes
+    `).get(
+      mutation.command.commandId,
+      mutation.command.commandId,
+      mutation.command.commandId,
+    )).toEqual({ receipts: 1, audits: 1, outboxes: 1 })
+    const activity = await repository.readActivity({
+      organizationId: 'organization-workflow-reliability',
+      filter: { projectId: PROJECT_ID, objectType: 'feishu-task-workflow', limit: 10 },
+    }, signal)
+    expect(activity.items).toEqual([
+      expect.objectContaining({
+        eventId: mutation.command.auditEventId,
+        causationId: request.causationId,
+        outbox: expect.objectContaining({
+          id: mutation.command.outboxId,
+          state: 'unknown',
+          attemptCount: 1,
+          errorCode: 'transport-ambiguous',
+        }),
+      }),
+    ])
+    expect(JSON.stringify(activity)).not.toContain('Project status')
+    expect(JSON.stringify(activity)).not.toContain('Planned')
+    await expect(repository.verifyAuditChain(signal)).resolves.toMatchObject({ valid: true })
+    await restarted.close()
+  })
+
+  it('recomputes the reserved workflow request hash from immutable normalized intent', async () => {
+    const fixture = await scenarioFixture(null)
+    fixture.adapter.workflowFields = Object.freeze([])
+    const request = createWorkflowRequest('intent-integrity-0001')
+    const mutation = workflowOperationMutation(request, 'intent-integrity-0001')
+    await fixture.repository.reserveFeishuTaskWorkflowOperation(mutation, signal)
+    const database = Reflect.get(fixture.repository, 'database') as DatabaseSync
+    database.exec('DROP TRIGGER workbench_feishu_task_workflow_operation_intent_no_update')
+    database.prepare(`
+      UPDATE workbench_feishu_task_workflow_operation SET definition_json = ? WHERE id = ?
+    `).run(canonicalizeJson(definition({ fieldName: 'Tampered project status' })), mutation.operationId)
+
+    await expect(fixture.repository.reserveFeishuTaskWorkflowOperation(mutation, signal))
+      .rejects.toThrow(/invalid request or Outbox facts/u)
+    await fixture.scenario.close()
   })
 
   it('persists stable GUIDs for existing, create, and migrate mapping modes', async () => {
@@ -705,7 +968,7 @@ describe('T09 workflow reliability', () => {
   })
 
   it('blocks a used-state removal before provider mutation and surfaces a field CAS conflict', async () => {
-    const { scenario, adapter } = await scenarioFixture()
+    const { scenario, adapter, repository } = await scenarioFixture()
     await configureExisting(scenario)
     const removalDefinition = definition({
       states: Object.freeze([
@@ -759,7 +1022,7 @@ describe('T09 workflow reliability', () => {
         }),
       ]),
     })
-    await expect(scenario.configureFeishuTaskWorkflow({
+    const conflictRequest = Object.freeze({
       projectId: PROJECT_ID,
       expectedTaskRevision: 2,
       expectedWorkflowRevision: 1,
@@ -767,8 +1030,9 @@ describe('T09 workflow reliability', () => {
       mapping: Object.freeze({ mode: 'migrate' }),
       idempotencyKey: 'workflow-field-conflict-0001',
       causationId: 'workflow-field-conflict-cause-0001',
-      reason: 'owner-feishu-task-workflow-configure',
-    }, signal)).resolves.toMatchObject({
+      reason: 'owner-feishu-task-workflow-configure' as const,
+    })
+    await expect(scenario.configureFeishuTaskWorkflow(conflictRequest, signal)).resolves.toMatchObject({
       ok: false,
       error: {
         code: 'workflow-compatibility-blocked',
@@ -779,6 +1043,27 @@ describe('T09 workflow reliability', () => {
       },
     })
     expect(adapter.workflowUpdateCalls).toBe(1)
+    await expect(scenario.configureFeishuTaskWorkflow(conflictRequest, signal)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'workflow-compatibility-blocked',
+        compatibility: { issues: [expect.objectContaining({ code: 'field-version-changed' })] },
+      },
+    })
+    expect(adapter.workflowUpdateCalls).toBe(1)
+    expect((Reflect.get(repository, 'database') as DatabaseSync).prepare(`
+      SELECT operation.state, operation.attempt_count, outbox.state AS outbox_state,
+        outbox.attempt_count AS outbox_attempt_count, outbox.error_code
+      FROM workbench_feishu_task_workflow_operation AS operation
+      INNER JOIN workbench_outbox AS outbox ON outbox.id = operation.outbox_id
+      WHERE operation.project_id = ?
+    `).get(PROJECT_ID)).toEqual({
+      state: 'conflict',
+      attempt_count: 1,
+      outbox_state: 'failed',
+      outbox_attempt_count: 1,
+      error_code: 'definitive-rejection',
+    })
     await expect(scenario.projectTasks({ projectId: PROJECT_ID }, signal)).resolves.toMatchObject({
       revision: 2,
       workflow: {

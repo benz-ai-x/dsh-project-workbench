@@ -547,6 +547,8 @@ interface FeishuTaskWorkflowOperationRow {
   readonly expected_task_revision: number
   readonly expected_workflow_revision: number | null
   readonly mapping_mode: string
+  readonly definition_json: string
+  readonly mapping_json: string
   readonly request_hash: string
   readonly idempotency_key_hash: string
   readonly state: string
@@ -2582,37 +2584,70 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       },
       occurredAt: '1970-01-01T00:00:00.000Z',
     }
-    const receipt = findFeishuReceipt(database, command, idempotencyKeyHash(query.idempotencyKey))
-    if (receipt === undefined) {
-      const operation = readTaskWorkflowOperationByKey(
-        database,
-        query.organizationId,
-        query.actorId,
-        idempotencyKeyHash(query.idempotencyKey),
-      )
-      if (operation === null) return null
-      if (operation.request_hash !== taskWorkflowRequestHash(query)) {
+    const keyHash = idempotencyKeyHash(query.idempotencyKey)
+    const requestHash = taskWorkflowRequestHash(query)
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const receipt = findFeishuReceipt(database, command, keyHash)
+      if (receipt === undefined) {
+        const operation = readTaskWorkflowOperationByKey(
+          database,
+          query.organizationId,
+          query.actorId,
+          keyHash,
+        )
+        if (operation !== null) {
+          if (operation.request_hash !== requestHash) {
+            database.exec('COMMIT')
+            began = false
+            return taskIdempotencyConflict()
+          }
+          throw new Error('Workbench workflow operation lacks its receipt-first ledger')
+        }
+        database.exec('COMMIT')
+        began = false
+        return null
+      }
+      if (receipt.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
+        || receipt.request_hash !== requestHash) {
+        database.exec('COMMIT')
+        began = false
         return taskIdempotencyConflict()
       }
-      if (operation.state === 'prepared') return null
-      if (operation.state === 'inflight') {
-        markTaskWorkflowOperationUnknown(database, operation, operation.updated_at)
-        const recovered = readTaskWorkflowOperation(database, operation.id)
+      assertValidLedger(database)
+      const operation = readTaskWorkflowOperationByCommand(database, receipt.command_id)
+      if (operation === null) {
+        const replay = decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
+        throwIfAborted(signal)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
+      if (operation.state === 'prepared') {
+        database.exec('COMMIT')
+        began = false
+        return null
+      }
+      let replayOperation = operation
+      if (replayOperation.state === 'inflight') {
+        markTaskWorkflowOperationUnknown(database, replayOperation, replayOperation.updated_at)
+        const recovered = readTaskWorkflowOperation(database, replayOperation.id)
         if (recovered === null) throw new Error('Workbench workflow operation recovery disappeared')
-        return taskWorkflowOperationResult(recovered)
+        replayOperation = recovered
       }
-      if (operation.state === 'delivered') {
-        throw new Error('Workbench delivered workflow operation lacks its receipt')
-      }
-      return taskWorkflowOperationResult(operation)
+      const replay = replayOperation.state === 'delivered'
+        ? deliveredTaskWorkflowOperationResult(database, replayOperation, receipt)
+        : taskWorkflowOperationResult(replayOperation)
+      throwIfAborted(signal)
+      database.exec('COMMIT')
+      began = false
+      return replay
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
     }
-    if (receipt.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
-      || receipt.request_hash !== taskWorkflowRequestHash(query)) {
-      return taskIdempotencyConflict()
-    }
-    assertValidLedger(database)
-    throwIfAborted(signal)
-    return decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
   }
 
   async reserveFeishuTaskWorkflowOperation(
@@ -2637,7 +2672,32 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
           return Object.freeze({ state: 'rejected', result: taskIdempotencyConflict() })
         }
         assertValidLedger(database)
-        const replay = decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
+        let operation = readTaskWorkflowOperationByCommand(database, receipt.command_id)
+        if (operation === null) {
+          const replay = decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
+          database.exec('COMMIT')
+          began = false
+          return Object.freeze({ state: 'replay', result: replay })
+        }
+        if (operation.state === 'prepared') {
+          const reservedCommand = taskWorkflowOperationCommand(operation, mutation.command)
+          database.exec('COMMIT')
+          began = false
+          return Object.freeze({
+            state: 'deliver',
+            operationId: operation.id,
+            command: reservedCommand,
+          })
+        }
+        if (operation.state === 'inflight') {
+          markTaskWorkflowOperationUnknown(database, operation, mutation.preparedAt)
+          const recovered = readTaskWorkflowOperation(database, operation.id)
+          if (recovered === null) throw new Error('Workbench workflow operation recovery disappeared')
+          operation = recovered
+        }
+        const replay = operation.state === 'delivered'
+          ? deliveredTaskWorkflowOperationResult(database, operation, receipt)
+          : taskWorkflowOperationResult(operation)
         database.exec('COMMIT')
         began = false
         return Object.freeze({ state: 'replay', result: replay })
@@ -2654,24 +2714,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
           began = false
           return Object.freeze({ state: 'rejected', result: taskIdempotencyConflict() })
         }
-        if (operation.state === 'prepared') {
-          const command = taskWorkflowOperationCommand(operation, mutation.command)
-          database.exec('COMMIT')
-          began = false
-          return Object.freeze({ state: 'deliver', operationId: operation.id, command })
-        }
-        if (operation.state === 'inflight') {
-          markTaskWorkflowOperationUnknown(database, operation, mutation.preparedAt)
-          operation = readTaskWorkflowOperation(database, operation.id)
-          if (operation === null) throw new Error('Workbench workflow operation recovery disappeared')
-        }
-        if (operation.state === 'delivered') {
-          throw new Error('Workbench delivered workflow operation lacks its receipt')
-        }
-        const result = taskWorkflowOperationResult(operation)
-        database.exec('COMMIT')
-        began = false
-        return Object.freeze({ state: 'replay', result })
+        throw new Error('Workbench workflow operation lacks its receipt-first ledger')
       }
       assertValidLedger(database)
       const binding = readTaskBindingRow(database, mutation.projectId)
@@ -2733,9 +2776,10 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         INSERT INTO workbench_feishu_task_workflow_operation (
           id, project_id, organization_id, team_id, actor_id,
           expected_task_revision, expected_workflow_revision, mapping_mode,
+          definition_json, mapping_json,
           request_hash, idempotency_key_hash, state, issue_json, attempt_count,
           command_id, audit_event_id, outbox_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', NULL, 0, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', NULL, 0, ?, ?, ?, ?, ?)
       `).run(
         mutation.operationId,
         mutation.projectId,
@@ -2745,6 +2789,8 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         mutation.expectedTaskRevision,
         mutation.expectedWorkflowRevision,
         mutation.mapping.mode,
+        canonicalizeJson(projectTaskWorkflowDefinition(mutation.definition)),
+        canonicalizeJson(normalizedWorkflowMapping(mutation.mapping)),
         requestHash,
         keyHash,
         mutation.command.commandId,
@@ -2754,6 +2800,20 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         mutation.preparedAt,
       )
       if (inserted.changes !== 1) throw new Error('Workbench workflow operation was not reserved')
+      const accepted = taskWorkflowOperationAcceptedResult(mutation)
+      appendFeishuTaskLedger(database, {
+        command: mutation.command,
+        requestHash,
+        commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+        auditAction: FEISHU_TASK_WORKFLOW_AUDIT_ACTION,
+        summaryCode: FEISHU_TASK_WORKFLOW_SUMMARY,
+        objectType: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+        objectId: mutation.projectId,
+        objectVersion: (mutation.expectedWorkflowRevision ?? 0) + 1,
+        changedFields: ['workflowDefinition', 'fieldMapping', 'compatibility'],
+        outboxTopic: FEISHU_TASK_WORKFLOW_OUTBOX_TOPIC,
+        result: accepted,
+      })
       database.exec('COMMIT')
       began = false
       return Object.freeze({
@@ -2776,12 +2836,34 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
     validateBoundedReference(operationId, 'Feishu workflow operation id')
     canonicalInstant(claimedAt, 'Feishu workflow operation claimedAt')
     const database = this.requireDatabase()
-    const updated = database.prepare(`
-      UPDATE workbench_feishu_task_workflow_operation
-      SET state = 'inflight', attempt_count = 1, updated_at = ?
-      WHERE id = ? AND state = 'prepared' AND attempt_count = 0
-    `).run(claimedAt, operationId)
-    return updated.changes === 1
+    let began = false
+    try {
+      database.exec('BEGIN IMMEDIATE')
+      began = true
+      const operation = readTaskWorkflowOperation(database, operationId)
+      if (operation === null || operation.state !== 'prepared') {
+        database.exec('COMMIT')
+        began = false
+        return false
+      }
+      const updated = database.prepare(`
+        UPDATE workbench_feishu_task_workflow_operation
+        SET state = 'inflight', attempt_count = 1, updated_at = ?
+        WHERE id = ? AND state = 'prepared' AND attempt_count = 0
+      `).run(claimedAt, operationId)
+      if (updated.changes !== 1) throw new Error('Workbench workflow operation claim lost its CAS')
+      const outbox = database.prepare(`
+        UPDATE workbench_outbox SET attempt_count = 1, updated_at = ?
+        WHERE id = ? AND state = 'pending' AND attempt_count = 0
+      `).run(claimedAt, operation.outbox_id)
+      if (outbox.changes !== 1) throw new Error('Workbench workflow operation Outbox was not claimed')
+      database.exec('COMMIT')
+      began = false
+      return true
+    } catch (error: unknown) {
+      if (began) this.rollbackAfterFailure(database, error)
+      throw error
+    }
   }
 
   async settleFeishuTaskWorkflowOperation(
@@ -2822,6 +2904,16 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         began = false
         return replay
       }
+      if (operation.state === 'delivered') {
+        const receipt = readFeishuReceiptByCommand(database, operation.command_id)
+        if (receipt === undefined) {
+          throw new Error('Workbench delivered workflow operation lacks its receipt')
+        }
+        const replay = deliveredTaskWorkflowOperationResult(database, operation, receipt)
+        database.exec('COMMIT')
+        began = false
+        return replay
+      }
       if (operation.state !== 'inflight' || operation.attempt_count !== 1) {
         throw new Error('Workbench workflow operation is not claimable for settlement')
       }
@@ -2836,6 +2928,18 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         operationId,
       )
       if (updated.changes !== 1) throw new Error('Workbench workflow operation settlement lost its CAS')
+      const outboxState = settlement.state === 'unknown' ? 'unknown' : 'failed'
+      const outboxError = settlement.state === 'unknown'
+        ? 'transport-ambiguous'
+        : 'definitive-rejection'
+      const outbox = database.prepare(`
+        UPDATE workbench_outbox SET state = ?, error_code = ?, claim_token = NULL,
+          claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND state = 'pending' AND attempt_count = 1
+      `).run(outboxState, outboxError, settlement.settledAt, operation.outbox_id)
+      if (outbox.changes !== 1) {
+        throw new Error('Workbench workflow operation Outbox was not settled')
+      }
       const settled = readTaskWorkflowOperation(database, operationId)
       if (settled === null) throw new Error('Workbench settled workflow operation disappeared')
       const result = taskWorkflowOperationResult(settled)
@@ -2862,6 +2966,9 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       database.exec('BEGIN IMMEDIATE')
       began = true
       const receipt = findFeishuReceipt(database, mutation.command, keyHash)
+      const externalOperation = mutation.mapping.mode === 'existing'
+        ? null
+        : readTaskWorkflowOperation(database, mutation.operationId as string)
       if (receipt !== undefined) {
         if (receipt.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
           || receipt.request_hash !== requestHash) {
@@ -2870,15 +2977,34 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
           return taskIdempotencyConflict()
         }
         assertValidLedger(database)
-        const replay = decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
-        database.exec('COMMIT')
-        began = false
-        return replay
+        if (externalOperation === null && mutation.mapping.mode === 'existing') {
+          const replay = decodeTaskWorkflowConfigurationResult(receipt.result_json, receipt)
+          database.exec('COMMIT')
+          began = false
+          return replay
+        }
+        if (externalOperation === null) {
+          throw new Error('Workbench workflow configuration lacks its reserved provider operation')
+        }
+        if (externalOperation.state === 'delivered') {
+          const replay = deliveredTaskWorkflowOperationResult(database, externalOperation, receipt)
+          database.exec('COMMIT')
+          began = false
+          return replay
+        }
+        if (externalOperation.state === 'unknown' || externalOperation.state === 'failed'
+          || externalOperation.state === 'conflict') {
+          const replay = taskWorkflowOperationResult(externalOperation)
+          database.exec('COMMIT')
+          began = false
+          return replay
+        }
+      } else {
+        assertValidLedger(database)
+        if (externalOperation !== null || mutation.mapping.mode !== 'existing') {
+          throw new Error('Workbench workflow provider operation lacks its receipt-first ledger')
+        }
       }
-      assertValidLedger(database)
-      const externalOperation = mutation.mapping.mode === 'existing'
-        ? null
-        : readTaskWorkflowOperation(database, mutation.operationId as string)
       if (mutation.mapping.mode !== 'existing'
         && (externalOperation === null
           || externalOperation.state !== 'inflight'
@@ -2990,7 +3116,8 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         ? 1
         : incrementRevision(currentRevision, 'Feishu workflow')
       const taskRevision = incrementRevision(binding.revision, 'Feishu task projection')
-      const definitionJson = canonicalizeJson(mutation.definition)
+      const definitionJson = canonicalizeJson(projectTaskWorkflowDefinition(mutation.definition))
+      const mappingJson = canonicalizeJson(normalizedWorkflowMapping(mutation.mapping))
       const optionsJson = canonicalizeJson(mutation.field.options)
       const issuesJson = canonicalizeJson(mutation.compatibility.issues)
       if (current === null) {
@@ -3048,7 +3175,7 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         mutation.field.fieldGuid,
         mutation.field.remoteVersion,
         definitionJson,
-        canonicalizeJson(mutation.mapping),
+        mappingJson,
         optionsJson,
         mutation.compatibility.state,
         issuesJson,
@@ -3079,20 +3206,29 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
         if (delivered.changes !== 1) {
           throw new Error('Workbench workflow provider operation was not committed as delivered')
         }
+        const outbox = database.prepare(`
+          UPDATE workbench_outbox SET state = 'delivered', error_code = NULL,
+            claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+          WHERE id = ? AND state = 'pending' AND attempt_count = 1
+        `).run(mutation.configuredAt, externalOperation.outbox_id)
+        if (outbox.changes !== 1) {
+          throw new Error('Workbench workflow provider operation Outbox was not delivered')
+        }
+      } else {
+        appendFeishuTaskLedger(database, {
+          command: mutation.command,
+          requestHash,
+          commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+          auditAction: FEISHU_TASK_WORKFLOW_AUDIT_ACTION,
+          summaryCode: FEISHU_TASK_WORKFLOW_SUMMARY,
+          objectType: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+          objectId: mutation.projectId,
+          objectVersion: workflowRevision,
+          changedFields: ['workflowDefinition', 'fieldMapping', 'compatibility'],
+          outboxTopic: FEISHU_TASK_WORKFLOW_OUTBOX_TOPIC,
+          result: committed,
+        })
       }
-      appendFeishuTaskLedger(database, {
-        command: mutation.command,
-        requestHash,
-        commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
-        auditAction: FEISHU_TASK_WORKFLOW_AUDIT_ACTION,
-        summaryCode: FEISHU_TASK_WORKFLOW_SUMMARY,
-        objectType: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
-        objectId: mutation.projectId,
-        objectVersion: workflowRevision,
-        changedFields: ['workflowDefinition', 'fieldMapping', 'compatibility'],
-        outboxTopic: FEISHU_TASK_WORKFLOW_OUTBOX_TOPIC,
-        result: committed,
-      })
       database.exec('COMMIT')
       began = false
       return committed
@@ -4652,6 +4788,16 @@ function findFeishuReceipt(
     command.actor.id,
     keyHash,
   ) as ReceiptRow | undefined
+}
+
+function readFeishuReceiptByCommand(
+  database: DatabaseSync,
+  commandId: string,
+): ReceiptRow | undefined {
+  return database.prepare(`
+    SELECT command_type, request_hash, command_id, audit_event_id, outbox_id, result_json
+    FROM workbench_command_receipt WHERE command_id = ?
+  `).get(commandId) as ReceiptRow | undefined
 }
 
 function feishuRouteRequestHash(
@@ -6542,6 +6688,8 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
         expected_task_revision INTEGER NOT NULL CHECK (expected_task_revision > 0),
         expected_workflow_revision INTEGER CHECK (expected_workflow_revision > 0),
         mapping_mode TEXT NOT NULL CHECK (mapping_mode IN ('create', 'migrate')),
+        definition_json TEXT NOT NULL CHECK (length(definition_json) > 0),
+        mapping_json TEXT NOT NULL CHECK (length(mapping_json) > 0),
         request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
         idempotency_key_hash TEXT NOT NULL CHECK (length(idempotency_key_hash) = 64),
         state TEXT NOT NULL
@@ -6578,7 +6726,8 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
       BEGIN SELECT RAISE(ABORT, 'workbench Feishu workflow versions cannot be deleted'); END;
       CREATE TRIGGER workbench_feishu_task_workflow_operation_intent_no_update BEFORE UPDATE OF
         id, project_id, organization_id, team_id, actor_id, expected_task_revision,
-        expected_workflow_revision, mapping_mode, request_hash, idempotency_key_hash,
+        expected_workflow_revision, mapping_mode, definition_json, mapping_json,
+        request_hash, idempotency_key_hash,
         command_id, audit_event_id, outbox_id, created_at
         ON workbench_feishu_task_workflow_operation
       BEGIN SELECT RAISE(ABORT, 'workbench Feishu workflow operation intent is immutable'); END;
@@ -6706,7 +6855,7 @@ function validateSchema(database: DatabaseSync): void {
   `)
   database.prepare(`
     SELECT id, project_id, expected_task_revision, expected_workflow_revision,
-      mapping_mode, request_hash, state, attempt_count, command_id
+      mapping_mode, definition_json, mapping_json, request_hash, state, attempt_count, command_id
     FROM workbench_feishu_task_workflow_operation LIMIT 1
   `)
   const triggers = new Set((database.prepare(`
@@ -9930,6 +10079,7 @@ function assertValidFeishuTasks(database: DatabaseSync): void {
     const workflowOperations = database.prepare(`
       SELECT id, project_id, organization_id, team_id, actor_id,
         expected_task_revision, expected_workflow_revision, mapping_mode,
+        definition_json, mapping_json,
         request_hash, idempotency_key_hash, state, issue_json, attempt_count,
         command_id, audit_event_id, outbox_id, created_at, updated_at
       FROM workbench_feishu_task_workflow_operation
@@ -9943,18 +10093,42 @@ function assertValidFeishuTasks(database: DatabaseSync): void {
         throw new Error('Workbench workflow operation escaped its task binding')
       }
       const receipt = database.prepare(`
-        SELECT command_type, request_hash FROM workbench_command_receipt WHERE command_id = ?
+        SELECT command_type, request_hash, audit_event_id, outbox_id
+        FROM workbench_command_receipt WHERE command_id = ?
       `).get(operation.command_id) as {
         readonly command_type: string
         readonly request_hash: string
+        readonly audit_event_id: string
+        readonly outbox_id: string
       } | undefined
-      if (operation.state === 'delivered') {
-        if (receipt?.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
-          || receipt.request_hash !== operation.request_hash) {
-          throw new Error('Delivered workflow operation lacks its configuration receipt')
-        }
-      } else if (receipt !== undefined) {
-        throw new Error('Uncommitted workflow operation unexpectedly owns a receipt')
+      if (receipt?.command_type !== FEISHU_TASK_WORKFLOW_COMMAND_TYPE
+        || receipt.request_hash !== operation.request_hash
+        || receipt.audit_event_id !== operation.audit_event_id
+        || receipt.outbox_id !== operation.outbox_id) {
+        throw new Error('Workflow operation lacks its receipt-first ledger')
+      }
+      const outbox = database.prepare(`
+        SELECT state, attempt_count, error_code FROM workbench_outbox WHERE id = ?
+      `).get(operation.outbox_id) as {
+        readonly state: string
+        readonly attempt_count: number
+        readonly error_code: string | null
+      } | undefined
+      const claimed = operation.state !== 'prepared'
+      const expectedOutboxState = operation.state === 'delivered'
+        ? 'delivered'
+        : operation.state === 'unknown'
+          ? 'unknown'
+          : operation.state === 'failed' || operation.state === 'conflict'
+            ? 'failed'
+            : 'pending'
+      const expectedError = expectedOutboxState === 'unknown'
+        ? 'transport-ambiguous'
+        : expectedOutboxState === 'failed' ? 'definitive-rejection' : null
+      if (outbox === undefined || outbox.state !== expectedOutboxState
+        || outbox.attempt_count !== (claimed ? 1 : 0)
+        || outbox.error_code !== expectedError) {
+        throw new Error('Workflow operation disagrees with its Outbox state')
       }
     }
 
@@ -10559,74 +10733,113 @@ function assertValidFeishuTaskReceipt(
       causationId: row.audit_causation_id,
     }))
   } else if (row.command_type === FEISHU_TASK_WORKFLOW_COMMAND_TYPE) {
-    const decoded = decodeTaskWorkflowConfigurationResult(row.result_json, row)
-    const workflow = decoded.value.workflow
-    if (workflow === null || decoded.value.projectId !== row.audit_project_id
-      || row.audit_object_id !== decoded.value.projectId
-      || row.audit_object_version !== workflow.revision) {
-      throw new Error('Workbench workflow receipt does not match its projection')
-    }
-    const version = database.prepare(`
-      SELECT revision, definition_json, mapping_json, field_guid, field_remote_version,
-        options_json, compatibility_state, compatibility_issues_json, created_at
-      FROM workbench_feishu_task_workflow_version WHERE command_id = ?
-    `).get(row.command_id) as {
-      readonly revision: number
-      readonly definition_json: string
-      readonly mapping_json: string
-      readonly field_guid: string
-      readonly field_remote_version: string
-      readonly options_json: string
-      readonly compatibility_state: string
-      readonly compatibility_issues_json: string
-      readonly created_at: string
-    } | undefined
-    if (version === undefined || version.revision !== workflow.revision
-      || version.created_at !== row.audit_occurred_at) {
-      throw new Error('Workbench workflow receipt lost its immutable version')
-    }
-    let mapping: unknown
-    try { mapping = JSON.parse(version.mapping_json) } catch {
-      throw new Error('Workbench workflow version contains invalid mapping JSON')
-    }
-    validateWorkflowMapping(mapping as import('./client.ts').ConfigureFeishuTaskWorkflowMapping)
-    const operation = database.prepare(`
-      SELECT id, project_id, organization_id, team_id, actor_id,
-        expected_task_revision, expected_workflow_revision, mapping_mode,
-        request_hash, idempotency_key_hash, state, issue_json, attempt_count,
-        command_id, audit_event_id, outbox_id, created_at, updated_at
-      FROM workbench_feishu_task_workflow_operation WHERE command_id = ?
-    `).get(row.command_id) as FeishuTaskWorkflowOperationRow | undefined
-    if ((mapping as import('./client.ts').ConfigureFeishuTaskWorkflowMapping).mode === 'existing') {
-      if (operation !== undefined) {
-        throw new Error('Mapped workflow receipt unexpectedly owns a provider operation')
-      }
-    } else {
-      if (operation === undefined) {
-        throw new Error('Workflow provider write receipt lacks its durable operation')
-      }
-      validateStoredTaskWorkflowOperation(operation)
-      if (operation.state !== 'delivered' || operation.request_hash !== row.request_hash
+    const operation = readTaskWorkflowOperationByCommand(database, row.command_id)
+    if (operation !== null) {
+      const accepted = decodeTaskWorkflowOperationAcceptedResult(row.result_json, row)
+      const intent = decodeStoredTaskWorkflowOperationIntent(operation)
+      if (accepted.operationId !== operation.id
+        || accepted.projectId !== operation.project_id
+        || accepted.mappingMode !== operation.mapping_mode
+        || accepted.expectedTaskRevision !== operation.expected_task_revision
+        || accepted.expectedWorkflowRevision !== operation.expected_workflow_revision
+        || accepted.createdAt !== operation.created_at
+        || operation.organization_id !== row.audit_organization_id
+        || operation.team_id !== row.audit_team_id
+        || operation.actor_id !== row.receipt_actor_id
+        || operation.idempotency_key_hash !== row.idempotency_key_hash
+        || operation.request_hash !== row.request_hash
         || operation.audit_event_id !== row.audit_event_id
-        || operation.outbox_id !== row.outbox_id) {
-        throw new Error('Workflow provider operation does not match its receipt')
+        || operation.outbox_id !== row.outbox_id
+        || row.audit_object_id !== operation.project_id
+        || row.audit_object_version !== (operation.expected_workflow_revision ?? 0) + 1
+        || row.audit_occurred_at !== operation.created_at) {
+        throw new Error('Workbench workflow operation receipt does not match its durable intent')
       }
+      const version = database.prepare(`
+        SELECT revision, definition_json, mapping_json, created_at
+        FROM workbench_feishu_task_workflow_version WHERE command_id = ?
+      `).get(row.command_id) as {
+        readonly revision: number
+        readonly definition_json: string
+        readonly mapping_json: string
+        readonly created_at: string
+      } | undefined
+      if (operation.state === 'delivered') {
+        if (version === undefined
+          || version.revision !== (operation.expected_workflow_revision ?? 0) + 1
+          || version.definition_json !== operation.definition_json
+          || version.mapping_json !== operation.mapping_json
+          || version.created_at !== row.audit_occurred_at) {
+          throw new Error('Delivered workflow operation disagrees with its immutable version')
+        }
+      } else if (version !== undefined) {
+        throw new Error('Uncommitted workflow operation unexpectedly owns a workflow version')
+      }
+      expectedRequestHash = digest(canonicalizeJson({
+        commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+        target: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+        scope: {
+          organizationId: operation.organization_id,
+          teamId: operation.team_id,
+          projectId: operation.project_id,
+        },
+        expectedTaskRevision: operation.expected_task_revision,
+        expectedWorkflowRevision: operation.expected_workflow_revision,
+        definition: intent.definition,
+        mapping: intent.mapping,
+        reason: vocabulary.reason,
+        causationId: row.audit_causation_id,
+      }))
+    } else {
+      const decoded = decodeTaskWorkflowConfigurationResult(row.result_json, row)
+      const workflow = decoded.value.workflow
+      if (workflow === null || decoded.value.projectId !== row.audit_project_id
+        || row.audit_object_id !== decoded.value.projectId
+        || row.audit_object_version !== workflow.revision) {
+        throw new Error('Workbench mapped workflow receipt does not match its projection')
+      }
+      const version = database.prepare(`
+        SELECT revision, definition_json, mapping_json, created_at
+        FROM workbench_feishu_task_workflow_version WHERE command_id = ?
+      `).get(row.command_id) as {
+        readonly revision: number
+        readonly definition_json: string
+        readonly mapping_json: string
+        readonly created_at: string
+      } | undefined
+      if (version === undefined || version.revision !== workflow.revision
+        || version.created_at !== row.audit_occurred_at) {
+        throw new Error('Workbench mapped workflow receipt lost its immutable version')
+      }
+      let mappingValue: unknown
+      try { mappingValue = JSON.parse(version.mapping_json) } catch {
+        throw new Error('Workbench mapped workflow version contains invalid mapping JSON')
+      }
+      const mapping = normalizedWorkflowMapping(
+        mappingValue as import('./client.ts').ConfigureFeishuTaskWorkflowMapping,
+      )
+      if (canonicalizeJson(mapping) !== version.mapping_json) {
+        throw new Error('Workbench mapped workflow version is not normalized')
+      }
+      if (mapping.mode !== 'existing') {
+        throw new Error('Workbench external workflow receipt lost its durable operation')
+      }
+      expectedRequestHash = digest(canonicalizeJson({
+        commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
+        target: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
+        scope: {
+          organizationId: row.audit_organization_id,
+          teamId: row.audit_team_id,
+          projectId: row.audit_project_id,
+        },
+        expectedTaskRevision: decoded.value.revision - 1,
+        expectedWorkflowRevision: workflow.revision === 1 ? null : workflow.revision - 1,
+        definition: workflow.definition,
+        mapping,
+        reason: vocabulary.reason,
+        causationId: row.audit_causation_id,
+      }))
     }
-    expectedRequestHash = digest(canonicalizeJson({
-      commandType: FEISHU_TASK_WORKFLOW_COMMAND_TYPE,
-      target: FEISHU_TASK_WORKFLOW_OBJECT_TYPE,
-      scope: {
-        organizationId: row.audit_organization_id,
-        teamId: row.audit_team_id,
-        projectId: row.audit_project_id,
-      },
-      expectedTaskRevision: decoded.value.revision - 1,
-      expectedWorkflowRevision: workflow.revision === 1 ? null : workflow.revision - 1,
-      definition: workflow.definition,
-      mapping,
-      reason: vocabulary.reason,
-      causationId: row.audit_causation_id,
-    }))
   } else {
     let parsed: unknown
     try { parsed = JSON.parse(row.result_json) } catch {
@@ -13239,8 +13452,8 @@ function taskWorkflowRequestHash(
     scope: { organizationId, teamId, projectId: mutation.projectId },
     expectedTaskRevision: mutation.expectedTaskRevision,
     expectedWorkflowRevision: mutation.expectedWorkflowRevision,
-    definition: mutation.definition,
-    mapping: mutation.mapping,
+    definition: projectTaskWorkflowDefinition(mutation.definition),
+    mapping: normalizedWorkflowMapping(mutation.mapping),
     reason,
     causationId,
   }))
@@ -14340,6 +14553,22 @@ function validateWorkflowMapping(
   }
 }
 
+function normalizedWorkflowMapping(
+  mapping: import('./client.ts').ConfigureFeishuTaskWorkflowMapping,
+): import('./client.ts').ConfigureFeishuTaskWorkflowMapping {
+  validateWorkflowMapping(mapping)
+  if (mapping.mode === 'create') return Object.freeze({ mode: 'create' })
+  if (mapping.mode === 'migrate') return Object.freeze({ mode: 'migrate' })
+  return Object.freeze({
+    mode: 'existing',
+    fieldGuid: mapping.fieldGuid,
+    options: Object.freeze(mapping.options.map(option => Object.freeze({
+      stateId: option.stateId,
+      optionGuid: option.optionGuid,
+    }))),
+  })
+}
+
 function validateTaskReconciliationMutation(
   mutation: WorkbenchFeishuTaskReconciliationMutation,
 ): void {
@@ -14669,6 +14898,7 @@ function readTaskWorkflowOperation(
   const row = database.prepare(`
     SELECT id, project_id, organization_id, team_id, actor_id,
       expected_task_revision, expected_workflow_revision, mapping_mode,
+      definition_json, mapping_json,
       request_hash, idempotency_key_hash, state, issue_json, attempt_count,
       command_id, audit_event_id, outbox_id, created_at, updated_at
     FROM workbench_feishu_task_workflow_operation WHERE id = ?
@@ -14687,6 +14917,7 @@ function readTaskWorkflowOperationByKey(
   const row = database.prepare(`
     SELECT id, project_id, organization_id, team_id, actor_id,
       expected_task_revision, expected_workflow_revision, mapping_mode,
+      definition_json, mapping_json,
       request_hash, idempotency_key_hash, state, issue_json, attempt_count,
       command_id, audit_event_id, outbox_id, created_at, updated_at
     FROM workbench_feishu_task_workflow_operation
@@ -14696,6 +14927,23 @@ function readTaskWorkflowOperationByKey(
     actorId,
     idempotencyKeyHashValue,
   ) as FeishuTaskWorkflowOperationRow | undefined
+  if (row === undefined) return null
+  validateStoredTaskWorkflowOperation(row)
+  return row
+}
+
+function readTaskWorkflowOperationByCommand(
+  database: DatabaseSync,
+  commandId: string,
+): FeishuTaskWorkflowOperationRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, organization_id, team_id, actor_id,
+      expected_task_revision, expected_workflow_revision, mapping_mode,
+      definition_json, mapping_json,
+      request_hash, idempotency_key_hash, state, issue_json, attempt_count,
+      command_id, audit_event_id, outbox_id, created_at, updated_at
+    FROM workbench_feishu_task_workflow_operation WHERE command_id = ?
+  `).get(commandId) as FeishuTaskWorkflowOperationRow | undefined
   if (row === undefined) return null
   validateStoredTaskWorkflowOperation(row)
   return row
@@ -14719,6 +14967,10 @@ function validateStoredTaskWorkflowOperation(row: FeishuTaskWorkflowOperationRow
   if (row.mapping_mode !== 'create' && row.mapping_mode !== 'migrate') {
     throw new Error('Stored workflow operation mapping mode is invalid')
   }
+  const intent = decodeStoredTaskWorkflowOperationIntent(row)
+  if (intent.mapping.mode !== row.mapping_mode) {
+    throw new Error('Stored workflow operation mapping mode disagrees with its intent')
+  }
   if (!SHA256_HEX.test(row.request_hash) || !SHA256_HEX.test(row.idempotency_key_hash)) {
     throw new Error('Stored workflow operation contains an invalid digest')
   }
@@ -14736,6 +14988,40 @@ function validateStoredTaskWorkflowOperation(row: FeishuTaskWorkflowOperationRow
   }
   canonicalInstant(row.created_at, 'Stored workflow operation createdAt')
   canonicalInstant(row.updated_at, 'Stored workflow operation updatedAt')
+}
+
+function decodeStoredTaskWorkflowOperationIntent(
+  row: FeishuTaskWorkflowOperationRow,
+): Readonly<{
+  definition: ProjectTaskWorkflowDefinition
+  mapping: import('./client.ts').ConfigureFeishuTaskWorkflowMapping
+}> {
+  let definitionValue: unknown
+  let mappingValue: unknown
+  try {
+    definitionValue = JSON.parse(row.definition_json)
+    mappingValue = JSON.parse(row.mapping_json)
+  } catch {
+    throw new Error('Stored workflow operation intent is invalid JSON')
+  }
+  if (canonicalizeJson(definitionValue) !== row.definition_json
+    || canonicalizeJson(mappingValue) !== row.mapping_json) {
+    throw new Error('Stored workflow operation intent is not canonical JSON')
+  }
+  const definition = projectTaskWorkflowDefinition(
+    definitionValue as ProjectTaskWorkflowDefinition,
+  )
+  const mapping = normalizedWorkflowMapping(
+    mappingValue as import('./client.ts').ConfigureFeishuTaskWorkflowMapping,
+  )
+  if (canonicalizeJson(definition) !== row.definition_json
+    || canonicalizeJson(mapping) !== row.mapping_json) {
+    throw new Error('Stored workflow operation intent is not normalized')
+  }
+  if (mapping.mode !== 'create' && mapping.mode !== 'migrate') {
+    throw new Error('Stored workflow operation does not contain an external mapping intent')
+  }
+  return Object.freeze({ definition, mapping })
 }
 
 function taskWorkflowOperationCommand(
@@ -14774,6 +15060,14 @@ function markTaskWorkflowOperationUnknown(
     WHERE id = ? AND state = 'inflight' AND attempt_count = 1
   `).run(canonicalizeJson(ambiguousTaskIssue()), recoveredAt, operation.id)
   if (updated.changes !== 1) throw new Error('Workbench workflow operation recovery lost its CAS')
+  const outbox = database.prepare(`
+    UPDATE workbench_outbox SET state = 'unknown', error_code = 'transport-ambiguous',
+      claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL, updated_at = ?
+    WHERE id = ? AND state = 'pending' AND attempt_count = 1
+  `).run(recoveredAt, operation.outbox_id)
+  if (outbox.changes !== 1) {
+    throw new Error('Workbench workflow operation Outbox recovery lost its CAS')
+  }
 }
 
 function markTaskWorkflowCommitConflictUnknown(
@@ -14808,6 +15102,119 @@ function taskWorkflowOperationResult(
         ? 'Feishu workflow-field write outcome is unknown; inspect and map the resulting field'
         : 'Feishu rejected the workflow-field write',
       issue: cloneFeishuIssue(issue),
+    }),
+  })
+}
+
+function taskWorkflowOperationAcceptedResult(
+  mutation: WorkbenchFeishuTaskWorkflowOperationMutation,
+) {
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      operationId: mutation.operationId,
+      projectId: mutation.projectId,
+      state: 'prepared' as const,
+      mappingMode: mutation.mapping.mode,
+      expectedTaskRevision: mutation.expectedTaskRevision,
+      expectedWorkflowRevision: mutation.expectedWorkflowRevision,
+      createdAt: mutation.preparedAt,
+    }),
+    receipt: taskReceipt(mutation.command),
+  })
+}
+
+function decodeTaskWorkflowOperationAcceptedResult(
+  resultJson: string,
+  receipt: ReceiptRow,
+): Readonly<{
+  operationId: string
+  projectId: string
+  mappingMode: 'create' | 'migrate'
+  expectedTaskRevision: number
+  expectedWorkflowRevision: number | null
+  createdAt: string
+}> {
+  let parsed: unknown
+  try { parsed = JSON.parse(resultJson) } catch {
+    throw new Error('Workbench workflow operation receipt contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== resultJson) {
+    throw new Error('Workbench workflow operation receipt is not canonical JSON')
+  }
+  const accepted = objectValue(parsed, 'Workbench workflow operation receipt')
+  if (accepted.ok !== true) throw new Error('Workbench workflow operation receipt is not accepted')
+  const storedReceipt = objectValue(
+    accepted.receipt,
+    'Workbench workflow operation command receipt',
+  )
+  if (storedReceipt.commandId !== receipt.command_id
+    || storedReceipt.auditEventId !== receipt.audit_event_id
+    || storedReceipt.outboxId !== receipt.outbox_id) {
+    throw new Error('Workbench workflow operation receipt references mismatched ledger artifacts')
+  }
+  const value = objectValue(accepted.value, 'Workbench workflow accepted operation')
+  if (value.state !== 'prepared'
+    || (value.mappingMode !== 'create' && value.mappingMode !== 'migrate')) {
+    throw new Error('Workbench workflow operation receipt has an invalid accepted state')
+  }
+  const expectedWorkflowRevision = value.expectedWorkflowRevision === null
+    ? null
+    : positiveInteger(
+      value.expectedWorkflowRevision,
+      'Workbench workflow operation expected workflow revision',
+    )
+  return Object.freeze({
+    operationId: boundedReference(value.operationId, 'Workbench workflow operation receipt id'),
+    projectId: boundedReference(value.projectId, 'Workbench workflow operation receipt Project id'),
+    mappingMode: value.mappingMode,
+    expectedTaskRevision: positiveInteger(
+      value.expectedTaskRevision,
+      'Workbench workflow operation expected task revision',
+    ),
+    expectedWorkflowRevision,
+    createdAt: canonicalInstant(value.createdAt, 'Workbench workflow operation createdAt'),
+  })
+}
+
+function deliveredTaskWorkflowOperationResult(
+  database: DatabaseSync,
+  operation: FeishuTaskWorkflowOperationRow,
+  receipt: ReceiptRow,
+): Extract<ConfigureFeishuTaskWorkflowResult, { readonly ok: true }> {
+  validateStoredTaskWorkflowOperation(operation)
+  if (operation.state !== 'delivered' || receipt.command_id !== operation.command_id
+    || receipt.audit_event_id !== operation.audit_event_id
+    || receipt.outbox_id !== operation.outbox_id
+    || receipt.request_hash !== operation.request_hash) {
+    throw new Error('Workbench delivered workflow operation disagrees with its receipt')
+  }
+  const version = database.prepare(`
+    SELECT project_id, revision FROM workbench_feishu_task_workflow_version
+    WHERE command_id = ?
+  `).get(operation.command_id) as {
+    readonly project_id: string
+    readonly revision: number
+  } | undefined
+  if (version === undefined || version.project_id !== operation.project_id
+    || version.revision !== (operation.expected_workflow_revision ?? 0) + 1) {
+    throw new Error('Workbench delivered workflow operation lost its immutable version')
+  }
+  const value = readProjectTasksProjection(database, {
+    organizationId: operation.organization_id,
+    teamId: operation.team_id,
+    projectId: operation.project_id,
+  })
+  if (value === null || value.workflow === null) {
+    throw new Error('Workbench delivered workflow operation lost its Project projection')
+  }
+  return Object.freeze({
+    ok: true,
+    value,
+    receipt: Object.freeze({
+      commandId: receipt.command_id,
+      auditEventId: receipt.audit_event_id,
+      outboxId: receipt.outbox_id,
     }),
   })
 }
