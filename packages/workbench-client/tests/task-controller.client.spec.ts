@@ -438,6 +438,27 @@ describe('WorkbenchProjectTasksController', () => {
     await controller.dispose()
   })
 
+  it('never submits a compatibility preview returned for another Project scope', async () => {
+    const configure = vi.fn()
+    const controller = new WorkbenchProjectTasksController(makeRemote({
+      projectTasks: vi.fn(() => Promise.resolve(remoteOk(projection()))),
+      previewFeishuTaskWorkflow: vi.fn(request => Promise.resolve(remoteOk(workflowPreview(
+        request.mapping,
+        { projectId: 'project-2', definition: request.definition },
+      )))),
+      configureFeishuTaskWorkflow: configure,
+    }))
+    await controller.selectProject('project-1')
+    const definition = workflowDefinition()
+    const mapping = { mode: 'create' as const }
+
+    await controller.previewWorkflow(definition, mapping)
+    expect(controller.canConfigureWorkflow(definition, mapping)).toBe(false)
+    await controller.configureWorkflow(definition, mapping)
+    expect(configure).not.toHaveBeenCalled()
+    await controller.dispose()
+  })
+
   it.each([
     { mode: 'create' as const, currentWorkflow: null, expectedWorkflowRevision: null },
     { mode: 'migrate' as const, currentWorkflow: workflowProjection(), expectedWorkflowRevision: 5 },

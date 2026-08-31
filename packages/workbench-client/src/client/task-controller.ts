@@ -363,9 +363,12 @@ export class WorkbenchProjectTasksController {
     definition: ProjectTaskWorkflowDefinition,
     mapping: ConfigureFeishuTaskWorkflowMapping,
   ): boolean {
+    const selection = this.state.selection
     const projection = this.state.projection
     const preview = this.state.workflowPreview
-    if (this.retryEnvelope !== null || projection === null || preview === null
+    if (this.retryEnvelope !== null || selection === null || projection === null || preview === null
+      || projection.projectId !== selection.projectId
+      || preview.projectId !== selection.projectId
       || preview.compatibility.state === 'blocked'
       || preview.taskRevision !== projection.revision
       || preview.workflowRevision !== (projection.workflow?.revision ?? null)) return false

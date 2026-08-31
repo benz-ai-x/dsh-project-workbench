@@ -31,4 +31,21 @@ describe('Project Workbench locale contract', () => {
       zh['review.risk.high'],
     ]).toEqual(['低风险', '高风险'])
   })
+
+  it('stabilizes bilingual workflow review and explicit-completion copy', () => {
+    expect([
+      zh['tasks.workflow.preview'],
+      zh['tasks.workflow.completionSuggested'],
+      zh['tasks.workflow.confirmCompletion'],
+    ]).toEqual(['预览兼容性', '建议完成', '确认完成任务'])
+    expect([
+      en['tasks.workflow.preview'],
+      en['tasks.workflow.completionSuggested'],
+      en['tasks.workflow.confirmCompletion'],
+    ]).toEqual([
+      'Preview compatibility',
+      'Completion suggested',
+      'Confirm task completion',
+    ])
+  })
 })
