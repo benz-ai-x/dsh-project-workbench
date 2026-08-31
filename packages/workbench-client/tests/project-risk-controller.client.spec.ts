@@ -144,6 +144,8 @@ function selectedProjection(): ProjectRisksProjection {
   const item = value.risks[0]!
   return {
     ...value,
+    nextBeforeRiskSequence: 2,
+    nextBeforeActivitySequence: 2,
     selectedRisk: {
       risk: item,
       history: [
@@ -241,7 +243,15 @@ describe('WorkbenchProjectRisksController', () => {
     await controller.loadMoreRisks()
     await controller.loadMoreActivity()
     await controller.loadMoreHistory()
+    expect(read.mock.calls.some(([query]) => query.beforeRiskSequence === 2
+      && query.beforeActivitySequence === undefined
+      && query.beforeHistorySequence === undefined)).toBe(true)
+    expect(read.mock.calls.some(([query]) => query.beforeActivitySequence === 2
+      && query.beforeRiskSequence === undefined
+      && query.beforeHistorySequence === undefined)).toBe(true)
     expect(read.mock.calls.some(([query]) => query.beforeHistorySequence === 1
+      && query.beforeRiskSequence === undefined
+      && query.beforeActivitySequence === undefined
       && query.selectedRiskId === 'risk-1')).toBe(true)
 
     controller.setCreateDraft(editorDraft())

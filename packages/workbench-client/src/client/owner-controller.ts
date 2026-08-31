@@ -638,7 +638,10 @@ export class OwnerController {
     return new WorkbenchStatusController(this.remote, {
       onBeforeProtectedOperation: () => this.admitProtectedOperation(),
       onTransportFailure: () => { this.revalidateAfterStatusFailure() },
-      onCommitted: () => { void this.activity?.refresh() },
+      onCommitted: () => {
+        void this.activity?.refresh()
+        void this.projectRisks?.refresh()
+      },
     })
   }
 
@@ -677,6 +680,7 @@ export class OwnerController {
       onCommitted: (_receipt, targetChanged) => {
         void this.activity?.refresh()
         void this.projectDeliverables?.refresh()
+        void this.projectRisks?.refresh()
         if (targetChanged) void this.projectTeam?.refresh()
       },
     })
@@ -709,6 +713,7 @@ export class OwnerController {
       onCommitted: () => {
         void this.activity?.refresh()
         void this.projectDeliverables?.refresh()
+        void this.projectRisks?.refresh()
       },
     })
   }
@@ -720,6 +725,7 @@ export class OwnerController {
       onCommitted: () => {
         void this.activity?.refresh()
         void this.review?.refresh()
+        void this.projectRisks?.refresh()
       },
     })
   }

@@ -148,6 +148,7 @@ function AssessmentForm({
   const accountable = projection.memberOptions.find(
     member => member.memberId === draft.accountableMemberId,
   )
+  const hintPrefix = mode === 'create' ? 'project-risk-create' : 'project-risk-revise'
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
     onSubmit()
@@ -246,7 +247,7 @@ function AssessmentForm({
             <input
               inputMode="numeric"
               required
-              aria-describedby="project-risk-probability-hint"
+              aria-describedby={`${hintPrefix}-probability-hint`}
               value={draft.probabilityLowerBasisPoints}
               onChange={event => { update('probabilityLowerBasisPoints', event.currentTarget.value) }}
             />
@@ -256,7 +257,7 @@ function AssessmentForm({
             <input
               inputMode="numeric"
               required
-              aria-describedby="project-risk-probability-hint"
+              aria-describedby={`${hintPrefix}-probability-hint`}
               value={draft.probabilityUpperBasisPoints}
               onChange={event => { update('probabilityUpperBasisPoints', event.currentTarget.value) }}
             />
@@ -266,7 +267,7 @@ function AssessmentForm({
             <input
               inputMode="numeric"
               required
-              aria-describedby="project-risk-impact-hint"
+              aria-describedby={`${hintPrefix}-impact-hint`}
               value={draft.impactLowerBand}
               onChange={event => { update('impactLowerBand', event.currentTarget.value) }}
             />
@@ -276,14 +277,14 @@ function AssessmentForm({
             <input
               inputMode="numeric"
               required
-              aria-describedby="project-risk-impact-hint"
+              aria-describedby={`${hintPrefix}-impact-hint`}
               value={draft.impactUpperBand}
               onChange={event => { update('impactUpperBand', event.currentTarget.value) }}
             />
           </label>
         </div>
-        <p id="project-risk-probability-hint" className={css.hint}>{t('risks.form.probabilityHint')}</p>
-        <p id="project-risk-impact-hint" className={css.hint}>{t('risks.form.impactHint')}</p>
+        <p id={`${hintPrefix}-probability-hint`} className={css.hint}>{t('risks.form.probabilityHint')}</p>
+        <p id={`${hintPrefix}-impact-hint`} className={css.hint}>{t('risks.form.impactHint')}</p>
 
         <label className={css.field}>
           <span>{t('risks.field.confidenceRationale')}</span>
@@ -301,7 +302,7 @@ function AssessmentForm({
             <input
               type="date"
               required
-              aria-describedby="project-risk-date-hint"
+              aria-describedby={`${hintPrefix}-date-hint`}
               value={draft.assessmentHorizonEnd}
               onChange={event => { update('assessmentHorizonEnd', event.currentTarget.value) }}
             />
@@ -311,13 +312,13 @@ function AssessmentForm({
             <input
               type="date"
               required
-              aria-describedby="project-risk-date-hint"
+              aria-describedby={`${hintPrefix}-date-hint`}
               value={draft.nextReviewOn}
               onChange={event => { update('nextReviewOn', event.currentTarget.value) }}
             />
           </label>
         </div>
-        <p id="project-risk-date-hint" className={css.hint}>{t('risks.form.dateHint')}</p>
+        <p id={`${hintPrefix}-date-hint`} className={css.hint}>{t('risks.form.dateHint')}</p>
 
         <details className={css.advanced}>
           <summary>{t('risks.form.advanced')}</summary>
@@ -327,7 +328,15 @@ function AssessmentForm({
               <select
                 required
                 value={draft.accountableMemberId}
-                onChange={event => { update('accountableMemberId', event.currentTarget.value) }}
+                onChange={event => {
+                  const memberId = event.currentTarget.value
+                  onChange({
+                    ...draft,
+                    accountableMemberId: memberId,
+                    contributorMemberIds: draft.contributorMemberIds.filter(id => id !== memberId),
+                    humanSponsorMemberId: '',
+                  })
+                }}
               >
                 <option value="">{t('risks.form.chooseMember')}</option>
                 {projection.memberOptions.map(member => (
@@ -347,7 +356,9 @@ function AssessmentForm({
                   <label key={member.memberId}>
                     <input
                       type="checkbox"
-                      disabled={member.status !== 'active' || member.memberId === draft.accountableMemberId}
+                      disabled={(member.status !== 'active'
+                        && !draft.contributorMemberIds.includes(member.memberId))
+                        || member.memberId === draft.accountableMemberId}
                       checked={draft.contributorMemberIds.includes(member.memberId)}
                       onChange={event => {
                         update('contributorMemberIds', toggleValue(
@@ -432,6 +443,22 @@ function AssessmentForm({
                     <span>{t(projectRiskEvidenceKindKey(option.kind))}: {evidenceLabel(option)}</span>
                   </label>
                 ))}
+                {draft.evidence.filter(value => !projection.evidenceOptions.some(
+                  option => evidenceId(option) === evidenceId(value),
+                )).map(value => (
+                  <label key={evidenceId(value)}>
+                    <input
+                      type="checkbox"
+                      checked
+                      onChange={() => {
+                        update('evidence', draft.evidence.filter(
+                          candidate => evidenceId(candidate) !== evidenceId(value),
+                        ))
+                      }}
+                    />
+                    <span>{evidenceLabel(value)} · {t('risks.tasks.unavailable')}</span>
+                  </label>
+                ))}
               </div>
             </fieldset>
 
@@ -442,7 +469,7 @@ function AssessmentForm({
                   <label key={option.riskId}>
                     <input
                       type="checkbox"
-                      disabled={!option.selectable}
+                      disabled={!option.selectable && !draft.dependencyRiskIds.includes(option.riskId)}
                       checked={draft.dependencyRiskIds.includes(option.riskId)}
                       onChange={event => {
                         update('dependencyRiskIds', toggleValue(
@@ -453,20 +480,54 @@ function AssessmentForm({
                     <span>{option.statement.event} · {option.riskId}</span>
                   </label>
                 ))}
+                {draft.dependencyRiskIds.filter(riskId => !projection.dependencyOptions.some(
+                  option => option.riskId === riskId,
+                )).map(riskId => (
+                  <label key={riskId}>
+                    <input
+                      type="checkbox"
+                      checked
+                      onChange={() => {
+                        update('dependencyRiskIds', draft.dependencyRiskIds.filter(
+                          value => value !== riskId,
+                        ))
+                      }}
+                    />
+                    <span><code>{riskId}</code> · {t('risks.tasks.unavailable')}</span>
+                  </label>
+                ))}
               </div>
             </fieldset>
 
             <TreatmentTaskChoices
               legend={t('risks.tasks.mitigation')}
+              unavailableLabel={t('risks.tasks.unavailable')}
               selected={draft.mitigationTaskGuids}
               projection={projection}
-              onChange={values => { update('mitigationTaskGuids', values) }}
+              onChange={values => {
+                onChange({
+                  ...draft,
+                  mitigationTaskGuids: values,
+                  contingencyTaskGuids: draft.contingencyTaskGuids.filter(
+                    taskGuid => !values.includes(taskGuid),
+                  ),
+                })
+              }}
             />
             <TreatmentTaskChoices
               legend={t('risks.tasks.contingency')}
+              unavailableLabel={t('risks.tasks.unavailable')}
               selected={draft.contingencyTaskGuids}
               projection={projection}
-              onChange={values => { update('contingencyTaskGuids', values) }}
+              onChange={values => {
+                onChange({
+                  ...draft,
+                  contingencyTaskGuids: values,
+                  mitigationTaskGuids: draft.mitigationTaskGuids.filter(
+                    taskGuid => !values.includes(taskGuid),
+                  ),
+                })
+              }}
             />
           </div>
         </details>
@@ -490,19 +551,24 @@ function AssessmentForm({
 
 function TreatmentTaskChoices({
   legend,
+  unavailableLabel,
   selected,
   projection,
   onChange,
 }: {
   readonly legend: string
+  readonly unavailableLabel: string
   readonly selected: readonly string[]
   readonly projection: ProjectRisksProjection
   readonly onChange: (values: readonly string[]) => void
 }) {
+  const projected = new Set(projection.taskOptions.map(task => task.taskGuid))
+  const unavailable = selected.filter(taskGuid => !projected.has(taskGuid))
   return (
     <fieldset className={css.nestedFieldset}>
       <legend>{legend}</legend>
-      {projection.taskOptions.length === 0 ? <p className={css.hint}>—</p> : (
+      {projection.taskOptions.length === 0 && unavailable.length === 0
+        ? <p className={css.hint}>—</p> : (
         <div className={css.choices}>
           {projection.taskOptions.map(task => (
             <label key={task.taskGuid}>
@@ -514,6 +580,16 @@ function TreatmentTaskChoices({
                 }}
               />
               <span>{task.summary}</span>
+            </label>
+          ))}
+          {unavailable.map(taskGuid => (
+            <label key={taskGuid}>
+              <input
+                type="checkbox"
+                checked
+                onChange={() => { onChange(selected.filter(value => value !== taskGuid)) }}
+              />
+              <span><code>{taskGuid}</code> · {unavailableLabel}</span>
             </label>
           ))}
         </div>
