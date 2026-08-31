@@ -202,7 +202,9 @@ Review Center uses a closed query union:
 A Deliverable card includes the exact plan snapshot, criteria, designated
 Acceptor, current and snapshotted due-event facts, current task projections,
 candidate versions with declared resolution, prior decisions, allowed
-decisions, and Final Release when present.
+decisions, Final Release when present, and the current Deliverables aggregate
+revision required by the decision command. The Review controller never guesses
+that concurrency token from a separate workspace read.
 
 Generic audit/Activity records safe action, object, version, actor, reason,
 causation, and summary codes only. Names, descriptions, criteria, member IDs,

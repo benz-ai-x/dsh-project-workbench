@@ -2513,6 +2513,8 @@ export interface DeliverableAcceptanceReviewItemProjection {
 export interface DeliverableAcceptanceReviewCenterProjection {
   readonly reviewKind: 'deliverable-acceptance'
   readonly projectId: string
+  /** Exact aggregate CAS token required by every target-specific decision. */
+  readonly deliverablesRevision: number
   readonly items: readonly DeliverableAcceptanceReviewItemProjection[]
   readonly nextBeforeSequence: number | null
 }
