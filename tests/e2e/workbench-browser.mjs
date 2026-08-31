@@ -55,6 +55,7 @@ const WORKBENCH_FEISHU_CONNECTION_PATH = '/api/workbench/feishuConnectionCenter'
 const WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH = '/api/workbench/configureFeishuIdentityRoute'
 const WORKBENCH_VERIFY_FEISHU_ROUTE_PATH = '/api/workbench/verifyFeishuIdentityRoute'
 const WORKBENCH_PROJECT_TASKS_PATH = '/api/workbench/projectTasks'
+const WORKBENCH_BIND_FEISHU_TASK_LIST_PATH = '/api/workbench/bindFeishuTaskList'
 const WORKBENCH_DISCOVER_TASK_WORKFLOW_FIELDS_PATH
   = '/api/workbench/discoverFeishuTaskWorkflowFields'
 const WORKBENCH_PREVIEW_TASK_WORKFLOW_PATH = '/api/workbench/previewFeishuTaskWorkflow'
@@ -74,6 +75,14 @@ const WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH
   = '/api/workbench/requestDeliverableAcceptance'
 const WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH
   = '/api/workbench/decideDeliverableAcceptance'
+const DELIVERABLE_BROWSER_ADAPTER = Object.freeze({
+  appId: 'cli_workbench_browser_fixture',
+  credentialRef: 'WORKBENCH_E2E_DELIVERABLE_FIXTURE',
+  taskListGuid: 'tasklist-guid-deliverable-browser',
+  taskGuid: 'task-guid-deliverable-browser',
+  taskSummary: '完成 Deliverable 浏览器证据',
+  calendarId: 'calendar-deliverable-browser',
+})
 const PROJECT_MILESTONE_OPERATION_PATHS = Object.freeze([
   WORKBENCH_DISCOVER_FEISHU_CALENDARS_PATH,
   WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
@@ -758,7 +767,9 @@ async function reopenProject(page, expected, options = {}) {
     ...expected,
     definitionDigest: catalog.definitionDigest,
   })
-  await assertProjectTasksUnbound(page, expected.projectName)
+  if (options.skipTasks !== true) {
+    await assertProjectTasksUnbound(page, expected.projectName)
+  }
   if (options.skipMilestones !== true) {
     await assertProjectMilestonesUnbound(page, expected.projectName)
   }
@@ -1313,7 +1324,7 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
   const sponsor = createForm.getByRole('combobox', { name: 'Human Sponsor', exact: true })
   const acceptor = createForm.getByRole('combobox', { name: 'Acceptor', exact: true })
   const task = createForm.getByRole('checkbox', {
-    name: '完成 Deliverable 浏览器证据',
+    name: expected.taskSummary ?? '完成 Deliverable 浏览器证据',
     exact: true,
   })
   const startDate = createForm.getByLabel(/开始日期|Start date/iu)
@@ -1346,11 +1357,11 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
 
   await name.fill(expected.name)
   await criterion.fill(expected.criterion)
-  await accountable.selectOption('member-deliverable-accountable')
+  await accountable.selectOption(expected.accountableMemberId ?? 'member-deliverable-accountable')
   await sponsor.waitFor({ state: 'visible' })
   await assertVisibleKeyboardFocus(sponsor, 'Deliverable Human Sponsor')
-  await sponsor.selectOption('member-deliverable-sponsor')
-  await acceptor.selectOption('member-deliverable-acceptor')
+  await sponsor.selectOption(expected.sponsorMemberId ?? 'member-deliverable-sponsor')
+  await acceptor.selectOption(expected.acceptorMemberId ?? 'member-deliverable-acceptor')
   await task.check()
   await startDate.fill('2026-09-08')
   await endDate.fill('2026-09-09')
@@ -1358,8 +1369,14 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
 
   const card = panel.getByRole('article', { name: expected.name, exact: true })
   await card.waitFor({ state: 'visible' })
-  await card.getByText('浏览器 Deliverable Accountable', { exact: true }).waitFor({ state: 'visible' })
-  await card.getByText('浏览器 Designated Acceptor', { exact: true }).waitFor({ state: 'visible' })
+  await card.getByText(
+    expected.accountableName ?? '浏览器 Deliverable Accountable',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
+  await card.getByText(
+    expected.acceptorName ?? '浏览器 Designated Acceptor',
+    { exact: true },
+  ).waitFor({ state: 'visible' })
   await card.getByText(/不可变|immutable/iu).waitFor({ state: 'visible' })
   const source = card.getByLabel(/版本来源|Artifact source|来源/iu)
   const resourceId = card.getByLabel(/资源 ID|Resource ID/iu)
@@ -1424,17 +1441,59 @@ async function exerciseDeliverableBrowserJourney(page, fixture, expected) {
   assert.equal(await approve.isEnabled(), true, 'valid Deliverable approval stayed disabled')
   await assertVisibleKeyboardFocus(approve, 'Deliverable approve outcome')
   await approve.click()
-  await waitForCondition(
-    () => fixture.projection.deliverables[0]?.state === 'accepted',
-    PAGE_TIMEOUT_MS,
-    'Deliverable Review Center approval',
-  )
+  await waitForCondition(async () => {
+    if (fixture !== null) return fixture.projection.deliverables[0]?.state === 'accepted'
+    const projection = await callAuthenticatedWorkbench(
+      page,
+      WORKBENCH_PROJECT_DELIVERABLES_PATH,
+      { query: { projectId: expected.projectId, activityLimit: 50 } },
+    )
+    return projection?.deliverables[0]?.state === 'accepted'
+  }, PAGE_TIMEOUT_MS, 'Deliverable Review Center approval')
   await acceptanceCard.getByText(expected.feedback, { exact: true })
     .waitFor({ state: 'visible' })
-  assert.equal(
-    fixture.projection.deliverables[0].finalRelease.versions[0].displayName,
-    expected.longToken,
+  const acceptedProjection = fixture === null
+    ? await callAuthenticatedWorkbench(
+        page,
+        WORKBENCH_PROJECT_DELIVERABLES_PATH,
+        { query: { projectId: expected.projectId, activityLimit: 50 } },
+      )
+    : fixture.projection
+  assert.equal(acceptedProjection.deliverables[0].finalRelease.versions[0].displayName, expected.longToken)
+}
+
+async function expectedDeliverableActivity(page, projectId, renderedEntries) {
+  const projection = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_DELIVERABLES_PATH,
+    { query: { projectId, activityLimit: 50 } },
   )
+  assert.notEqual(projection, null, 'real Deliverable activity lost its Project')
+  const item = projection.deliverables[0]
+  assert.notEqual(item, undefined, 'real Deliverable activity lost its Deliverable')
+  assert.equal(item.state, 'accepted')
+  assert.equal(item.acceptanceRequests.length, 1)
+  assert.notEqual(item.acceptanceRequests[0].decision, null)
+  assert.notEqual(item.finalRelease, null)
+  assert.deepEqual(
+    projection.activity.map(activity => activity.action),
+    ['acceptance-approved', 'acceptance-requested', 'deliverable-created'],
+  )
+  const labels = {
+    'acceptance-approved': '验收已批准',
+    'acceptance-requested': '已申请验收',
+    'deliverable-created': '已创建 Deliverable',
+  }
+  return projection.activity.map((activity, index) => {
+    assert.equal(activity.source.kind, 'audit-event')
+    return [renderedEntries[index], [
+      labels[activity.action],
+      activity.planSnapshotId,
+      activity.acceptanceRequestId,
+      activity.decisionId,
+      activity.source.auditEventId,
+    ].filter(value => value !== null)]
+  })
 }
 
 async function assertAcceptedDeliverableBrowserProjection(page, expected) {
@@ -1447,9 +1506,15 @@ async function assertAcceptedDeliverableBrowserProjection(page, expected) {
   await card.getByText(/Final Release/iu).waitFor({ state: 'visible' })
   await card.getByText('声明版本（未验证）', { exact: true }).first().waitFor({ state: 'visible' })
   await card.getByText(expected.longToken, { exact: true }).first().waitFor({ state: 'visible' })
-  await card.getByText('浏览器 Deliverable Accountable', { exact: true }).first()
+  await card.getByText(
+    expected.accountableName ?? '浏览器 Deliverable Accountable',
+    { exact: true },
+  ).first()
     .waitFor({ state: 'visible' })
-  await card.getByText('浏览器 Designated Acceptor', { exact: true }).first()
+  await card.getByText(
+    expected.acceptorName ?? '浏览器 Designated Acceptor',
+    { exact: true },
+  ).first()
     .waitFor({ state: 'visible' })
   const responsibilityChain = panel.locator(
     'section[aria-labelledby="workbench-deliverables-activity-title"]',
@@ -1458,26 +1523,29 @@ async function assertAcceptedDeliverableBrowserProjection(page, expected) {
     .waitFor({ state: 'visible' })
   const activityEntries = await responsibilityChain.locator('ol > li').allTextContents()
   assert.equal(activityEntries.length, 3, 'Deliverable responsibility chain is incomplete')
-  for (const [entry, expectedValues] of [
-    [activityEntries[0], [
-      '验收已批准',
-      'deliverable-plan-browser-1',
-      'acceptance-request-browser-1',
-      'acceptance-decision-browser-1',
-      'audit-deliverable-3',
-    ]],
-    [activityEntries[1], [
-      '已申请验收',
-      'deliverable-plan-browser-1',
-      'acceptance-request-browser-1',
-      'audit-deliverable-2',
-    ]],
-    [activityEntries[2], [
-      '已创建 Deliverable',
-      'deliverable-plan-browser-1',
-      'audit-deliverable-1',
-    ]],
-  ]) {
+  const expectedActivity = expected.projectId === undefined
+    ? [
+        [activityEntries[0], [
+          '验收已批准',
+          'deliverable-plan-browser-1',
+          'acceptance-request-browser-1',
+          'acceptance-decision-browser-1',
+          'audit-deliverable-3',
+        ]],
+        [activityEntries[1], [
+          '已申请验收',
+          'deliverable-plan-browser-1',
+          'acceptance-request-browser-1',
+          'audit-deliverable-2',
+        ]],
+        [activityEntries[2], [
+          '已创建 Deliverable',
+          'deliverable-plan-browser-1',
+          'audit-deliverable-1',
+        ]],
+      ]
+    : await expectedDeliverableActivity(page, expected.projectId, activityEntries)
+  for (const [entry, expectedValues] of expectedActivity) {
     for (const value of expectedValues) {
       assert.ok(entry.includes(value), `Deliverable responsibility chain omitted ${value}`)
     }
@@ -1849,6 +1917,232 @@ async function callAuthenticatedWorkbench(page, path, args) {
   assert.equal(outcome.body?.rpcId, outcome.rpcId)
   assert.equal(outcome.body?.result?.ok, true, `${path}: authenticated carrier failed`)
   return outcome.body.result.value
+}
+
+function browserCommandKeys(prefix) {
+  const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  return {
+    idempotencyKey: `${prefix}-idem-${nonce}`,
+    causationId: `${prefix}-cause-${nonce}`,
+  }
+}
+
+async function prepareRealDeliverableBrowserProject(page, names) {
+  const start = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_START_PATH,
+    { filter: { limit: 20 } },
+  )
+  const created = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_CREATE_PROJECT_PATH,
+    {
+      request: {
+        template: start.template.selection,
+        projectName: names.projectName,
+        primaryGoal: {
+          name: names.primaryGoalName,
+          outcomes: [{
+            name: names.outcomeName,
+            metric: {
+              metricName: names.metricName,
+              initialValue: 12,
+              targetValue: 3,
+              unit: '天',
+              direction: 'decrease',
+            },
+          }],
+        },
+        supportingGoals: [],
+        expectedCatalogRevision: start.catalogRevision,
+        expectedRevision: null,
+        ...browserCommandKeys('deliverable-browser-project'),
+        reason: 'owner-project-create',
+      },
+    },
+  )
+  assert.equal(created.ok, true, `real Deliverable Project creation failed: ${created.error?.code ?? 'unknown'}`)
+  const projectId = created.value.project.projectId
+  const members = [
+    { kind: 'agent', displayName: names.accountableName },
+    {
+      kind: 'human',
+      displayName: names.sponsorName,
+      identity: { type: 'external', method: 'email', value: 'browser-sponsor@example.invalid' },
+    },
+    {
+      kind: 'human',
+      displayName: names.acceptorName,
+      identity: { type: 'external', method: 'email', value: 'browser-acceptor@example.invalid' },
+    },
+  ]
+  for (const [index, member] of members.entries()) {
+    const added = await callAuthenticatedWorkbench(
+      page,
+      WORKBENCH_ADD_PROJECT_MEMBER_PATH,
+      {
+        request: {
+          projectId,
+          member,
+          expectedTeamRevision: index,
+          expectedRevision: null,
+          ...browserCommandKeys(`deliverable-browser-member-${String(index + 1)}`),
+          reason: 'owner-project-member-add',
+        },
+      },
+    )
+    assert.equal(added.ok, true, `real Deliverable member creation failed: ${added.error?.code ?? 'unknown'}`)
+  }
+
+  const connection = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_FEISHU_CONNECTION_PATH,
+    {},
+  )
+  assert.equal(connection.revision, 0, 'dedicated Deliverable Project inherited business connection state')
+  const configured = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH,
+    {
+      request: {
+        kind: 'user',
+        mode: 'set',
+        appId: DELIVERABLE_BROWSER_ADAPTER.appId,
+        credentialRef: DELIVERABLE_BROWSER_ADAPTER.credentialRef,
+        expectedConnectionRevision: 0,
+        expectedRouteGeneration: null,
+        ...browserCommandKeys('deliverable-browser-route-configure'),
+        reason: 'owner-feishu-route-configure',
+      },
+    },
+  )
+  assert.equal(configured.ok, true, `real fixture route configuration failed: ${configured.error?.code ?? 'unknown'}`)
+  const verified = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_VERIFY_FEISHU_ROUTE_PATH,
+    {
+      request: {
+        kind: 'user',
+        expectedConnectionRevision: 1,
+        expectedRouteGeneration: 1,
+        ...browserCommandKeys('deliverable-browser-route-verify'),
+        reason: 'owner-feishu-route-verify',
+      },
+    },
+  )
+  assert.equal(verified.ok, true, `real fixture route verification failed: ${verified.error?.code ?? 'unknown'}`)
+
+  const boundTasks = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_BIND_FEISHU_TASK_LIST_PATH,
+    {
+      request: {
+        projectId,
+        kind: 'user',
+        mode: 'existing',
+        taskListGuid: DELIVERABLE_BROWSER_ADAPTER.taskListGuid,
+        expectedConnectionRevision: 2,
+        expectedRouteGeneration: 1,
+        expectedBindingRevision: null,
+        ...browserCommandKeys('deliverable-browser-task-bind'),
+        reason: 'owner-feishu-task-list-bind',
+      },
+    },
+  )
+  assert.equal(boundTasks.ok, true, `real fixture task binding failed: ${boundTasks.error?.code ?? 'unknown'}`)
+  const boundCalendar = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_BIND_PROJECT_CALENDAR_PATH,
+    {
+      request: {
+        projectId,
+        kind: 'user',
+        mode: 'existing',
+        calendarId: DELIVERABLE_BROWSER_ADAPTER.calendarId,
+        expectedConnectionRevision: 2,
+        expectedRouteGeneration: 1,
+        expectedBindingRevision: null,
+        ...browserCommandKeys('deliverable-browser-calendar-bind'),
+        reason: 'owner-project-calendar-bind',
+      },
+    },
+  )
+  assert.equal(boundCalendar.ok, true, `real fixture Calendar binding failed: ${boundCalendar.error?.code ?? 'unknown'}`)
+
+  const team = await readTeamViaCarrier(page, projectId)
+  const memberId = displayName => {
+    const member = team.members.find(candidate => candidate.displayName === displayName)
+    assert.notEqual(member, undefined, `real Deliverable Team lost ${displayName}`)
+    return member.memberId
+  }
+  const workspace = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_DELIVERABLES_PATH,
+    { query: { projectId, activityLimit: 50 } },
+  )
+  assert.notEqual(workspace, null)
+  assert.equal(workspace.taskOptions.some(task => task.taskGuid === DELIVERABLE_BROWSER_ADAPTER.taskGuid), true)
+  assert.equal(workspace.calendarBinding.calendarId, DELIVERABLE_BROWSER_ADAPTER.calendarId)
+  return {
+    ...names,
+    projectId,
+    accountableMemberId: memberId(names.accountableName),
+    sponsorMemberId: memberId(names.sponsorName),
+    acceptorMemberId: memberId(names.acceptorName),
+    taskSummary: DELIVERABLE_BROWSER_ADAPTER.taskSummary,
+  }
+}
+
+async function loginExistingOwner(page, password) {
+  const login = page.locator('#workbench-login-password')
+  await login.waitFor({ state: 'visible' })
+  await login.fill(password)
+  await page.locator('form button[type="submit"]').click()
+  await page.locator('#workbench-projects-title').waitFor({ state: 'visible' })
+}
+
+async function runRealDeliverableRestartJourney(options) {
+  const first = await startDsh(options.projectDir, options.runtimeEnv)
+  const firstJourney = await openCheckedPage(first.readyUrl, 'real Deliverable Host boot')
+  await dismissHarnessOnboarding(firstJourney.page)
+  await loginExistingOwner(firstJourney.page, options.password)
+  const expected = await prepareRealDeliverableBrowserProject(firstJourney.page, options.expected)
+  await firstJourney.page.reload({ waitUntil: 'load' })
+  await dismissHarnessOnboarding(firstJourney.page)
+  await firstJourney.page.locator('#workbench-projects-title').waitFor({ state: 'visible' })
+  await reopenProject(firstJourney.page, expected, { skipTasks: true, skipMilestones: true })
+  await exerciseDeliverableBrowserJourney(firstJourney.page, null, expected)
+  const beforeRestart = await callAuthenticatedWorkbench(
+    firstJourney.page,
+    WORKBENCH_PROJECT_DELIVERABLES_PATH,
+    { query: { projectId: expected.projectId, activityLimit: 50 } },
+  )
+  await assertAcceptedDeliverableBrowserProjection(firstJourney.page, expected)
+  await assertNoBrowserErrors(firstJourney)
+  await firstJourney.context.close()
+  await stopDsh(first.host)
+
+  const databasePath = join(options.projectDir, '.dsh/project-workbench.sqlite')
+  assert.ok(existsSync(databasePath), `real Deliverable SQLite database was not committed at ${databasePath}`)
+  const restarted = await startDsh(options.projectDir, options.runtimeEnv)
+  const restartedJourney = await openCheckedPage(
+    restarted.readyUrl,
+    'real Deliverable Host SQLite restart',
+  )
+  await dismissHarnessOnboarding(restartedJourney.page)
+  await loginExistingOwner(restartedJourney.page, options.password)
+  await reopenProject(restartedJourney.page, expected, { skipTasks: true, skipMilestones: true })
+  await assertAcceptedDeliverableBrowserProjection(restartedJourney.page, expected)
+  const afterRestart = await callAuthenticatedWorkbench(
+    restartedJourney.page,
+    WORKBENCH_PROJECT_DELIVERABLES_PATH,
+    { query: { projectId: expected.projectId, activityLimit: 50 } },
+  )
+  assert.deepEqual(afterRestart.deliverables, beforeRestart.deliverables)
+  assert.deepEqual(afterRestart.activity, beforeRestart.activity)
+  await assertNoBrowserErrors(restartedJourney)
+  await restartedJourney.context.close()
+  await stopDsh(restarted.host)
 }
 
 async function findProjectIdViaCarrier(page, projectName) {
@@ -3894,6 +4188,27 @@ async function main() {
   await postRecoveryJourney.context.close()
   await stopDsh(third.host)
 
+  const realDeliverableProjectDir = join(tempRoot, 'real-deliverable-project')
+  mkdirSync(realDeliverableProjectDir, { recursive: true })
+  await runRealDeliverableRestartJourney({
+    projectDir: realDeliverableProjectDir,
+    runtimeEnv,
+    password: finalRecoveredPassword,
+    expected: {
+      projectName: `T11 real Host browser Project ${new Date().toISOString()}`,
+      primaryGoalName: '交付经真实 Host 验收的版本',
+      outcomeName: '完成 Deliverable 批准与重启恢复',
+      metricName: 'Deliverable 验收周期',
+      accountableName: '浏览器 Deliverable Accountable',
+      sponsorName: '浏览器 Human Sponsor',
+      acceptorName: '浏览器 Designated Acceptor',
+      name: deliverableName,
+      criterion: deliverableCriterion,
+      feedback: deliverableDecisionFeedback,
+      longToken: deliverableLongToken,
+    },
+  })
+
   process.stdout.write(
     'PASS T11 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
@@ -3901,7 +4216,8 @@ async function main() {
       + '-> Project Tasks selection boundary and verified-route gate '
       + '-> T09 workflow Remote authorization/selection gate and Activity vocabulary '
       + '-> Project Milestones selection/route/mobile boundary and seven protected Remotes '
-      + '-> Deliverable mock-Remote create/request/approve/remount, declared versions, Owner/Acceptor truth '
+      + '-> Deliverable mock-Remote Client remount plus real Host/SQLite create/request/approve/restart '
+      + 'with declared versions and Owner/Acceptor truth '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',

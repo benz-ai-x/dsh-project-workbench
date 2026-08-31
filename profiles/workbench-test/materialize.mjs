@@ -9,7 +9,12 @@ const sourceDir = dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = resolve(sourceDir, '../..')
 const dshHome = resolve(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
 const targetDir = join(dshHome, 'profiles', 'workbench-test')
-const managedFiles = ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml']
+const managedFiles = [
+  'package.json',
+  'cordis.patch.yml',
+  'pnpm-workspace.yaml',
+  'browser-host.mjs',
+]
 const workspaceDependencies = {
   '@benz-ai-x/dsh-project-workbench': join(repositoryRoot, 'packages', 'workbench-host'),
   '@benz-ai-x/dsh-project-workbench-bundle': join(repositoryRoot, 'packages', 'workbench-bundle'),

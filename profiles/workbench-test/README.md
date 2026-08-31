@@ -6,7 +6,7 @@
 2. `@deepseek-ai/dsh-web-app`
 3. `@benz-ai-x/dsh-project-workbench-bundle`
 
-`patchReload: live` 让开发时修改 Profile 或 `DSH_HOME` patch 后触发重载。
+`patchReload: live` 让开发时修改 Profile 或 `DSH_HOME` patch 后触发重载。该私有验收 Profile 会在最后一层禁用 Bundle 的标准 Host 行，并加载 `browser-host.mjs` 中同一 `WorkbenchService` 的测试子类。子类只对一个闭合的 browser-fixture User 身份替换凭据支持的飞书外部端口；其他身份仍委托生产适配器。鉴权、Typert Carrier、Host 权威、SQLite 事务、Remote 合同和 Client 都不使用 fixture。这个边界让浏览器验收可以在不访问真实飞书租户的前提下，证明真实 Host 写入和同一数据库的进程级重启恢复。
 
 ## 物化到 DSH_HOME
 
@@ -24,7 +24,7 @@ dsh --profile workbench-test
 
 先构建工作区，确保被链接的 Host、Client 与 Client bundle 已存在。物化脚本把 Bundle 和提供恢复命令的 Host 依赖改写成指向本仓库的绝对 `link:`，不会依赖复制后的目录结构。Host 是非 Bundle 依赖，不会增加 Profile 层；直接依赖它是为了让 pnpm 在物化 Profile 中安装 `dsh-workbench` 命令。若目标 Profile 已存在，脚本会拒绝覆盖；只有确认它是可替换的测试 Profile 后才使用 `--force`。
 
-数据库路径 `.dsh/project-workbench.sqlite` 相对于启动 Workbench 的当前项目目录解析，因此每个被测项目拥有独立数据文件。Owner credential、恢复码摘要和可撤销会话由 DSH Credentials 保存在 `$DSH_HOME/.credentials.yaml`，不会写入项目业务数据库。Profile 自身的 `cordis.patch.yml` 是最后一个项目内层，可用于测试覆盖；机器级 `$DSH_HOME/cordis.patch.yml` 仍具有更高优先级。
+数据库路径 `.dsh/project-workbench.sqlite` 相对于启动 Workbench 的当前项目目录解析，因此每个被测项目拥有独立数据文件。Owner credential、恢复码摘要和可撤销会话由 DSH Credentials 保存在 `$DSH_HOME/.credentials.yaml`，不会写入项目业务数据库。Profile 自身的 `cordis.patch.yml` 是最后一个项目内层，固定安装上述验收 Host；机器级 `$DSH_HOME/cordis.patch.yml` 仍具有更高优先级。该 Profile 不是生产部署模板，不得把 browser-fixture 身份配置复制到生产 Profile。
 
 首次打开时设置唯一 Owner，并立即离线保存只显示一次的恢复码。之后页面只显示登录入口。开发 Profile 只监听 loopback；现代 Chromium 会把 loopback 视为潜在可信来源，因此仍能接受 Workbench 的 `Secure`、`HttpOnly`、`SameSite=Strict`、`__Host-` Cookie。
 

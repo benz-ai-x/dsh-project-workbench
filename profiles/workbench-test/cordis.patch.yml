@@ -1,2 +1,14 @@
 # User/test overrides go here. This layer is applied after all three bundles.
-[]
+- id: workbench-host
+  disabled: true
+
+- insert:
+    - id: workbench-browser-host
+      name: ./browser-host.mjs
+      config:
+        databasePath: .dsh/project-workbench.sqlite
+        journalMode: wal
+        busyTimeoutMs: 5000
+        maxStatusLength: 280
+        taskReconciliationIntervalMs: 0
+        calendarReconciliationIntervalMs: 0

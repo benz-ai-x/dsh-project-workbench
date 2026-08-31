@@ -70,17 +70,36 @@ describe('Workbench test profile', () => {
         '@benz-ai-x/dsh-project-workbench-bundle':
           `link:${resolve(repositoryRoot, 'packages/workbench-bundle')}`,
       })
+      expect(readFileSync(resolve(profileDir, 'browser-host.mjs'), 'utf8')).toBe(
+        readFileSync(resolve(root, 'browser-host.mjs'), 'utf8'),
+      )
     } finally {
       rmSync(dshHome, { recursive: true, force: true })
     }
   })
 
-  it('ships a parseable empty user patch layer', () => {
+  it('ships an explicit browser-fixture Host override in its final test-only patch layer', () => {
     const root = fileURLToPath(new URL('..', import.meta.url))
     const parsed = yaml.load(readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8'), {
       schema: entryListSchema,
     })
-    expect(parsed).toEqual([])
+    expect(parsed).toEqual([
+      { id: 'workbench-host', disabled: true },
+      {
+        insert: [{
+          id: 'workbench-browser-host',
+          name: './browser-host.mjs',
+          config: {
+            databasePath: '.dsh/project-workbench.sqlite',
+            journalMode: 'wal',
+            busyTimeoutMs: 5000,
+            maxStatusLength: 280,
+            taskReconciliationIntervalMs: 0,
+            calendarReconciliationIntervalMs: 0,
+          },
+        }],
+      },
+    ])
   })
 
   it('resolves and composes the Owner gate, Host, and Client after the stock Web layers', () => {
@@ -104,7 +123,15 @@ describe('Workbench test profile', () => {
       return value as PatchOptions[]
     })
     const warnings: string[] = []
-    const composed = applyEntryPatches([], patches, message => warnings.push(message))
+    const profilePatches = yaml.load(
+      readFileSync(resolve(root, 'cordis.patch.yml'), 'utf8'),
+      { schema: entryListSchema },
+    ) as PatchOptions[]
+    const composed = applyEntryPatches(
+      [],
+      [...patches, ...profilePatches],
+      message => warnings.push(message),
+    )
 
     expect(warnings).toEqual([])
     expect(composed.find(row => row.id === 'workbench-auth')).toMatchObject({
@@ -119,6 +146,7 @@ describe('Workbench test profile', () => {
     })
     expect(composed.find(row => row.id === 'workbench-host')).toMatchObject({
       name: '@benz-ai-x/dsh-project-workbench',
+      disabled: true,
       config: {
         databasePath: '.dsh/project-workbench.sqlite',
         journalMode: 'wal',
@@ -128,6 +156,17 @@ describe('Workbench test profile', () => {
     })
     expect(composed.find(row => row.id === 'workbench-client')).toMatchObject({
       name: '@benz-ai-x/dsh-project-workbench-client',
+    })
+    expect(composed.find(row => row.id === 'workbench-browser-host')).toMatchObject({
+      name: './browser-host.mjs',
+      config: {
+        databasePath: '.dsh/project-workbench.sqlite',
+        journalMode: 'wal',
+        busyTimeoutMs: 5000,
+        maxStatusLength: 280,
+        taskReconciliationIntervalMs: 0,
+        calendarReconciliationIntervalMs: 0,
+      },
     })
   })
 
