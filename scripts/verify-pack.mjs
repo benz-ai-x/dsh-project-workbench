@@ -669,7 +669,7 @@ export default class PackedCredentialsFixture extends CredentialProvider {
       && result?.createdProjectActivity?.integrity?.valid === true
       && result?.createdProjectActivity?.integrity?.eventCount === 2
       && result?.finalIntegrity?.valid === true
-      && result?.finalIntegrity?.eventCount === 12
+      && result?.finalIntegrity?.eventCount === 16
       && result?.finalIntegrity?.issue === null,
     'clean consumer: Project, Review, and Feishu audits extend the verified ledger without protected values',
   )
@@ -700,7 +700,7 @@ export default class PackedCredentialsFixture extends CredentialProvider {
         === 'workbench.feishu-route.verification-recorded'
       && result?.feishuActivity?.items?.[1]?.action
         === 'workbench.feishu-route.configured'
-      && result?.feishuActivity?.integrity?.eventCount === 12
+      && result?.feishuActivity?.integrity?.eventCount === 16
       && result?.feishuActivityRedacted === true
       && result?.credentialResolveWasExact === true
       && result?.identityFailureSkippedResource === true
@@ -723,8 +723,9 @@ export default class PackedCredentialsFixture extends CredentialProvider {
       && result?.teamRoundTripVerified === true
       && result?.reviewRoundTripVerified === true
       && result?.deliverableRoundTripVerified === true
+      && result?.riskRoundTripVerified === true
       && result?.feishuRoundTripVerified === true,
-    'clean consumer: installed Host recovers status, Project, Team, typed Deliverables/Review, Feishu, Activity, and integrity after restart',
+    'clean consumer: installed Host recovers status, Project, Team, typed Deliverables/Review/Risks, Feishu, Activity, and integrity after restart',
   )
   check(
     result?.packedDeliverables?.projectId === result?.createdProject?.project?.projectId
@@ -735,6 +736,16 @@ export default class PackedCredentialsFixture extends CredentialProvider {
         === result?.packedDeliverables?.revision
       && result?.packedDeliverableReview?.items?.length === 0,
     'clean consumer: tgz-installed Host serves the typed T11 Deliverables workspace and Review target without File or Feishu credentials',
+  )
+  check(
+    result?.packedRisks?.projectId === result?.createdProject?.project?.projectId
+      && result?.packedRisks?.revision === 4
+      && result?.packedRisks?.risks?.length === 1
+      && result?.packedRisks?.selectedRisk?.risk?.status === 'closed'
+      && result?.packedRisks?.selectedRisk?.history?.length === 4
+      && result?.packedRisks?.activity?.length === 4
+      && result?.networkCalls === 0,
+    'clean consumer: tgz-installed Host runs and restarts the typed Risk lifecycle without credentials, network, or task writes',
   )
   check(result?.restartSnapshot?.message === 'packed consumer status' && result?.restartSnapshot?.revision === 1, 'clean consumer: installed Host recovers the projection after full restart')
   check(result?.firstLifecycle === 'closed' && result?.secondLifecycle === 'closed', 'clean consumer: both Loader-owned Host instances dispose to closed')
@@ -901,6 +912,9 @@ let reviewRoundTripVerified = false
 let packedDeliverables
 let packedDeliverableReview
 let deliverableRoundTripVerified = false
+let packedRisks
+let packedRiskTasks
+let riskRoundTripVerified = false
 let feishuConfiguration
 let configuredFeishuConnection
 let feishuVerification
@@ -1415,6 +1429,174 @@ try {
   assert.equal(packedDeliverableReview.reviewKind, 'deliverable-acceptance')
   assert.equal(packedDeliverableReview.deliverablesRevision, packedDeliverables.revision)
   assert.deepEqual(packedDeliverableReview.items, [])
+  const packedTasksBeforeRisk = await firstAuth.run(() => firstService.projectTasks(
+    { projectId },
+    new AbortController().signal,
+  ))
+  const initialRisks = await firstAuth.run(() => firstService.projectRisks({
+    projectId,
+    riskLimit: 10,
+    activityLimit: 10,
+  }, new AbortController().signal))
+  assert.equal(initialRisks.revision, 0)
+  assert.equal(initialRisks.teamRevision, committedTeam.teamRevision)
+  assert.equal(initialRisks.taskRevision, packedTasksBeforeRisk.revision)
+  assert.deepEqual(initialRisks.risks, [])
+  assert.deepEqual(initialRisks.activity, [])
+  const createRiskRequest = {
+    projectId,
+    assessment: {
+      statement: {
+        condition: 'Packed consumer remains dependent on one release gate',
+        event: 'The release gate misses two consecutive checkpoints',
+        consequence: 'The packed verification window is delayed',
+      },
+      category: 'dependency',
+      trigger: {
+        statement: 'The release gate misses two consecutive checkpoints',
+        state: 'not-met',
+      },
+      probability: { lowerBasisPoints: 1_000, upperBasisPoints: 2_000 },
+      impact: { lowerBand: 2, upperBand: 3 },
+      confidence: 'medium',
+      confidenceRationale: 'The packed fixture has one bounded dependency observation.',
+      assessmentHorizonEnd: '2099-12-31',
+      nextReviewOn: '2099-03-15',
+      assumptions: ['The clean consumer remains offline'],
+      accountableMemberId: feishuAdded.value.memberId,
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+      evidence: [],
+      dependencies: [],
+      mitigationTaskGuids: [],
+      contingencyTaskGuids: [],
+    },
+    expectedRisksRevision: initialRisks.revision,
+    expectedRiskRevision: null,
+    expectedTeamRevision: committedTeam.teamRevision,
+    expectedTaskRevision: packedTasksBeforeRisk.revision,
+    idempotencyKey: 'packed-risk-create-idempotency-0001',
+    causationId: 'packed-risk-create-causation-0001',
+    reason: 'owner-project-risk-create',
+  }
+  const createdRisk = await firstAuth.run(() => firstService.createProjectRisk(
+    createRiskRequest,
+    new AbortController().signal,
+  ))
+  assert.equal(createdRisk.ok, true)
+  assert.equal(createdRisk.risk.status, 'research')
+  assert.equal(createdRisk.risk.currentAssessment.exposure.level, 'medium')
+  assert.deepEqual(
+    await firstAuth.run(() => firstService.createProjectRisk(
+      createRiskRequest,
+      new AbortController().signal,
+    )),
+    createdRisk,
+  )
+  const riskId = createdRisk.risk.riskId
+  const filteredRisk = await firstAuth.run(() => firstService.projectRisks({
+    projectId,
+    exposure: 'medium',
+    status: 'research',
+    riskOwnerMemberId: feishuAdded.value.memberId,
+    triggerState: 'not-met',
+    triggerContains: 'two consecutive',
+    reviewFrom: '2099-03-15',
+    reviewTo: '2099-03-15',
+    selectedRiskId: riskId,
+    riskLimit: 10,
+    activityLimit: 10,
+    historyLimit: 10,
+  }, new AbortController().signal))
+  assert.deepEqual(filteredRisk.risks.map(risk => risk.riskId), [riskId])
+  assert.equal(filteredRisk.selectedRisk.risk.riskId, riskId)
+  const revisedRisk = await firstAuth.run(() => firstService.reviseProjectRisk({
+    projectId,
+    riskId,
+    assessment: {
+      statement: {
+        condition: 'Packed consumer release evidence is now incomplete',
+        event: 'The release gate misses two checkpoints and blocks verification',
+        consequence: 'The packed artifact cannot be handed off on schedule',
+      },
+      category: 'quality',
+      trigger: {
+        statement: 'The release gate misses two checkpoints and blocks verification',
+        state: 'met',
+      },
+      probability: { lowerBasisPoints: 3_000, upperBasisPoints: 5_000 },
+      impact: { lowerBand: 3, upperBand: 4 },
+      confidence: 'high',
+      confidenceRationale: 'The second packed observation confirms the trigger.',
+      assessmentHorizonEnd: '2099-12-31',
+      nextReviewOn: '2099-04-15',
+      assumptions: ['The clean consumer remains offline', 'The package archive is immutable'],
+      accountableMemberId: feishuAdded.value.memberId,
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+      evidence: [],
+      dependencies: [],
+      mitigationTaskGuids: [],
+      contingencyTaskGuids: [],
+    },
+    expectedRisksRevision: createdRisk.value.revision,
+    expectedRiskRevision: createdRisk.risk.revision,
+    expectedTeamRevision: createdRisk.value.teamRevision,
+    expectedTaskRevision: createdRisk.value.taskRevision,
+    idempotencyKey: 'packed-risk-revise-idempotency-0001',
+    causationId: 'packed-risk-revise-causation-0001',
+    reason: 'owner-project-risk-revise',
+  }, new AbortController().signal))
+  assert.equal(revisedRisk.ok, true)
+  assert.equal(revisedRisk.risk.currentAssessment.exposure.level, 'high')
+  assert.equal(revisedRisk.risk.currentAssessment.trigger.state, 'met')
+  const watchedRisk = await firstAuth.run(() => firstService.transitionProjectRisk({
+    projectId,
+    riskId,
+    status: 'watch',
+    rationale: 'The Owner will monitor the confirmed packed release trigger.',
+    expectedRisksRevision: revisedRisk.value.revision,
+    expectedRiskRevision: revisedRisk.risk.revision,
+    expectedTaskRevision: revisedRisk.value.taskRevision,
+    idempotencyKey: 'packed-risk-watch-idempotency-0001',
+    causationId: 'packed-risk-watch-causation-0001',
+    reason: 'owner-project-risk-transition',
+  }, new AbortController().signal))
+  assert.equal(watchedRisk.ok, true)
+  assert.equal(watchedRisk.risk.status, 'watch')
+  const closedRisk = await firstAuth.run(() => firstService.transitionProjectRisk({
+    projectId,
+    riskId,
+    status: 'closed',
+    closureReason: 'below-threshold',
+    rationale: 'The Owner confirms the residual exposure is below the release threshold.',
+    expectedRisksRevision: watchedRisk.value.revision,
+    expectedRiskRevision: watchedRisk.risk.revision,
+    expectedTaskRevision: watchedRisk.value.taskRevision,
+    idempotencyKey: 'packed-risk-close-idempotency-0001',
+    causationId: 'packed-risk-close-causation-0001',
+    reason: 'owner-project-risk-transition',
+  }, new AbortController().signal))
+  assert.equal(closedRisk.ok, true)
+  assert.equal(closedRisk.risk.status, 'closed')
+  assert.equal(closedRisk.risk.closureReason, 'below-threshold')
+  packedRisks = await firstAuth.run(() => firstService.projectRisks({
+    projectId,
+    selectedRiskId: riskId,
+    riskLimit: 10,
+    activityLimit: 10,
+    historyLimit: 10,
+  }, new AbortController().signal))
+  assert.equal(packedRisks.revision, 4)
+  assert.equal(packedRisks.selectedRisk.risk.status, 'closed')
+  assert.equal(packedRisks.selectedRisk.history.length, 4)
+  assert.equal(packedRisks.activity.length, 4)
+  packedRiskTasks = await firstAuth.run(() => firstService.projectTasks(
+    { projectId },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(packedRiskTasks, packedTasksBeforeRisk)
+  assert.equal(networkCalls, 0)
   const acceptedReviewActivity = await firstAuth.run(() => firstService.activity({
     projectId,
     action: 'workbench.suggested-change.accepted',
@@ -1431,7 +1613,7 @@ try {
     new AbortController().signal,
   ))
   assert.deepEqual(finalIntegrity, acceptedReviewActivity.integrity)
-  assert.equal(finalIntegrity.eventCount, 10)
+  assert.equal(finalIntegrity.eventCount, 14)
 
   const feishuConfigurationOutcome = await firstAuth.run(() =>
     firstService.configureFeishuIdentityRoute({
@@ -1529,7 +1711,7 @@ try {
     new AbortController().signal,
   ))
   assert.deepEqual(finalIntegrity, feishuActivity.integrity)
-  assert.equal(finalIntegrity.eventCount, 12)
+  assert.equal(finalIntegrity.eventCount, 16)
 } finally {
   await firstContext?.fiber.dispose()
 }
@@ -1547,6 +1729,8 @@ let restartTeam
 let restartReview
 let restartDeliverables
 let restartDeliverableReview
+let restartRisks
+let restartRiskTasks
 let restartFeishuConnection
 let restartFeishuActivity
 let feishuRoundTripVerified = false
@@ -1623,6 +1807,20 @@ try {
   assert.deepEqual(restartDeliverables, packedDeliverables)
   assert.deepEqual(restartDeliverableReview, packedDeliverableReview)
   deliverableRoundTripVerified = true
+  restartRisks = await secondAuth.run(() => secondService.projectRisks({
+    projectId: createdProject.project.projectId,
+    selectedRiskId: packedRisks.selectedRisk.risk.riskId,
+    riskLimit: 10,
+    activityLimit: 10,
+    historyLimit: 10,
+  }, new AbortController().signal))
+  restartRiskTasks = await secondAuth.run(() => secondService.projectTasks(
+    { projectId: createdProject.project.projectId },
+    new AbortController().signal,
+  ))
+  assert.deepEqual(restartRisks, packedRisks)
+  assert.deepEqual(restartRiskTasks, packedRiskTasks)
+  riskRoundTripVerified = true
   restartFeishuConnection = await secondAuth.run(() => secondService.feishuConnectionCenter(
     new AbortController().signal,
   ))
@@ -1673,6 +1871,8 @@ console.log('PACKED_CONSUMER_RESULT ' + JSON.stringify({
   packedDeliverables,
   packedDeliverableReview,
   deliverableRoundTripVerified,
+  packedRisks,
+  riskRoundTripVerified,
   feishuConfiguration,
   configuredFeishuConnection,
   feishuVerification,
