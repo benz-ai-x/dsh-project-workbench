@@ -89,7 +89,7 @@ async function verifyHost() {
     check(typeof main.Config === 'function', `${packageName}: Config runtime schema is exported`)
     check(typeof main.WorkbenchScenario === 'function', `${packageName}: WorkbenchScenario is exported`)
     check(typeof main.SqliteWorkbenchRepository === 'function', `${packageName}: SQLite repository is exported`)
-    check(main.WORKBENCH_SCHEMA_VERSION === 10, `${packageName}: built SQLite authority exports Schema v10`)
+    check(main.WORKBENCH_SCHEMA_VERSION === 11, `${packageName}: built SQLite authority exports Schema v11`)
     check(typeof main.DshFeishuConnectionAdapter === 'function', `${packageName}: production Feishu adapter is a packed main export`)
     check(main.FEISHU_CONNECTION_ADAPTER_ID === 'feishu-open-platform-v1', `${packageName}: Feishu adapter exports its stable identity`)
     check(
@@ -324,6 +324,7 @@ function verifyTypertFace(face, packageName, label) {
     'createProject',
     'createProjectDeliverable',
     'createProjectMilestone',
+    'createProjectRisk',
     'decideDeliverableAcceptance',
     'decideSuggestedChange',
     'discoverFeishuCalendarEvents',
@@ -334,6 +335,7 @@ function verifyTypertFace(face, packageName, label) {
     'getProjectMilestones',
     'project',
     'projectDeliverables',
+    'projectRisks',
     'projectStart',
     'projectTasks',
     'projectTeam',
@@ -344,17 +346,19 @@ function verifyTypertFace(face, packageName, label) {
     'referenceFeishuTask',
     'requestDeliverableAcceptance',
     'reviewCenter',
+    'reviseProjectRisk',
     'setProjectMemberStatus',
     'setProjectResponsibility',
     'setStatus',
     'snapshot',
     'updateFeishuTask',
     'updateProjectMilestoneDate',
+    'transitionProjectRisk',
     'verifyFeishuIdentityRoute',
   ]
   check(
     sameStrings(methods, expectedMethods),
-    `${packageName}: ${label} Typert face contains exactly the thirty-seven T11 Remote methods`,
+    `${packageName}: ${label} Typert face contains exactly the forty-one T12 Remote methods`,
   )
   for (const invocation of invocations) {
     check(invocation?.namespace === 'workbench', `${packageName}: ${label} ${String(invocation?.method)} uses workbench namespace`)
@@ -375,6 +379,9 @@ function verifyTypertFace(face, packageName, label) {
   )
   const createProjectMilestone = invocations.find(
     invocation => invocation?.method === 'createProjectMilestone',
+  )
+  const createProjectRisk = invocations.find(
+    invocation => invocation?.method === 'createProjectRisk',
   )
   const decideDeliverableAcceptance = invocations.find(
     invocation => invocation?.method === 'decideDeliverableAcceptance',
@@ -404,6 +411,7 @@ function verifyTypertFace(face, packageName, label) {
   const projectDeliverables = invocations.find(
     invocation => invocation?.method === 'projectDeliverables',
   )
+  const projectRisks = invocations.find(invocation => invocation?.method === 'projectRisks')
   const getProjectMilestones = invocations.find(
     invocation => invocation?.method === 'getProjectMilestones',
   )
@@ -417,6 +425,9 @@ function verifyTypertFace(face, packageName, label) {
     invocation => invocation?.method === 'proposeProjectResponsibilityChange',
   )
   const reviewCenter = invocations.find(invocation => invocation?.method === 'reviewCenter')
+  const reviseProjectRisk = invocations.find(
+    invocation => invocation?.method === 'reviseProjectRisk',
+  )
   const requestDeliverableAcceptance = invocations.find(
     invocation => invocation?.method === 'requestDeliverableAcceptance',
   )
@@ -444,6 +455,9 @@ function verifyTypertFace(face, packageName, label) {
   const updateProjectMilestoneDate = invocations.find(
     invocation => invocation?.method === 'updateProjectMilestoneDate',
   )
+  const transitionProjectRisk = invocations.find(
+    invocation => invocation?.method === 'transitionProjectRisk',
+  )
   const verifyFeishuIdentityRoute = invocations.find(
     invocation => invocation?.method === 'verifyFeishuIdentityRoute',
   )
@@ -458,6 +472,7 @@ function verifyTypertFace(face, packageName, label) {
     createProject,
     createProjectDeliverable,
     createProjectMilestone,
+    createProjectRisk,
     decideDeliverableAcceptance,
     discoverFeishuCalendarEvents,
     discoverFeishuCalendars,
@@ -467,6 +482,7 @@ function verifyTypertFace(face, packageName, label) {
     getProjectMilestones,
     project,
     projectDeliverables,
+    projectRisks,
     projectStart,
     projectTasks,
     projectTeam,
@@ -477,6 +493,7 @@ function verifyTypertFace(face, packageName, label) {
     referenceFeishuTask,
     requestDeliverableAcceptance,
     reviewCenter,
+    reviseProjectRisk,
     decideSuggestedChange,
     setProjectMemberStatus,
     setProjectResponsibility,
@@ -484,6 +501,7 @@ function verifyTypertFace(face, packageName, label) {
     snapshot,
     updateFeishuTask,
     updateProjectMilestoneDate,
+    transitionProjectRisk,
     verifyFeishuIdentityRoute,
   ]) {
     check(
@@ -1436,6 +1454,45 @@ function verifyTypertFace(face, packageName, label) {
         responsibilityRevision: 1,
       }),
     `${packageName}: ${label} responsibility carrier rejects caller committed revision`,
+  )
+
+  const projectRisksQuery = projectRisks?.parameters?.find(
+    parameter => parameter?.name === 'query',
+  )
+  const projectRisksQueryShape = unwrapSchema(projectRisksQuery?.codec?.schema)?.def?.shape
+  check(
+    sameStrings(schemaObjectKeys(projectRisksQuery?.codec?.schema), [
+      'activityLimit',
+      'actor',
+      'beforeActivitySequence',
+      'beforeHistorySequence',
+      'beforeRiskSequence',
+      'disposition',
+      'exposure',
+      'historyLimit',
+      'organizationId',
+      'projectId',
+      'reviewFrom',
+      'reviewTo',
+      'riskLimit',
+      'riskOwnerMemberId',
+      'selectedRiskId',
+      'status',
+      'teamId',
+      'triggerContains',
+      'triggerState',
+    ])
+      && ['actor', 'disposition', 'organizationId', 'teamId']
+        .every(key => isOptionalNever(projectRisksQueryShape?.[key]))
+      && schemaAccepts(projectRisksQuery?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        status: 'accept',
+      })
+      && schemaRejects(projectRisksQuery?.codec?.schema, {
+        projectId: 'project-built-artifact',
+        disposition: 'accept',
+      }),
+    `${packageName}: ${label} Project Risks query keeps status canonical and rejects the disposition alias`,
   )
 
   const deliverablesQuery = projectDeliverables?.parameters?.find(

@@ -164,6 +164,10 @@ describe('Project Risk Scenario with real SQLite', () => {
     })
     await scenario.open()
     try {
+      await expect(scenario.projectRisks({
+        projectId: 'project-risk-scenario',
+        disposition: 'accept',
+      } as never, signal)).rejects.toMatchObject({ failure: { code: 'bad-request' } })
       const created = await scenario.createProjectRisk(createRequest(), signal)
       expect(created).toMatchObject({
         ok: true,

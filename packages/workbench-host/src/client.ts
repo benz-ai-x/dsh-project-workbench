@@ -2786,6 +2786,8 @@ export interface ProjectRiskTaskLinkProjection {
 /** Closed conjunctive filters and three independent descending cursors. */
 export interface ProjectRisksQuery {
   readonly projectId: string
+  /** Forbidden legacy alias; keeps generated carrier codecs closed. */
+  readonly disposition?: never
   readonly exposure?: ProjectRiskExposureLevel
   readonly status?: ProjectRiskStatus
   readonly riskOwnerMemberId?: string
