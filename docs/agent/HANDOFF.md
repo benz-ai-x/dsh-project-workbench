@@ -1,49 +1,24 @@
-# Project Workbench shutdown handoff
+# Project Workbench handoff
 
-Last updated: 2026-08-31 20:44 CST (Asia/Shanghai)
+Last updated: 2026-09-01 01:50 CST (Asia/Shanghai)
 
 ## Current state
 
-- Repository: `/Users/pc2026/Dev-Space/dsh-project-workbench`
-- Upstream: `git@github.com:benz-ai-x/dsh-project-workbench.git`
-- Main branch: `main`
-- Main and `origin/main` were both at `fdb45b1bed6287bb649ede6d79575660bb830e29` before this handoff commit.
-- The main worktree and all three T10 implementation worktrees were clean when the agents were stopped.
-- Active delivery ticket: [#11 — T10: Bind a Project calendar and manage Milestones](https://github.com/benz-ai-x/dsh-project-workbench/issues/11), currently open.
-- The implementation goal remains active and intentionally incomplete. Do not mark it complete until all remaining tickets and final acceptance are complete.
+- Repository: `/root/workspace/dsh-project-workbench`
+- Branch: `main`
+- Code checkpoint before this handoff update: `d17f024aab2ffea5ee9e8803d2b49c9e21d0b9ea`
+- `origin/main`: `2f6561c09e0eb604dfbd5d39b2fda37bc2cad540`
+- The local branch is 19 commits ahead before the handoff commit.
+- Pinned Harness checkout: `/root/workspace/deepseek-harness-baseline` at clean detached commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`.
+- Active delivery ticket: [#11 — T10: Bind a Project calendar and manage Milestones](https://github.com/benz-ai-x/dsh-project-workbench/issues/11).
 
-## Completed checkpoint
+T10's local implementation and all eight local acceptance checklist items are complete. Issue #11 has not been commented on or closed because this environment has no GitHub CLI, token, or connector authorization. Under the repository Definition of Done, that external administrative step remains open and must not be represented as completed.
 
-T09 is complete and [issue #10](https://github.com/benz-ai-x/dsh-project-workbench/issues/10) is closed. The final T09 commit is `d80919e`.
+The next ticket cannot be implemented safely yet: this checkout contains only the broad T11+ placeholder, not the active GitHub ticket or parent spec required by `AGENTS.md`.
 
-The final T09 verification passed:
+## T10 delivered surface
 
-- Context contract: 207/207
-- Tests: 40 files, 452 tests
-- Build: 554 modules
-- Package verification: 3 archives, 318 checks
-- Browser smoke test: passed
-
-Evidence was posted in the [T09 completion comment](https://github.com/benz-ai-x/dsh-project-workbench/issues/10#issuecomment-5476581487).
-
-## T10 contract already frozen
-
-The T10 design and public seams are committed and pushed:
-
-- `b55903e` — calendar and Milestone domain/authority contract
-- `207fd73` — Feishu Calendar adapter seam
-- `fdb45b1` — public Host/Client calendar contract
-
-Read these before implementation:
-
-- [`CONTEXT.md`](../../CONTEXT.md)
-- [`TODO.md`](../../TODO.md)
-- [`PROJECT_CONTRACT.md`](./PROJECT_CONTRACT.md)
-- [`t10-feishu-calendar-milestones.md`](../research/t10-feishu-calendar-milestones.md)
-- [`client.ts`](../../packages/workbench-host/src/client.ts)
-- [`feishu-calendar-federation.ts`](../../packages/workbench-host/src/feishu-calendar-federation.ts)
-
-The frozen public Remote surface contains exactly seven T10 behaviors:
+The frozen public surface still contains exactly seven T10 Remote behaviors:
 
 1. `discoverFeishuCalendars`
 2. `bindProjectCalendar`
@@ -53,60 +28,76 @@ The frozen public Remote surface contains exactly seven T10 behaviors:
 6. `updateProjectMilestoneDate`
 7. `reconcileProjectCalendar`
 
-Important contract decisions:
+Implementation evidence now covers:
 
-- A Project has zero or one immutable binding to one writable Feishu Calendar v4 calendar through one exact verified Bot/User route. There is no actor fallback.
-- A Milestone owns Workbench business semantics and binds to one non-recurring, non-exception event organized by that calendar.
-- Feishu is authoritative for event dates and status. Workbench stores the latest normalized observation and emits durable `ProjectScheduleChange` facts.
-- Schedules are a closed union: all-day ISO dates with an exclusive end, or RFC 3339 timed instants with an IANA time zone.
-- Event creation uses Feishu's provider `idempotency_key`. Calendar creation and event PATCH are one-attempt operations; ambiguous outcomes become visible `unknown` facts and must not be blindly redelivered.
-- Calendar event responses do not expose a usable resource revision/ETag. `remoteObservationVersion` is a SHA-256 digest of the canonical authority tuple, not provider CAS. Date writes therefore require GET-before-PATCH, one PATCH attempt, response validation, and reconciliation.
-- Event-change notifications are hints only because relevant event ID/change-type fields are gray-release fields. Correctness must also come from bounded reconciliation of all bound events.
-- T10 advances the SQLite schema from v8 to v9.
+- Schema v8→v9 migration and restart recovery.
+- Exact Bot/User Calendar v4 list/get/create/event-create/date-PATCH routing with no actor fallback.
+- Immutable Project Calendar binding and stable Workbench Milestone semantics.
+- All-day and timed authority, provider observation digests, GET-before-PATCH conflict convergence, and provider-response projection.
+- Receipt-first replay, prepared/inflight/unknown effect recovery, project-wide active-effect fencing, Outbox alignment, and full ledger integrity checks.
+- Exact unknown date reconciliation, including semantically equivalent offset/UTC timed instants and unknown effects outside the bounded terminal projection.
+- Explicit organizer/recurrence/exception/read-failure eligibility changes with revisioned `ProjectScheduleChange` facts; one unreadable event no longer prevents other bound events from converging.
+- Deterministic failure→recovery change IDs when the optional test ID generator is absent.
+- Localized accessible Client flows, lifecycle cleanup, generated Typert contracts, real Loader/Profile coverage, and packed-artifact verification.
 
-Public webhook exposure, recurring events, meetings, deliverables, task-date synchronization, files, and AI-native analysis remain outside T10.
+The final reliability commits are:
 
-## Stopped parallel work
+- `2e584bd` — harden Calendar effect recovery and unknown fencing.
+- `55efdda` — replay and settle the originally reserved prepared effect.
+- `cb34829` — verify immutable Calendar effect/receipt/Outbox integrity.
+- `d17f024` — close receipt-first, timed reconciliation, drift/feed, partial-repair, and existing-path fence gaps.
 
-All three agents were interrupted safely before shutdown. Their branches have no branch-only commits and their worktrees have no tracked or untracked changes. Each currently points to `fdb45b1`.
+## Verification evidence
 
-| Workstream | Branch | Worktree | Ownership when resumed |
-| --- | --- | --- | --- |
-| Domain/reliability | `codex/t10-domain` | `/Users/pc2026/Dev-Space/dsh-project-workbench-t10-domain` | Host domain, authorization, repository, SQLite schema v9, scenarios, reliable operations, and tests; do not edit production adapter, Client, generated Remote, index, browser, or packaging files. |
-| Feishu adapter | `codex/t10-adapter` | `/Users/pc2026/Dev-Space/dsh-project-workbench-t10-adapter` | Calendar v4 runtime helpers, `feishu-connection-adapter.ts`, and adapter tests; implement exact list/get/create/PATCH behavior for Bot/User routes and digest/constraint handling; do not edit repository, scenarios, Client, or Remote. |
-| Client | `codex/t10-client` | `/Users/pc2026/Dev-Space/dsh-project-workbench-t10-client` | `packages/workbench-client/**`, including controller, panel, styling, localization, and tests; do not edit Host core, adapter, or Remote during the independent phase. |
-
-Do not delete or recreate these worktrees unless a read-only check proves they are gone. If dependencies are absent after restart, run `pnpm install --offline --frozen-lockfile` inside the affected worktree.
-
-## Recommended resume and integration order
-
-1. Confirm main and all worktrees still match the recorded state.
-2. Resume at most the same three agents in their existing worktrees, with the ownership boundaries above. Require each agent to run the context check first, commit only its scoped changes, and report the commit SHA plus focused test evidence.
-3. Main agent reviews and cherry-picks the domain commit first, then the adapter commit, then the Client commit. Resolve contract mismatches centrally; do not let a workstream silently widen the frozen public types.
-4. Main agent owns the remaining integration work: Host service composition, generated Remote declarations/loader/index wiring, browser fixtures, archive assertions, documentation/evidence, and end-to-end acceptance.
-5. Run focused tests after every integration commit, then run the complete verification command.
-6. Only after all eight T10 checklist items in `TODO.md` have behavioral evidence: update issue #11, close it, and continue to the next ticket.
-
-Useful restart checks:
+Use Node 24.11.1 for context, build, typecheck, unit/integration, built, and pack checks:
 
 ```sh
-cd /Users/pc2026/Dev-Space/dsh-project-workbench
-git status --short --branch
-git fetch origin
-git rev-parse HEAD
-git rev-parse origin/main
-git worktree list
-node scripts/verify-dsh-context.mjs --require-source
-
-git -C /Users/pc2026/Dev-Space/dsh-project-workbench-t10-domain status --short --branch
-git -C /Users/pc2026/Dev-Space/dsh-project-workbench-t10-adapter status --short --branch
-git -C /Users/pc2026/Dev-Space/dsh-project-workbench-t10-client status --short --branch
+DSH_NODE24_DIR=/root/.local/share/pnpm/store/v11/links/@/node/24.11.1/67fcb385b600281971ca482889a7d0b4d66c24b47a416f079b2b80f426c72a98/node_modules/node/node_modules/node-linux-arm64/bin
+PATH="$DSH_NODE24_DIR:$PATH" pnpm context:check:strict
+PATH="$DSH_NODE24_DIR:$PATH" pnpm build
+PATH="$DSH_NODE24_DIR:$PATH" pnpm typecheck
+PATH="$DSH_NODE24_DIR:$PATH" pnpm test
+PATH="$DSH_NODE24_DIR:$PATH" pnpm built:check
+PATH="$DSH_NODE24_DIR:$PATH" pnpm pack:check
 ```
 
-Final verification command:
+Final results at `d17f024`:
+
+- Strict pinned context: 207/207 checks.
+- Host and Client build: passed.
+- TypeScript project references: passed.
+- Tests: 45 files, 515 tests.
+- Built artifacts: 615 checks.
+- Packed artifacts: 3 real archives, 320 checks.
+- Two-axis final review: Standards 0 actionable findings; Spec 0 actionable findings.
+
+Run the real browser check under the workspace-default Node 22 runtime. Node 24 currently fails while preloading a pinned Harness browser module, so do not fold this command into the Node 24 prefix:
 
 ```sh
-pnpm verify
+DSH_PLAYWRIGHT_EXECUTABLE_PATH=/root/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell pnpm test:browser
 ```
 
-The last known complete baseline before T10 implementation was green. If the first post-restart context check fails, treat that as an environment or worktree problem before changing the frozen contract.
+The final browser run passed the cumulative authenticated journey, all seven protected T10 Remotes, redaction, Client HMR, Host restart persistence, 375px keyboard/layout coverage, offline recovery, and session revocation.
+
+`pack:check` warnings remain deliberate boundaries: packages are private, DSH dependencies are source-linked to the pinned checkout, and registry-only installation/publication is not claimed.
+
+## Deferred UI issue
+
+`TODO.md` records `UI-MANUAL-01`. Automated real-Chromium functional, accessibility, keyboard, overflow, desktop, and 375px responsive checks pass. The container has no CJK font, so Chinese glyph appearance renders as missing-glyph boxes and cannot be judged honestly here. After all development is complete, repeat the zh-CN desktop and mobile visual pass manually in a normal CJK-font environment.
+
+This is a visual-font follow-up, not a claim that UI testing as a whole was unavailable.
+
+## Environment limitations
+
+- The `dsh-plugin-dev` skill required by `AGENTS.md` is not installed in this environment. Do not substitute a similarly named skill; keep using the checked-in contract/spec and record the limitation until the exact skill is available.
+- GitHub issue mutation is unavailable here. With authorized GitHub access, post the verification evidence above to #11 and close it if the ticket state still matches this checkout.
+- No local active-ticket specification exists for T11/#12. Fetch and read the ticket and parent spec before implementation.
+
+## Next-session entry
+
+1. Read `docs/agent/PROJECT_CONTRACT.md`, `TODO.md`, `dsh-reference.lock.json`, this handoff, the active ticket, and its parent spec completely.
+2. Confirm the main worktree and pinned Harness checkout are clean and at the recorded commits.
+3. Run `node scripts/verify-dsh-context.mjs --require-source`; after dependency installation, run `pnpm context:check:strict`. Stop on any baseline mismatch.
+4. With GitHub authorization, update/close #11 using the recorded evidence.
+5. Obtain the next ticket and parent spec before changing code. Do not infer T11 scope from the broad placeholder.
+6. Keep `UI-MANUAL-01` open until all development is complete, then perform the requested manual CJK-font visual pass.

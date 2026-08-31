@@ -94,17 +94,18 @@
 
 ## T10 — Bind a Project calendar and manage Milestones (#11)
 
-- [ ] Bind exactly one existing or newly created writable Feishu Calendar v4 resource to a Project through one explicitly selected verified Bot/User route.
-- [ ] Model Workbench-owned Milestone semantics with one stable non-recurring Feishu event binding, authoritative all-day/timed dates, remote observation version, link, and sync health.
-- [ ] Create Milestone events with Feishu's documented provider idempotency key, or bind an existing event after calendar, organizer, recurrence, and uniqueness validation.
-- [ ] Guard date writes with Project schedule, Milestone, and remote-observation versions; perform GET-before-PATCH, project only Feishu's response, and expose conflicts without claiming provider CAS.
-- [ ] Converge Feishu-originated date/status changes through a deduplicated notification hint and bounded periodic reconciliation, appending one durable Project schedule-change feed for dependency consumers.
-- [ ] Reserve/claim/settle calendar and event writes durably so ambiguous or recovered inflight operations become visible unknown facts and are never blindly redelivered.
-- [ ] Build the localized accessible Project Milestones Client surface with route/calendar/event discovery, create/bind flows, date confirmation, event links, sync status, recent changes, conflict/unknown handling, and lifecycle cleanup.
-- [ ] Prove Schema v8→v9 restart, exact Calendar v4 requests, Bot/User route fencing, date normalization, identity/version/contention matrices, convergence/recovery, Remote/Loader/Client/browser behavior, and built/packed artifacts.
+- [x] Bind exactly one existing or newly created writable Feishu Calendar v4 resource to a Project through one explicitly selected verified Bot/User route.
+- [x] Model Workbench-owned Milestone semantics with one stable non-recurring Feishu event binding, authoritative all-day/timed dates, remote observation version, link, and sync health.
+- [x] Create Milestone events with Feishu's documented provider idempotency key, or bind an existing event after calendar, organizer, recurrence, and uniqueness validation.
+- [x] Guard date writes with Project schedule, Milestone, and remote-observation versions; perform GET-before-PATCH, project only Feishu's response, and expose conflicts without claiming provider CAS.
+- [x] Converge Feishu-originated date/status changes through a deduplicated notification hint and bounded periodic reconciliation, appending one durable Project schedule-change feed for dependency consumers.
+- [x] Reserve/claim/settle calendar and event writes durably so ambiguous or recovered inflight operations become visible unknown facts and are never blindly redelivered.
+- [x] Build the localized accessible Project Milestones Client surface with route/calendar/event discovery, create/bind flows, date confirmation, event links, sync status, recent changes, conflict/unknown handling, and lifecycle cleanup.
+- [x] Prove Schema v8→v9 restart, exact Calendar v4 requests, Bot/User route fencing, date normalization, identity/version/contention matrices, convergence/recovery, Remote/Loader/Client/browser behavior, and built/packed artifacts.
 
 ## Later tickets
 
+- [ ] UI-MANUAL-01 — After all development is complete, manually repeat the zh-CN desktop and 375px Milestones visual pass in an environment with CJK fonts. Real Chromium functional, accessibility, keyboard, overflow, and responsive-layout coverage passes now; this container cannot reliably judge Chinese glyph rendering because it has no CJK font.
 - [ ] T11+ Files, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T10.
 
 ## Definition of done
