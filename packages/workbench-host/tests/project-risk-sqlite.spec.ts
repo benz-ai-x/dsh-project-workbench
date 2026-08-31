@@ -89,6 +89,7 @@ describe('Project Risk SQLite v11', () => {
       expect(names).toEqual(expect.arrayContaining([
         'workbench_project_risk_head',
         'workbench_project_risk',
+        'workbench_project_risk_status_recent',
         'workbench_project_risk_assessment',
         'workbench_project_risk_assessment_member',
         'workbench_project_risk_evidence',
@@ -180,5 +181,22 @@ describe('Project Risk SQLite v11', () => {
     } finally {
       await repository.close()
     }
+  })
+
+  it('rejects a v11 database missing a required Project Risk filter index', async () => {
+    const { path, repository } = await fixture()
+    await repository.close()
+    const tampered = new DatabaseSync(path)
+    tampered.exec('DROP INDEX workbench_project_risk_status_recent')
+    tampered.close()
+
+    const reopened = new SqliteWorkbenchRepository({
+      databasePath: path,
+      journalMode: 'wal',
+      busyTimeoutMs: 1_000,
+    })
+    await expect(reopened.open()).rejects.toThrow(
+      'missing index workbench_project_risk_status_recent',
+    )
   })
 })

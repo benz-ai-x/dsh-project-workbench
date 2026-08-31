@@ -1361,6 +1361,16 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_project_risk_activity_no_update',
   'workbench_project_risk_activity_no_delete',
 ] as const
+const REQUIRED_PROJECT_RISK_INDEXES = [
+  'workbench_project_risk_recent',
+  'workbench_project_risk_status_recent',
+  'workbench_project_risk_filter',
+  'workbench_project_risk_trigger_search',
+  'workbench_project_risk_activity_recent',
+  'workbench_project_risk_dependency_target',
+  'workbench_project_risk_task_use',
+  'workbench_project_risk_member_use',
+] as const
 
 /** A single-connection repository whose write transaction body is wholly synchronous. */
 export class SqliteWorkbenchRepository implements WorkbenchRepository {
@@ -8384,6 +8394,8 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
 
       CREATE INDEX workbench_project_risk_recent
         ON workbench_project_risk (project_id, sequence DESC);
+      CREATE INDEX workbench_project_risk_status_recent
+        ON workbench_project_risk (project_id, status, sequence DESC);
       CREATE INDEX workbench_project_risk_filter
         ON workbench_project_risk_assessment (
           project_id, exposure_level, trigger_state, next_review_on, accountable_member_id
@@ -8689,6 +8701,12 @@ function validateSchema(database: DatabaseSync): void {
   `).all() as Array<{ readonly name: string }>).map(row => row.name))
   for (const trigger of REQUIRED_IMMUTABILITY_TRIGGERS) {
     if (!triggers.has(trigger)) throw new Error(`Workbench database is missing trigger ${trigger}`)
+  }
+  const indexes = new Set((database.prepare(`
+    SELECT name FROM sqlite_schema WHERE type = 'index'
+  `).all() as Array<{ readonly name: string }>).map(row => row.name))
+  for (const index of REQUIRED_PROJECT_RISK_INDEXES) {
+    if (!indexes.has(index)) throw new Error(`Workbench database is missing index ${index}`)
   }
   if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) {
     throw new Error('Workbench database contains broken foreign-key references')
