@@ -13,6 +13,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 
@@ -75,6 +76,10 @@ const WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH
   = '/api/workbench/requestDeliverableAcceptance'
 const WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH
   = '/api/workbench/decideDeliverableAcceptance'
+const WORKBENCH_PROJECT_RISKS_PATH = '/api/workbench/projectRisks'
+const WORKBENCH_CREATE_PROJECT_RISK_PATH = '/api/workbench/createProjectRisk'
+const WORKBENCH_REVISE_PROJECT_RISK_PATH = '/api/workbench/reviseProjectRisk'
+const WORKBENCH_TRANSITION_PROJECT_RISK_PATH = '/api/workbench/transitionProjectRisk'
 const DELIVERABLE_BROWSER_ADAPTER = Object.freeze({
   appId: 'cli_workbench_browser_fixture',
   credentialRef: 'WORKBENCH_E2E_DELIVERABLE_FIXTURE',
@@ -2145,6 +2150,477 @@ async function runRealDeliverableRestartJourney(options) {
   await stopDsh(restarted.host)
 }
 
+function realRiskAssessment(accountableMemberId, variant) {
+  if (variant === 'initial') {
+    return {
+      statement: {
+        condition: '上游接口仍在稳定性观察期',
+        event: '供应商连续两次错过接口 SLA',
+        consequence: '浏览器验收链路可能延迟',
+      },
+      category: 'dependency',
+      trigger: {
+        statement: '供应商连续两次错过接口 SLA',
+        state: 'not-met',
+      },
+      probability: { lowerBasisPoints: 1_200, upperBasisPoints: 2_000 },
+      impact: { lowerBand: 2, upperBand: 3 },
+      confidence: 'medium',
+      confidenceRationale: '以当前接口稳定性记录作为初始判断。',
+      assessmentHorizonEnd: '2099-12-31',
+      nextReviewOn: '2099-01-15',
+      assumptions: ['供应商保持现有发布节奏'],
+      accountableMemberId,
+      contributorMemberIds: [],
+      humanSponsorMemberId: null,
+      evidence: [],
+      dependencies: [],
+      mitigationTaskGuids: [DELIVERABLE_BROWSER_ADAPTER.taskGuid],
+      contingencyTaskGuids: [],
+    }
+  }
+  return {
+    statement: {
+      condition: '上游接口稳定性观察已经触发升级',
+      event: '供应商连续两次错过接口 SLA 且回归失败',
+      consequence: '真实 Host 验收窗口将被阻塞',
+    },
+    category: 'quality',
+    trigger: {
+      statement: '供应商连续两次错过接口 SLA 且回归失败',
+      state: 'met',
+    },
+    probability: { lowerBasisPoints: 3_500, upperBasisPoints: 5_000 },
+    impact: { lowerBand: 3, upperBand: 4 },
+    confidence: 'high',
+    confidenceRationale: '最新回归证据已经满足人工确认的升级触发条件。',
+    assessmentHorizonEnd: '2099-12-31',
+    nextReviewOn: '2099-02-15',
+    assumptions: ['修复仍需要供应商参与', '验收环境保持可用'],
+    accountableMemberId,
+    contributorMemberIds: [],
+    humanSponsorMemberId: null,
+    evidence: [],
+    dependencies: [],
+    mitigationTaskGuids: [DELIVERABLE_BROWSER_ADAPTER.taskGuid],
+    contingencyTaskGuids: [],
+  }
+}
+
+async function prepareRealRiskBrowserProject(page, names) {
+  const start = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_START_PATH,
+    { filter: { limit: 20 } },
+  )
+  const createdProject = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_CREATE_PROJECT_PATH,
+    {
+      request: {
+        template: start.template.selection,
+        projectName: names.projectName,
+        primaryGoal: {
+          name: names.primaryGoalName,
+          outcomes: [{
+            name: names.outcomeName,
+            metric: {
+              metricName: names.metricName,
+              initialValue: 12,
+              targetValue: 3,
+              unit: '天',
+              direction: 'decrease',
+            },
+          }],
+        },
+        supportingGoals: [],
+        expectedCatalogRevision: start.catalogRevision,
+        expectedRevision: null,
+        ...browserCommandKeys('risk-browser-project'),
+        reason: 'owner-project-create',
+      },
+    },
+  )
+  assert.equal(
+    createdProject.ok,
+    true,
+    `real Risk Project creation failed: ${createdProject.error?.code ?? 'unknown'}`,
+  )
+  const projectId = createdProject.value.project.projectId
+  const members = [
+    {
+      kind: 'human',
+      displayName: names.riskOwnerName,
+      identity: {
+        type: 'feishu',
+        appId: DELIVERABLE_BROWSER_ADAPTER.appId,
+        openId: 'ou_risk_browser_owner',
+      },
+    },
+    {
+      kind: 'human',
+      displayName: names.otherOwnerName,
+      identity: {
+        type: 'feishu',
+        appId: DELIVERABLE_BROWSER_ADAPTER.appId,
+        openId: 'ou_risk_browser_other',
+      },
+    },
+  ]
+  for (const [index, member] of members.entries()) {
+    const added = await callAuthenticatedWorkbench(
+      page,
+      WORKBENCH_ADD_PROJECT_MEMBER_PATH,
+      {
+        request: {
+          projectId,
+          member,
+          expectedTeamRevision: index,
+          expectedRevision: null,
+          ...browserCommandKeys(`risk-browser-member-${String(index + 1)}`),
+          reason: 'owner-project-member-add',
+        },
+      },
+    )
+    assert.equal(added.ok, true, `real Risk member creation failed: ${added.error?.code ?? 'unknown'}`)
+  }
+
+  const configured = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_CONFIGURE_FEISHU_ROUTE_PATH,
+    {
+      request: {
+        kind: 'user',
+        mode: 'set',
+        appId: DELIVERABLE_BROWSER_ADAPTER.appId,
+        credentialRef: DELIVERABLE_BROWSER_ADAPTER.credentialRef,
+        expectedConnectionRevision: 0,
+        expectedRouteGeneration: null,
+        ...browserCommandKeys('risk-browser-route-configure'),
+        reason: 'owner-feishu-route-configure',
+      },
+    },
+  )
+  assert.equal(configured.ok, true, `real Risk route configuration failed: ${configured.error?.code ?? 'unknown'}`)
+  const verified = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_VERIFY_FEISHU_ROUTE_PATH,
+    {
+      request: {
+        kind: 'user',
+        expectedConnectionRevision: 1,
+        expectedRouteGeneration: 1,
+        ...browserCommandKeys('risk-browser-route-verify'),
+        reason: 'owner-feishu-route-verify',
+      },
+    },
+  )
+  assert.equal(verified.ok, true, `real Risk route verification failed: ${verified.error?.code ?? 'unknown'}`)
+  const boundTasks = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_BIND_FEISHU_TASK_LIST_PATH,
+    {
+      request: {
+        projectId,
+        kind: 'user',
+        mode: 'existing',
+        taskListGuid: DELIVERABLE_BROWSER_ADAPTER.taskListGuid,
+        expectedConnectionRevision: 2,
+        expectedRouteGeneration: 1,
+        expectedBindingRevision: null,
+        ...browserCommandKeys('risk-browser-task-bind'),
+        reason: 'owner-feishu-task-list-bind',
+      },
+    },
+  )
+  assert.equal(boundTasks.ok, true, `real Risk task binding failed: ${boundTasks.error?.code ?? 'unknown'}`)
+
+  const team = await readTeamViaCarrier(page, projectId)
+  const memberId = displayName => {
+    const member = team.members.find(candidate => candidate.displayName === displayName)
+    assert.notEqual(member, undefined, `real Risk Team lost ${displayName}`)
+    return member.memberId
+  }
+  const riskOwnerMemberId = memberId(names.riskOwnerName)
+  const otherOwnerMemberId = memberId(names.otherOwnerName)
+  const tasksBefore = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_TASKS_PATH,
+    { query: { projectId } },
+  )
+  assert.deepEqual(tasksBefore.effects, [], 'dedicated Risk Project inherited a task effect')
+  assert.deepEqual(
+    tasksBefore.tasks.map(task => task.taskGuid),
+    [DELIVERABLE_BROWSER_ADAPTER.taskGuid],
+    'dedicated Risk Project did not project the fixture mitigation task',
+  )
+  const initialWorkspace = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    { query: { projectId, riskLimit: 20, activityLimit: 50 } },
+  )
+  assert.equal(initialWorkspace.revision, 0)
+  assert.equal(initialWorkspace.teamRevision, team.teamRevision)
+  assert.equal(initialWorkspace.taskRevision, tasksBefore.revision)
+  assert.deepEqual(initialWorkspace.risks, [])
+  assert.equal(
+    initialWorkspace.taskOptions.some(task => task.taskGuid === DELIVERABLE_BROWSER_ADAPTER.taskGuid),
+    true,
+    'Risk workspace omitted the current T08 mitigation choice',
+  )
+
+  const created = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_CREATE_PROJECT_RISK_PATH,
+    {
+      request: {
+        projectId,
+        assessment: realRiskAssessment(riskOwnerMemberId, 'initial'),
+        expectedRisksRevision: initialWorkspace.revision,
+        expectedRiskRevision: null,
+        expectedTeamRevision: team.teamRevision,
+        expectedTaskRevision: tasksBefore.revision,
+        ...browserCommandKeys('risk-browser-create'),
+        reason: 'owner-project-risk-create',
+      },
+    },
+  )
+  assert.equal(created.ok, true, `real Risk creation failed: ${created.error?.code ?? 'unknown'}`)
+  const riskId = created.risk.riskId
+  assert.equal(created.risk.status, 'research')
+  assert.equal(created.risk.closureReason, null)
+  assert.deepEqual(created.risk.currentAssessment.exposure, {
+    policyVersion: 'project-risk-exposure-v1',
+    likelihoodBand: 'P2',
+    impactBand: 'I3',
+    level: 'medium',
+  })
+
+  const filtered = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    {
+      query: {
+        projectId,
+        exposure: 'medium',
+        status: 'research',
+        riskOwnerMemberId,
+        triggerState: 'not-met',
+        triggerContains: '连续两次错过',
+        reviewFrom: '2099-01-15',
+        reviewTo: '2099-01-15',
+        selectedRiskId: riskId,
+        riskLimit: 20,
+        activityLimit: 50,
+        historyLimit: 50,
+      },
+    },
+  )
+  assert.deepEqual(filtered.risks.map(risk => risk.riskId), [riskId])
+  assert.equal(filtered.selectedRisk?.risk.riskId, riskId)
+  const excludingFilters = [
+    ['exposure', { exposure: 'high' }],
+    ['status', { status: 'watch' }],
+    ['Risk Owner', { riskOwnerMemberId: otherOwnerMemberId }],
+    ['trigger state', { triggerState: 'met' }],
+    ['trigger text', { triggerContains: '不存在的触发器' }],
+    ['review date', { reviewFrom: '2099-01-16' }],
+  ]
+  for (const [label, filter] of excludingFilters) {
+    const excluded = await callAuthenticatedWorkbench(
+      page,
+      WORKBENCH_PROJECT_RISKS_PATH,
+      { query: { projectId, ...filter, riskLimit: 20, activityLimit: 50 } },
+    )
+    assert.deepEqual(excluded.risks, [], `${label} filter did not exclude the real Risk`)
+  }
+
+  const revised = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_REVISE_PROJECT_RISK_PATH,
+    {
+      request: {
+        projectId,
+        riskId,
+        assessment: realRiskAssessment(riskOwnerMemberId, 'revised'),
+        expectedRisksRevision: created.value.revision,
+        expectedRiskRevision: created.risk.revision,
+        expectedTeamRevision: created.value.teamRevision,
+        expectedTaskRevision: created.value.taskRevision,
+        ...browserCommandKeys('risk-browser-revise'),
+        reason: 'owner-project-risk-revise',
+      },
+    },
+  )
+  assert.equal(revised.ok, true, `real Risk revision failed: ${revised.error?.code ?? 'unknown'}`)
+  assert.equal(revised.risk.currentAssessment.sequence, 2)
+  assert.equal(revised.risk.currentAssessment.trigger.state, 'met')
+  assert.match(revised.risk.currentAssessment.trigger.observedAt ?? '', /Z$/u)
+  assert.deepEqual(revised.risk.currentAssessment.exposure, {
+    policyVersion: 'project-risk-exposure-v1',
+    likelihoodBand: 'P3',
+    impactBand: 'I4',
+    level: 'high',
+  })
+
+  const mitigating = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_TRANSITION_PROJECT_RISK_PATH,
+    {
+      request: {
+        projectId,
+        riskId,
+        status: 'mitigate',
+        rationale: '触发条件已满足，Owner 明确进入缓解处置。',
+        expectedRisksRevision: revised.value.revision,
+        expectedRiskRevision: revised.risk.revision,
+        expectedTaskRevision: revised.value.taskRevision,
+        ...browserCommandKeys('risk-browser-mitigate'),
+        reason: 'owner-project-risk-transition',
+      },
+    },
+  )
+  assert.equal(mitigating.ok, true, `real Risk mitigation failed: ${mitigating.error?.code ?? 'unknown'}`)
+  assert.equal(mitigating.risk.status, 'mitigate')
+  const closed = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_TRANSITION_PROJECT_RISK_PATH,
+    {
+      request: {
+        projectId,
+        riskId,
+        status: 'closed',
+        closureReason: 'below-threshold',
+        rationale: '缓解措施已将暴露降至 Owner 接受阈值以下。',
+        expectedRisksRevision: mitigating.value.revision,
+        expectedRiskRevision: mitigating.risk.revision,
+        expectedTaskRevision: mitigating.value.taskRevision,
+        ...browserCommandKeys('risk-browser-close'),
+        reason: 'owner-project-risk-transition',
+      },
+    },
+  )
+  assert.equal(closed.ok, true, `real Risk close failed: ${closed.error?.code ?? 'unknown'}`)
+  assert.equal(closed.risk.status, 'closed')
+  assert.equal(closed.risk.closureReason, 'below-threshold')
+
+  const finalProjection = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    {
+      query: {
+        projectId,
+        selectedRiskId: riskId,
+        riskLimit: 20,
+        activityLimit: 50,
+        historyLimit: 50,
+      },
+    },
+  )
+  assert.equal(finalProjection.selectedRisk?.risk.status, 'closed')
+  assert.deepEqual(
+    finalProjection.selectedRisk?.history.map(entry => entry.kind).sort(),
+    ['assessment', 'assessment', 'transition', 'transition'],
+  )
+  assert.deepEqual(
+    finalProjection.selectedRisk?.history.map(entry => entry.sequence).sort((left, right) => left - right),
+    [1, 2, 3, 4],
+  )
+  assert.deepEqual(
+    finalProjection.activity.map(entry => entry.action).sort(),
+    ['risk-created', 'risk-revised', 'risk-transitioned', 'risk-transitioned'],
+  )
+  const tasksAfter = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_TASKS_PATH,
+    { query: { projectId } },
+  )
+  assert.deepEqual(tasksAfter, tasksBefore, 'Risk lifecycle changed the T08 task projection')
+  return {
+    ...names,
+    projectId,
+    riskId,
+    finalProjection,
+    taskProjection: tasksAfter,
+  }
+}
+
+function assertNoPersistedRiskTaskWrites(databasePath, projectId) {
+  const database = new DatabaseSync(databasePath, { readOnly: true })
+  try {
+    const taskEffects = database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM workbench_feishu_task_effect
+      WHERE project_id = ?
+    `).get(projectId).count
+    const taskReceipts = database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM workbench_command_receipt
+      WHERE command_type = 'workbench.feishu-task.update'
+    `).get().count
+    const taskOutbox = database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM workbench_outbox
+      WHERE project_id = ? AND topic = 'workbench.feishu-task.update.v1'
+    `).get(projectId).count
+    assert.equal(taskEffects, 0, 'Risk lifecycle reserved a T08 task effect')
+    assert.equal(taskReceipts, 0, 'Risk lifecycle committed a T08 task receipt')
+    assert.equal(taskOutbox, 0, 'Risk lifecycle committed a T08 task Outbox row')
+  } finally {
+    database.close()
+  }
+}
+
+async function runRealRiskRestartJourney(options) {
+  const first = await startDsh(options.projectDir, options.runtimeEnv)
+  const firstJourney = await openCheckedPage(first.readyUrl, 'real Risk Host boot')
+  await dismissHarnessOnboarding(firstJourney.page)
+  await loginExistingOwner(firstJourney.page, options.password)
+  const expected = await prepareRealRiskBrowserProject(firstJourney.page, options.expected)
+  await assertNoBrowserErrors(firstJourney)
+  await firstJourney.context.close()
+  await stopDsh(first.host)
+
+  const databasePath = join(options.projectDir, '.dsh/project-workbench.sqlite')
+  assert.ok(existsSync(databasePath), `real Risk SQLite database was not committed at ${databasePath}`)
+  assertNoPersistedRiskTaskWrites(databasePath, expected.projectId)
+  assert.equal(
+    `${first.host.stdout}\n${first.host.stderr}`.includes('T12 browser fixture forbids Risk-owned Feishu task writes'),
+    false,
+    'Risk lifecycle attempted a fixture provider task write',
+  )
+
+  const restarted = await startDsh(options.projectDir, options.runtimeEnv)
+  const restartedJourney = await openCheckedPage(restarted.readyUrl, 'real Risk Host SQLite restart')
+  await dismissHarnessOnboarding(restartedJourney.page)
+  await loginExistingOwner(restartedJourney.page, options.password)
+  await reopenProject(restartedJourney.page, expected, { skipTasks: true, skipMilestones: true })
+  const afterRestart = await callAuthenticatedWorkbench(
+    restartedJourney.page,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    {
+      query: {
+        projectId: expected.projectId,
+        selectedRiskId: expected.riskId,
+        riskLimit: 20,
+        activityLimit: 50,
+        historyLimit: 50,
+      },
+    },
+  )
+  const tasksAfterRestart = await callAuthenticatedWorkbench(
+    restartedJourney.page,
+    WORKBENCH_PROJECT_TASKS_PATH,
+    { query: { projectId: expected.projectId } },
+  )
+  assert.deepEqual(afterRestart, expected.finalProjection)
+  assert.deepEqual(tasksAfterRestart, expected.taskProjection)
+  await assertNoBrowserErrors(restartedJourney)
+  await restartedJourney.context.close()
+  await stopDsh(restarted.host)
+  assertNoPersistedRiskTaskWrites(databasePath, expected.projectId)
+}
+
 async function findProjectIdViaCarrier(page, projectName) {
   const start = await callAuthenticatedWorkbench(
     page,
@@ -2668,6 +3144,10 @@ async function main() {
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_DELIVERABLE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REQUEST_DELIVERABLE_ACCEPTANCE_PATH), 0)
   assert.equal(countRequestsToPath(firstJourney, WORKBENCH_DECIDE_DELIVERABLE_ACCEPTANCE_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_PROJECT_RISKS_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_CREATE_PROJECT_RISK_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_REVISE_PROJECT_RISK_PATH), 0)
+  assert.equal(countRequestsToPath(firstJourney, WORKBENCH_TRANSITION_PROJECT_RISK_PATH), 0)
   assert.equal(await firstJourney.page.locator('#workbench-status-editor').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-projects-title').count(), 0)
   assert.equal(await firstJourney.page.locator('#workbench-project-team-title').count(), 0)
@@ -2711,6 +3191,10 @@ async function main() {
     WORKBENCH_CREATE_PROJECT_MILESTONE_PATH,
     WORKBENCH_UPDATE_PROJECT_MILESTONE_DATE_PATH,
     WORKBENCH_RECONCILE_PROJECT_CALENDAR_PATH,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    WORKBENCH_CREATE_PROJECT_RISK_PATH,
+    WORKBENCH_REVISE_PROJECT_RISK_PATH,
+    WORKBENCH_TRANSITION_PROJECT_RISK_PATH,
   ]) {
     await expectCarrierDenied(firstJourney.page, firstNetwork, false, path)
   }
@@ -4209,6 +4693,22 @@ async function main() {
     },
   })
 
+  const realRiskProjectDir = join(tempRoot, 'real-risk-project')
+  mkdirSync(realRiskProjectDir, { recursive: true })
+  await runRealRiskRestartJourney({
+    projectDir: realRiskProjectDir,
+    runtimeEnv,
+    password: finalRecoveredPassword,
+    expected: {
+      projectName: `T12 real Host browser Risk Project ${new Date().toISOString()}`,
+      primaryGoalName: '通过真实 Host 管理项目风险',
+      outcomeName: '完成 Risk 全生命周期与 SQLite 重启验收',
+      metricName: 'Risk 验收周期',
+      riskOwnerName: '浏览器 Risk Owner',
+      otherOwnerName: '浏览器备用 Risk Owner',
+    },
+  })
+
   process.stdout.write(
     'PASS T11 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
@@ -4218,6 +4718,8 @@ async function main() {
       + '-> Project Milestones selection/route/mobile boundary and seven protected Remotes '
       + '-> Deliverable mock-Remote Client remount plus real Host/SQLite create/request/approve/restart '
       + 'with declared versions and Owner/Acceptor truth '
+      + '-> Risk real Host/SQLite create/filter/revise/mitigate/close/restart '
+      + 'with zero task provider/effect/receipt/Outbox/projection writes '
       + '-> redacted Activity/Outbox -> Client HMR -> logout/separate context '
       + '-> Host restart persistence -> mobile keyboard/layout -> offline recovery '
       + '-> session revocation\n',

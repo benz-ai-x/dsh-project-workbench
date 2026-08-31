@@ -170,6 +170,14 @@ function browserFixtureAdapter(credentials) {
         : production.readTask(route, taskGuid, signal)
     },
 
+    async updateTask(route, input, signal) {
+      if (!fixtureRoute(route)) return production.updateTask(route, input, signal)
+      signal.throwIfAborted()
+      throw new Error(
+        `T12 browser fixture forbids Risk-owned Feishu task writes: ${input.taskGuid}`,
+      )
+    },
+
     async listCalendars(route, signal) {
       if (!fixtureRoute(route)) return production.listCalendars(route, signal)
       signal.throwIfAborted()
