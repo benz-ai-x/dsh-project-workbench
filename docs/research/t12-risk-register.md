@@ -22,7 +22,9 @@ one external publication mandates these exact values.
 `Risks` is one deep Host module behind four explicit Scenario/Remote behaviors:
 
 1. `projectRisks` reads one authorized, filtered Project Risk page plus bounded
-   Risk Activity and the safe options needed by the form.
+   Risk Activity, the safe options needed by the form, and—when
+   `selectedRiskId` is present—a separately bounded page of that Risk's
+   complete immutable assessment/transition history.
 2. `createProjectRisk` creates the initial immutable assessment in `research`
    disposition.
 3. `reviseProjectRisk` replaces the complete assessment with a new immutable
@@ -47,16 +49,21 @@ Every assessment version is one complete immutable value containing:
   `capacity`, `ownership`, `quality`, `information`, `governance`, `external`,
   or `other`;
 - a bounded observable trigger statement and Owner-confirmed
-  `unknown | not-met | met` state; the Host derives `observedAt` when it first
-  changes to `met` and preserves that time while it remains met;
+  `unknown | not-met | met` state. The Host starts a met episode at its clock
+  for create-met, non-met→met, or a changed statement that remains met; it
+  preserves `observedAt` only for the same normalized statement staying met
+  and clears it whenever state leaves met;
 - a probability interval in integer basis points, from 0 through 10,000,
   with `lowerBasisPoints <= upperBasisPoints` and an upper bound greater than
   zero;
 - an impact interval on `project-risk-impact-v1`, with integer endpoints from
   1 through 5 and `lowerBand <= upperBand`;
 - independent evidence confidence `low | medium | high` plus bounded rationale;
-- an ISO `assessmentHorizonEnd` defining the probability time box;
-- an ISO `nextReviewOn` no later than that horizon;
+- a strict Gregorian date-only `assessmentHorizonEnd` (`YYYY-MM-DD`) defining
+  the probability time box;
+- a strict date-only `nextReviewOn` no later than that horizon; and
+- a Host-clock offset-bearing `assessedAt` instant interpreted against the
+  Project's IANA timezone for date policy;
 - zero to twenty bounded assumptions;
 - the complete responsibility and link sets described below; and
 - Host-derived assessment identity, sequence, digest, exposure, and time.
@@ -150,11 +157,13 @@ the observed Project task revision. Reads join each GUID to current
 and remote versions remain Feishu-owned.
 
 T12 never creates, patches, completes, reopens, assigns, comments on, or copies
-authority from a Feishu task. Entering `mitigate` requires at least one
-currently available mitigation task. Task completion never changes Risk
-disposition, and moving a Risk to `closed` never changes any linked task. An
-unavailable retained link stays visible and must be removed or replaced in a
-later complete assessment revision.
+authority from a Feishu task. Entering `mitigate`, and every assessment revision
+that leaves status at `mitigate`, requires at least one currently available
+mitigation task. A provider-side disappearance later only makes the retained
+link unavailable; it never infers a Risk transition. Task completion never
+changes Risk status, and moving a Risk to `closed` never changes any linked
+task. An unavailable retained link stays visible and must be removed or
+replaced in a later complete assessment revision.
 
 ## Lifecycle and history
 
@@ -177,6 +186,19 @@ requires exactly one closure reason: `no-longer-exists`, `below-threshold`,
 `materialized-as-issue` but does not create a Topic. Creation and revision use
 their own closed reasons. No transition is inferred from exposure, review date,
 trigger state, evidence, task state, or AI output.
+
+Terminal means more than “no outgoing status edge”: after closure, every new
+revision or transition intent is rejected without advancing Risk/aggregate
+revision or appending history. Receipt-first replay of the exact command that
+already committed remains valid. Changed conditions require a new linked Risk;
+T12 provides no reopen or mutation of closed history.
+
+For active create/revision, both date-only values must be on or after the Host
+clock's current calendar date in the Project timezone, and
+`nextReviewOn <= assessmentHorizonEnd`. An active-to-active transition also
+requires the retained `nextReviewOn` not to be overdue; the Owner must first
+commit a complete reassessment. Closing is allowed when review is overdue and
+retains the final dates. Date comparison never uses the browser timezone.
 
 Creation, every assessment revision, and every status transition advance both
 the Project Risk aggregate revision and the individual Risk revision. A
@@ -209,14 +231,26 @@ choices, same-Project dependency choices, and bounded eligible evidence
 choices. Inactive historical Risk Owners remain displayable/filterable but are
 not selectable for a new assessment.
 
+An optional `selectedRiskId` asks the same read for a selected detail. That
+detail uses its own `beforeHistorySequence`/`historyLimit` cursor and returns a
+closed chronological-entry union: assessment entries carry the complete
+immutable assessment and link snapshots; transition entries carry exact
+from/to status, closure reason, rationale, actor/source, and time. A missing or
+cross-Project selection is a closed not-found result, never an unscoped lookup.
+The filtered register, global Risk Activity, and selected history have
+independent cursors so one cannot truncate or reorder another.
+
 ## Authority, concurrency, privacy, and disposal
 
-Reads require `workbench.project.risk.read`; all three commands require
-`workbench.project.risk.write`. Scope is always derived from the authenticated
-Owner. Create and revise carry exact Risk aggregate, Team, and Task revisions;
-revise and transition additionally carry the exact Risk revision. Receipt
-lookup precedes CAS validation, and replay compares the complete normalized
-intent.
+Reads require both `workbench.project.risk.read` and
+`workbench.project.risk.activity.read` because the one projection contains
+private Risk history. Both authorizations complete before any repository read
+and must resolve to the identical Owner/organization/team scope. All three
+commands require `workbench.project.risk.write`. Scope is always derived from
+the authenticated Owner. Create and revise carry exact Risk aggregate, Team,
+and Task revisions; revise and transition additionally carry the exact Risk
+revision. Receipt lookup precedes CAS validation, and replay compares the
+complete normalized intent.
 
 For each command, domain row(s), aggregate head, append-only Risk Activity,
 one redacted pending Outbox intent, one hash-chained generic audit event, and
@@ -251,6 +285,9 @@ may advance their revision/status/version pointer only; immutable content,
 history, audit provenance, and link rows cannot be updated or deleted. Indexes
 support Project/sequence pagination and all five filters. Migration creates an
 empty Risk aggregate for every existing Project without changing prior facts.
+After v11, the existing T04 Project creation transaction must insert that new
+Project's revision-zero Risk head atomically with its other aggregate heads;
+reads never lazily initialize missing state.
 
 Startup validates every new table, foreign key, trigger, and index. Migration,
 restart, receipt replay, fault rollback, and immutable-trigger behavior must be
@@ -270,7 +307,8 @@ The Project Risks surface uses a compact register-first path:
 - native disclosure for Contributors/Sponsor, assumptions, evidence,
   dependencies, and mitigation/contingency task links;
 - a separate, labeled status-transition form with required rationale; and
-- native disclosure for version/status history and source/link details.
+- a selected-Risk native disclosure that pages complete assessment/status
+  history and its historical source/link snapshots.
 
 Exposure is never color-only: level, matrix bands, intervals, confidence, and
 policy version have localized text. Inputs have visible labels, fieldsets and
@@ -292,20 +330,23 @@ Container-dependent CJK glyph and visual-rhythm inspection stays in
   classification, confidence independence, policy version retention, and
   caller-supplied exposure rejection.
 - Complete structured-statement and trigger validation, category/status closed
-  vocabularies, horizon/review dates, digest stability, full-replacement revisions, all
+  vocabularies, timezone date boundaries/DST, trigger met-episode clock rules,
+  digest stability, full-replacement revisions, all
   allowed/forbidden transitions, terminal close, and mitigation prerequisite.
 - Team/Sponsor/member-in-use matrices; Risk aggregate/Risk/Team/Task CAS;
   response-loss replay; duplicate-key mismatch; cancellation and close drain.
 - Same/cross-Project evidence checks, missing dependencies, Risk self/cycle
-  rejection, task-set overlap/availability, and proof that revise/close makes
-  zero Feishu task writes and preserves authoritative completion.
+  rejection, task-set overlap/availability, and proof that revise/every
+  transition makes zero task-adapter calls, T08 effect/receipt/task-Outbox rows,
+  or projection changes.
 - Privacy-redacted audit/Activity/Outbox/receipt/log/conflict evidence plus
   separately authorized complete Risk Activity.
 - Schema v10→v11 migration/restart, empty-head backfill, filters/indexes,
   immutable triggers, transaction fault rollback, and detached projections.
-- Four generated Remote faces, real Loader/Profile lifecycle, localized
-  controller/component/Slot/HMR coverage, and a real-browser create, filter,
-  revise, transition, close, and same-database restart journey.
+- Four generated Remote faces, dual Risk-read authorization and identical-scope
+  checks, selected-history pagination/detachment, real Loader/Profile lifecycle,
+  localized controller/component/Slot/HMR coverage, and a real-browser create,
+  filter, revise, transition, close, and same-database restart journey.
 - Built Host/Client/bundle entries and real packed archives verified without
   live Feishu credentials or provider mutation.
 

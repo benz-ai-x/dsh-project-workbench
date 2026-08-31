@@ -225,11 +225,11 @@ The structured condition, uncertain event, and consequence that explain what may
 _Avoid_: Mitigation plan, consequence-only label, negated objective
 
 **Risk Assessment Version**:
-One immutable complete Risk evaluation containing statement, category, trigger, probability/impact intervals, confidence, time horizon, next review, assumptions, responsibility, links, and Host-derived exposure.
+One immutable complete Risk evaluation containing statement, category, trigger episode, probability/impact intervals, confidence, strict date-only horizon/review, assumptions, responsibility, links, Host-derived exposure, and assessed time. Selected-Risk reads page every historical version rather than rewriting it.
 _Avoid_: Mutable score row, JSON patch, latest-only history
 
 **Risk Trigger**:
-A bounded observable condition plus Owner-confirmed `unknown`, `not-met`, or `met` state; confirmation is audited but never silently changes Risk status.
+A bounded observable condition plus Owner-confirmed `unknown`, `not-met`, or `met` state. A met episode retains Host `observedAt` only while the same normalized statement stays met; a changed met statement starts a new episode. Confirmation is audited but never silently changes Risk status.
 _Avoid_: Automatic sensor, status, task completion
 
 **Risk Exposure**:
