@@ -575,6 +575,135 @@ describe('T10 Feishu calendar scenario', () => {
     await scenario.close()
   })
 
+  it('claims and settles the original prepared Calendar-create effect on same-key replay', async () => {
+    const { scenario, adapter } = await fixture()
+    const createCalendar = vi.spyOn(adapter, 'createCalendar')
+    const claim = vi.spyOn(
+      SqliteWorkbenchRepository.prototype,
+      'claimFeishuCalendarEffect',
+    ).mockResolvedValueOnce(false)
+    const request = Object.freeze({
+      projectId: PROJECT_ID,
+      kind: 'bot' as const,
+      mode: 'create' as const,
+      summary: 'Replay-safe Project calendar',
+      description: 'Prepared intent',
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-prepared-replay-0001',
+      causationId: 'feishu-calendar-bind-prepared-replay-cause-0001',
+      reason: 'owner-project-calendar-bind' as const,
+    })
+
+    await expect(scenario.bindProjectCalendar(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    expect(createCalendar).not.toHaveBeenCalled()
+    claim.mockRestore()
+
+    await expect(scenario.bindProjectCalendar(request, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        binding: { calendarId: CALENDAR_ID, createdByWorkbench: true },
+        effects: [{ operation: 'calendar-create', state: 'delivered' }],
+      },
+    })
+    expect(createCalendar).toHaveBeenCalledTimes(1)
+    await scenario.close()
+  })
+
+  it('claims and settles the original prepared event-create effect on same-key replay', async () => {
+    const { scenario, adapter } = await fixture()
+    await scenario.bindProjectCalendar({
+      projectId: PROJECT_ID,
+      kind: 'bot',
+      mode: 'existing',
+      calendarId: CALENDAR_ID,
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-prepared-event-0001',
+      causationId: 'feishu-calendar-bind-prepared-event-cause-0001',
+      reason: 'owner-project-calendar-bind',
+    }, signal)
+    const createEvent = vi.spyOn(adapter, 'createCalendarEvent')
+    const claim = vi.spyOn(
+      SqliteWorkbenchRepository.prototype,
+      'claimFeishuCalendarEffect',
+    ).mockResolvedValueOnce(false)
+    const request = Object.freeze({
+      projectId: PROJECT_ID,
+      mode: 'create-event' as const,
+      schedule: allDay('2026-09-14', '2026-09-15'),
+      expectedRevision: 1,
+      expectedMilestoneRevision: null,
+      name: 'Replay-safe checkpoint',
+      description: 'Prepared event intent',
+      idempotencyKey: 'feishu-milestone-create-prepared-replay-0001',
+      causationId: 'feishu-milestone-create-prepared-replay-cause-0001',
+      reason: 'owner-project-milestone-create' as const,
+    })
+
+    await expect(scenario.createProjectMilestone(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    expect(createEvent).not.toHaveBeenCalled()
+    claim.mockRestore()
+
+    adapter.currentEvent = event(request.schedule, `sha256:${'2'.repeat(64)}`)
+    await expect(scenario.createProjectMilestone(request, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 2,
+        effects: [{ operation: 'event-create', state: 'delivered' }],
+        milestones: [{ name: 'Replay-safe checkpoint', schedule: request.schedule }],
+      },
+    })
+    expect(createEvent).toHaveBeenCalledTimes(1)
+    await scenario.close()
+  })
+
+  it('claims and settles the original prepared date effect on same-key replay', async () => {
+    const { scenario, adapter } = await fixture()
+    await bindExistingCalendarAndMilestone(scenario)
+    const intended = allDay('2026-09-16', '2026-09-17')
+    const updateEvent = vi.spyOn(adapter, 'updateCalendarEventSchedule')
+      .mockImplementation(async (_route, input) => {
+        adapter.updateCalls += 1
+        adapter.currentEvent = event(input.schedule, `sha256:${'2'.repeat(64)}`)
+        return Object.freeze({ state: 'ok', value: adapter.currentEvent })
+      })
+    const claim = vi.spyOn(
+      SqliteWorkbenchRepository.prototype,
+      'claimFeishuCalendarEffect',
+    ).mockResolvedValueOnce(false)
+    const request = dateUpdateRequest(
+      'feishu-milestone-date-prepared-replay-0001',
+      intended,
+    )
+
+    await expect(scenario.updateProjectMilestoneDate(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    expect(updateEvent).not.toHaveBeenCalled()
+    claim.mockRestore()
+
+    await expect(scenario.updateProjectMilestoneDate(request, signal)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 3,
+        effects: [{ operation: 'event-date-update', state: 'delivered' }],
+        milestones: [{ schedule: intended }],
+      },
+    })
+    expect(updateEvent).toHaveBeenCalledTimes(1)
+    await scenario.close()
+  })
+
   it('lets a live inflight winner settle after a same-key replay observes an unknown outcome', async () => {
     const { scenario, adapter } = await fixture()
     await bindExistingCalendarAndMilestone(scenario)

@@ -1571,8 +1571,9 @@ export class WorkbenchScenario {
         command,
       }), operationSignal)
       if (reservation.state !== 'deliver') return reservation.result
+      const reservedEffectId = reservation.effectId
       if (!await this.options.repository.claimFeishuCalendarEffect(
-        effectId,
+        reservedEffectId,
         commandInstant(this.options.clock),
         operationSignal,
       )) {
@@ -1605,23 +1606,23 @@ export class WorkbenchScenario {
         if (outcome.state === 'ok') {
           validateCalendarSnapshot(outcome.value)
           if (!calendarSelectable(outcome.value)) {
-            return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+            return this.options.repository.settleFeishuCalendarBinding(reservedEffectId, Object.freeze({
               state: 'failed',
               issue: invalidCalendarIssue(),
               settledAt,
             }), settleSignal)
           }
-          return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+          return this.options.repository.settleFeishuCalendarBinding(reservedEffectId, Object.freeze({
             state: 'delivered', calendar: outcome.value, settledAt,
           }), settleSignal)
         }
-        return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+        return this.options.repository.settleFeishuCalendarBinding(reservedEffectId, Object.freeze({
           state: outcome.state === 'unknown' ? 'unknown' : 'failed',
           issue: outcome.issue,
           settledAt,
         }), settleSignal)
       } catch {
-        return this.options.repository.settleFeishuCalendarBinding(effectId, Object.freeze({
+        return this.options.repository.settleFeishuCalendarBinding(reservedEffectId, Object.freeze({
           state: 'unknown',
           issue: ambiguousCalendarTransportIssue(),
           settledAt: commandInstant(this.options.clock),
@@ -1824,8 +1825,9 @@ export class WorkbenchScenario {
         operationSignal,
       )
       if (reservation.state !== 'deliver') return reservation.result
+      const reservedEffectId = reservation.effectId
       if (!await this.options.repository.claimFeishuCalendarEffect(
-        effectId,
+        reservedEffectId,
         commandInstant(this.options.clock),
         operationSignal,
       )) {
@@ -1867,19 +1869,19 @@ export class WorkbenchScenario {
           validateCalendarEventSnapshot(outcome.value)
           if (!eventSelectable(outcome.value, reservation.calendarId)) {
             return this.options.repository.settleFeishuCalendarEventCreation(
-              effectId,
+              reservedEffectId,
               Object.freeze({ state: 'failed', issue: invalidCalendarIssue(), settledAt }),
               settleSignal,
             )
           }
           return this.options.repository.settleFeishuCalendarEventCreation(
-            effectId,
+            reservedEffectId,
             Object.freeze({ state: 'delivered', event: outcome.value, settledAt }),
             settleSignal,
           )
         }
         return this.options.repository.settleFeishuCalendarEventCreation(
-          effectId,
+          reservedEffectId,
           Object.freeze({
             state: outcome.state === 'unknown' ? 'unknown' : 'failed',
             issue: outcome.issue,
@@ -1889,7 +1891,7 @@ export class WorkbenchScenario {
         )
       } catch {
         return this.options.repository.settleFeishuCalendarEventCreation(
-          effectId,
+          reservedEffectId,
           Object.freeze({
             state: 'unknown',
             issue: ambiguousCalendarTransportIssue(),
@@ -1970,8 +1972,9 @@ export class WorkbenchScenario {
         operationSignal,
       )
       if (reservation.state !== 'deliver') return reservation.result
+      const reservedEffectId = reservation.effectId
       if (!await this.options.repository.claimFeishuCalendarEffect(
-        effectId,
+        reservedEffectId,
         commandInstant(this.options.clock),
         operationSignal,
       )) {
@@ -2011,7 +2014,7 @@ export class WorkbenchScenario {
         if (outcome.state === 'ok') {
           validateCalendarEventSnapshot(outcome.value)
           return this.options.repository.settleFeishuCalendarDateUpdate(
-            effectId,
+            reservedEffectId,
             Object.freeze({
               state: 'delivered',
               event: outcome.value,
@@ -2024,7 +2027,7 @@ export class WorkbenchScenario {
         if (outcome.state === 'conflict') {
           validateCalendarEventSnapshot(outcome.current)
           return this.options.repository.settleFeishuCalendarDateUpdate(
-            effectId,
+            reservedEffectId,
             Object.freeze({
               state: 'conflict',
               event: outcome.current,
@@ -2035,7 +2038,7 @@ export class WorkbenchScenario {
           )
         }
         return this.options.repository.settleFeishuCalendarDateUpdate(
-          effectId,
+          reservedEffectId,
           Object.freeze({
             state: outcome.state === 'unknown' ? 'unknown' : 'failed',
             issue: outcome.issue,
@@ -2045,7 +2048,7 @@ export class WorkbenchScenario {
         )
       } catch {
         return this.options.repository.settleFeishuCalendarDateUpdate(
-          effectId,
+          reservedEffectId,
           Object.freeze({
             state: 'unknown',
             issue: ambiguousCalendarTransportIssue(),
