@@ -877,6 +877,49 @@ describe('DshFeishuConnectionAdapter calendar federation', () => {
     })
   })
 
+  it('treats a cancelled event returned by PATCH as an unknown write outcome', async () => {
+    const store = credentials()
+    store.values.set('FEISHU_CALENDAR_BOT_SECRET', { value: BOT_SECRET, source: 'file' })
+    const request = botFetch([
+      {
+        method: 'GET', path: `${BOT_EVENT_PATH}/event-timed_0`,
+        query: { user_id_type: 'open_id' },
+        response: { code: 0, data: { event: botEvent('event-timed_0', {
+          start_time: { timestamp: '1788228000', timezone: 'Asia/Shanghai' },
+          end_time: { timestamp: '1788233400', timezone: 'Asia/Shanghai' },
+        }) } },
+      },
+      {
+        method: 'PATCH', path: `${BOT_EVENT_PATH}/event-timed_0`,
+        query: { user_id_type: 'open_id' },
+        body: {
+          start_time: { date: '2026-09-05', timezone: 'UTC' },
+          end_time: { date: '2026-09-06', timezone: 'UTC' },
+        },
+        response: { code: 0, data: { event: botEvent('event-timed_0', {
+          start_time: { date: '2026-09-05', timezone: 'UTC' },
+          end_time: { date: '2026-09-06', timezone: 'UTC' },
+          status: 'cancelled',
+        }) } },
+      },
+    ])
+    const adapter = new DshFeishuConnectionAdapter(store.provider, {
+      fetch: request.fetch,
+      now: () => FIXED_NOW,
+    })
+
+    await expect(adapter.updateCalendarEventSchedule(botRoute(), {
+      calendarId: BOT_CALENDAR_ID,
+      eventId: 'event-timed_0',
+      expectedRemoteObservationVersion: 'sha256:cc32673b1d0671974204bef1c34608d5619f054f8f111816fdcd263f36094b1f',
+      schedule: { kind: 'all-day', startDate: '2026-09-05', endDate: '2026-09-06' },
+    }, new AbortController().signal)).resolves.toMatchObject({
+      state: 'unknown',
+      issue: { code: 'provider-response-invalid', recovery: 'inspect-provider' },
+    })
+    expect(request.resourceRequests).toBe(2)
+  })
+
   it('maps Calendar v4 not-found and access failures to closed safe issues', async () => {
     const store = credentials()
     store.values.set('FEISHU_CALENDAR_USER_TOKEN', { value: USER_TOKEN, source: 'env' })

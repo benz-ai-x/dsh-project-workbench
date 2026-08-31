@@ -518,6 +518,7 @@ export class DshFeishuConnectionAdapter implements FeishuConnectionAdapter {
         && updated.organizerCalendarId === normalized.calendarId
         && !updated.recurring
         && !updated.exception
+        && updated.status === 'confirmed'
         ? writeOk(updated)
         : writeUnknown(invalidProviderIssue())
     } catch {
