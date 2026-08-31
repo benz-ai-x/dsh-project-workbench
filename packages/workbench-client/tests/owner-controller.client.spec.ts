@@ -119,6 +119,7 @@ function unboundProjectTasks(projectId: string): ProjectTasksProjection {
       issue: null,
     },
     effects: [],
+    workflow: null,
   }
 }
 
@@ -431,6 +432,23 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       ok: false as const,
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
+    discoverFeishuTaskWorkflowFields: overrides.discoverFeishuTaskWorkflowFields
+      ?? vi.fn(request => Promise.resolve(remoteOk({
+        projectId: request.projectId, taskListGuid: 'list-unused',
+        taskRevision: request.expectedTaskRevision, items: [],
+      }))),
+    previewFeishuTaskWorkflow: overrides.previewFeishuTaskWorkflow
+      ?? vi.fn(request => Promise.resolve(remoteOk({
+        projectId: request.projectId, taskRevision: request.expectedTaskRevision,
+        workflowRevision: request.expectedWorkflowRevision, definition: request.definition,
+        mapping: request.mapping, compatibility: { state: 'compatible' as const, issues: [] },
+        usedStateIds: [],
+      }))),
+    configureFeishuTaskWorkflow: overrides.configureFeishuTaskWorkflow
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
   }
 }
 

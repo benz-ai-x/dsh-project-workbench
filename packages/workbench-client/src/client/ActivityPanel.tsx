@@ -34,6 +34,7 @@ export interface ActivityPanelCopy {
   readonly objectFeishuConnection: string
   readonly objectFeishuTaskListBinding: string
   readonly objectFeishuTask: string
+  readonly objectFeishuTaskWorkflow: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -54,6 +55,7 @@ export interface ActivityPanelCopy {
   readonly actionFeishuTaskListBound: string
   readonly actionFeishuTaskReferenced: string
   readonly actionFeishuTaskUpdateRequested: string
+  readonly actionFeishuTaskWorkflowConfigured: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -92,6 +94,7 @@ export interface ActivityPanelCopy {
   readonly summaryFeishuTaskListBound: string
   readonly summaryFeishuTaskReferenced: string
   readonly summaryFeishuTaskUpdateRequested: string
+  readonly summaryFeishuTaskWorkflowConfigured: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -115,6 +118,7 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerFeishuTaskListBind: string
   readonly reasonOwnerFeishuTaskReference: string
   readonly reasonOwnerFeishuTaskUpdate: string
+  readonly reasonOwnerFeishuTaskWorkflowConfigure: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -144,6 +148,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectFeishuConnection: 'Feishu connection',
   objectFeishuTaskListBinding: 'Feishu task-list binding',
   objectFeishuTask: 'Feishu task',
+  objectFeishuTaskWorkflow: 'Feishu task workflow',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -164,6 +169,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionFeishuTaskListBound: 'Feishu task list bound',
   actionFeishuTaskReferenced: 'Feishu task referenced',
   actionFeishuTaskUpdateRequested: 'Feishu task update requested',
+  actionFeishuTaskWorkflowConfigured: 'Feishu task workflow configured',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -202,6 +208,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summaryFeishuTaskListBound: 'Feishu task list bound to Project',
   summaryFeishuTaskReferenced: 'Outside-list Feishu task referenced',
   summaryFeishuTaskUpdateRequested: 'Feishu task update requested',
+  summaryFeishuTaskWorkflowConfigured: 'Feishu task workflow configured',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -225,6 +232,7 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerFeishuTaskListBind: 'Owner Feishu task-list binding',
   reasonOwnerFeishuTaskReference: 'Owner Feishu task reference',
   reasonOwnerFeishuTaskUpdate: 'Owner Feishu task update',
+  reasonOwnerFeishuTaskWorkflowConfigure: 'Owner Feishu task workflow configuration',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -252,6 +260,7 @@ function isActivityObjectType(
     || value === 'feishu-connection'
     || value === 'feishu-task-list-binding'
     || value === 'feishu-task'
+    || value === 'feishu-task-workflow'
 }
 
 function isActivityAction(
@@ -274,6 +283,7 @@ function isActivityAction(
     || value === 'workbench.feishu-task-list.bound'
     || value === 'workbench.feishu-task.referenced'
     || value === 'workbench.feishu-task.update-requested'
+    || value === 'workbench.feishu-task-workflow.configured'
 }
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
@@ -418,6 +428,7 @@ export function ActivityPanel({
                 <option value="feishu-connection">{copy.objectFeishuConnection}</option>
                 <option value="feishu-task-list-binding">{copy.objectFeishuTaskListBinding}</option>
                 <option value="feishu-task">{copy.objectFeishuTask}</option>
+                <option value="feishu-task-workflow">{copy.objectFeishuTaskWorkflow}</option>
               </select>
             </label>
             <label className={css.field}>
@@ -482,6 +493,9 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.feishu-task.update-requested">
                   {copy.actionFeishuTaskUpdateRequested}
+                </option>
+                <option value="workbench.feishu-task-workflow.configured">
+                  {copy.actionFeishuTaskWorkflowConfigured}
                 </option>
               </select>
             </label>
@@ -667,6 +681,7 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'feishu-task-list-bound': return copy.summaryFeishuTaskListBound
     case 'feishu-task-referenced': return copy.summaryFeishuTaskReferenced
     case 'feishu-task-update-requested': return copy.summaryFeishuTaskUpdateRequested
+    case 'feishu-task-workflow-configured': return copy.summaryFeishuTaskWorkflowConfigured
   }
 }
 
@@ -689,6 +704,7 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-feishu-task-list-bind': return copy.reasonOwnerFeishuTaskListBind
     case 'owner-feishu-task-reference': return copy.reasonOwnerFeishuTaskReference
     case 'owner-feishu-task-update': return copy.reasonOwnerFeishuTaskUpdate
+    case 'owner-feishu-task-workflow-configure': return copy.reasonOwnerFeishuTaskWorkflowConfigure
   }
 }
 

@@ -72,6 +72,13 @@ export {
   MAX_FEISHU_TASK_LIST_NAME_LENGTH,
   MAX_FEISHU_TASK_RESOURCE_ID_LENGTH,
   MAX_FEISHU_TASK_TEXT_LENGTH,
+  MAX_FEISHU_WORKFLOW_COLOR_INDEX,
+  MAX_FEISHU_WORKFLOW_FIELD_NAME_LENGTH,
+  MAX_FEISHU_WORKFLOW_STATE_NAME_LENGTH,
+  MAX_PROJECT_TASK_WORKFLOW_STATE_ID_LENGTH,
+  MAX_PROJECT_TASK_WORKFLOW_STATES,
+  MIN_FEISHU_WORKFLOW_COLOR_INDEX,
+  allowedProjectTaskWorkflowTransitions,
   WorkbenchProjectTasksController,
 } from './task-controller.ts'
 export type {
@@ -85,6 +92,7 @@ export type {
   WorkbenchProjectTasksPhase,
   WorkbenchProjectTasksRemote,
   WorkbenchProjectTasksSelection,
+  WorkbenchProjectTaskWorkflowTransition,
   WorkbenchProjectTasksTransportCode,
   WorkbenchProjectTasksTransportIssue,
 } from './task-controller.ts'
@@ -174,6 +182,8 @@ export type {
 } from './FeishuConnectionPanel.tsx'
 export { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
 export type { ProjectTasksPanelProps } from './ProjectTasksPanel.tsx'
+export { ProjectTaskWorkflowPanel } from './ProjectTaskWorkflowPanel.tsx'
+export type { ProjectTaskWorkflowPanelProps } from './ProjectTaskWorkflowPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'
 export type { WorkbenchStatusPageProps } from './WorkbenchStatusPage.tsx'
 export { mountWorkbenchClient, registerWorkbenchUi, uiInject, WORKBENCH_SLOT_PRIORITY } from './mount.ts'

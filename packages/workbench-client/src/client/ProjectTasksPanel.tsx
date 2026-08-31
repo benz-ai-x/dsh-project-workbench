@@ -13,6 +13,7 @@ import type {
   FeishuIdentityKind,
   FeishuIdentityRouteProjection,
   ProjectTaskProjection,
+  ProjectTaskWorkflowProjection,
 } from '@benz-ai-x/dsh-project-workbench/client'
 import type { WorkbenchFeishuConnectionController } from './feishu-connection-controller.ts'
 import type { WorkbenchKey } from './locales.ts'
@@ -25,6 +26,7 @@ import {
   type WorkbenchProjectTasksIssue,
 } from './task-controller.ts'
 import css from './ProjectTasksPanel.module.css'
+import { ProjectTaskWorkflowPanel } from './ProjectTaskWorkflowPanel.tsx'
 
 export interface ProjectTasksPanelProps {
   readonly controller: WorkbenchProjectTasksController
@@ -260,6 +262,8 @@ export function ProjectTasksPanel({
                 </div>
               </section>
 
+              <ProjectTaskWorkflowPanel controller={controller} state={state} t={t} />
+
               <form className={css.referenceForm} onSubmit={reference}>
                 <label className={css.field}>
                   <span>{t('tasks.reference.label')}</span>
@@ -308,6 +312,7 @@ export function ProjectTasksPanel({
                     nodes={roots}
                     controller={controller}
                     pendingTaskGuid={state.pendingTaskGuid}
+                    workflow={state.projection.workflow}
                     t={t}
                   />
                 )}
@@ -329,11 +334,13 @@ function TaskTree({
   nodes,
   controller,
   pendingTaskGuid,
+  workflow,
   t,
 }: {
   readonly nodes: readonly TaskNode[]
   readonly controller: WorkbenchProjectTasksController
   readonly pendingTaskGuid: string | null
+  readonly workflow: ProjectTaskWorkflowProjection | null
   readonly t: (key: WorkbenchKey) => string
 }) {
   return (
@@ -344,10 +351,17 @@ function TaskTree({
             task={node.task}
             controller={controller}
             pending={pendingTaskGuid === node.task.taskGuid}
+            workflow={workflow}
             t={t}
           />
           {node.children.length > 0 && (
-            <TaskTree nodes={node.children} controller={controller} pendingTaskGuid={pendingTaskGuid} t={t} />
+            <TaskTree
+              nodes={node.children}
+              controller={controller}
+              pendingTaskGuid={pendingTaskGuid}
+              workflow={workflow}
+              t={t}
+            />
           )}
         </li>
       ))}
@@ -359,15 +373,22 @@ function TaskCard({
   task,
   controller,
   pending,
+  workflow,
   t,
 }: {
   readonly task: ProjectTaskProjection
   readonly controller: WorkbenchProjectTasksController
   readonly pending: boolean
+  readonly workflow: ProjectTaskWorkflowProjection | null
   readonly t: (key: WorkbenchKey) => string
 }) {
   const [summary, setSummary] = useState(task.summary)
   const [description, setDescription] = useState(task.description)
+  const workflowValue = workflow?.values.find(candidate => candidate.taskGuid === task.taskGuid) ?? null
+  const suggestion = workflow?.completionSuggestions.find(
+    candidate => candidate.taskGuid === task.taskGuid,
+  ) ?? null
+  const transitions = controller.allowedWorkflowTransitions(task.taskGuid)
   useEffect(() => {
     setSummary(task.summary)
     setDescription(task.description)
@@ -395,15 +416,68 @@ function TaskCard({
         <div><dt>{t('tasks.followers')}</dt><dd>{memberNames(task.followers, t)}</dd></div>
         <div><dt>{t('tasks.remoteVersion')}</dt><dd><code>{task.remoteVersion}</code></dd></div>
       </dl>
+      {workflow !== null && (
+        <div className={css.workflowTaskState}>
+          <div>
+            <span>{t('tasks.workflow.taskState')}</span>
+            <strong>{workflowValue?.stateName
+              ?? workflowValue?.stateId
+              ?? t('tasks.workflow.taskStateUnset')}</strong>
+          </div>
+          {workflowValue?.recognized === false ? (
+            <p className={css.warning} role="alert">{t('tasks.workflow.taskStateUnrecognized')}</p>
+          ) : (
+            <label className={css.field}>
+              <span>{t('tasks.workflow.nextState')}</span>
+              <select
+                aria-label={`${t('tasks.workflow.nextState')} · ${task.summary}`}
+                value=""
+                disabled={pending || transitions.length === 0}
+                onChange={event => {
+                  if (event.currentTarget.value !== '') {
+                    void controller.update(task, { workflowStateId: event.currentTarget.value })
+                  }
+                }}
+              >
+                <option value="">{transitions.length === 0
+                  ? t('tasks.workflow.noTransition')
+                  : t('tasks.workflow.chooseTransition')}</option>
+                {transitions.map(transition => (
+                  <option key={transition.stateId} value={transition.stateId}>
+                    {transition.name}{transition.terminal ? ` · ${t('tasks.workflow.terminal')}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+      {suggestion !== null && !task.completed && (
+        <aside className={css.completionSuggestion} aria-label={t('tasks.workflow.completionSuggested')}>
+          <div>
+            <strong>{t('tasks.workflow.completionSuggested')}</strong>
+            <p>{t('tasks.workflow.completionSuggestedHint')}</p>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            type="button"
+            disabled={pending}
+            onClick={() => { void controller.update(task, { completed: true }) }}
+          >{t('tasks.workflow.confirmCompletion')}</Button>
+        </aside>
+      )}
       <div className={css.actions}>
         <CanonicalLink url={task.canonicalUrl} label={t('tasks.openInFeishu')} />
-        <Button
-          variant="outline"
-          size="sm"
-          type="button"
-          disabled={pending}
-          onClick={() => { void controller.update(task, { completed: !task.completed }) }}
-        >{task.completed ? t('tasks.markOpen') : t('tasks.markComplete')}</Button>
+        {(suggestion === null || task.completed) && (
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            disabled={pending}
+            onClick={() => { void controller.update(task, { completed: !task.completed }) }}
+          >{task.completed ? t('tasks.markOpen') : t('tasks.markComplete')}</Button>
+        )}
       </div>
       <details className={css.editor}>
         <summary>{t('tasks.edit')}</summary>
@@ -493,6 +567,11 @@ function issueMessageKey(issue: WorkbenchProjectTasksIssue): WorkbenchKey {
   if (issue.code === 'remote-outcome-unknown') return 'tasks.error.unknown'
   if (issue.code === 'remote-version-conflict') return 'tasks.error.remoteVersion'
   if (issue.code === 'task-projection-revision-conflict') return 'tasks.error.projectionRevision'
+  if (issue.code === 'workflow-revision-conflict') return 'tasks.error.workflowRevision'
+  if (issue.code === 'workflow-transition-forbidden') return 'tasks.error.workflowTransition'
+  if (issue.code === 'workflow-unconfigured' || issue.code === 'workflow-state-unmapped'
+    || issue.code === 'workflow-value-unrecognized') return 'tasks.error.workflowMapping'
+  if (issue.code === 'workflow-compatibility-blocked') return 'tasks.error.workflowCompatibility'
   if (issue.code === 'route-unverified' || issue.code === 'route-unconfigured'
     || issue.code === 'route-disabled') return 'tasks.error.route'
   return 'tasks.error.domain'

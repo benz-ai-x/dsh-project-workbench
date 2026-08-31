@@ -1054,6 +1054,7 @@ function evidenceSummaryKey(
     'feishu-task-list-bound': 'activity.summary.feishuTaskListBound',
     'feishu-task-referenced': 'activity.summary.feishuTaskReferenced',
     'feishu-task-update-requested': 'activity.summary.feishuTaskUpdateRequested',
+    'feishu-task-workflow-configured': 'activity.summary.feishuTaskWorkflowConfigured',
   } satisfies Record<SuggestedChangeEvidenceProjection['summaryCode'], WorkbenchKey>
   return keys[summary]
 }
