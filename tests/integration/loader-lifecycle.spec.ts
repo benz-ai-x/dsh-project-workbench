@@ -13,6 +13,7 @@ import type {
   DecideSuggestedChangeResult,
   ProjectDetailProjection,
   ProjectMilestonesProjection,
+  ProjectRisksProjection,
   ProjectStartProjection,
   ProjectTeamProjection,
   ProposeProjectResponsibilityChangeResult,
@@ -963,6 +964,25 @@ describe('built Workbench Host through the real DSH Loader', () => {
       'The evidence supports removing the completed contributor assignment.',
     )
     expect(serializedAcceptedActivity).not.toContain(responsibility.receipt.auditEventId)
+    const emptyRisks = await first.workbenchAuth.run(() => callRiskRemote(firstService, 'projectRisks', {
+      projectId: createdProject.project.projectId,
+      riskLimit: 10,
+      activityLimit: 10,
+    })) as ProjectRisksProjection
+    expect(emptyRisks).toMatchObject({
+      projectId: createdProject.project.projectId,
+      revision: 0,
+      teamRevision: acceptedTeam.teamRevision,
+      taskRevision: 0,
+      risks: [],
+      nextBeforeRiskSequence: null,
+      selectedRisk: null,
+      activity: [],
+      nextBeforeActivitySequence: null,
+      evidenceOptions: [],
+      dependencyOptions: [],
+      taskOptions: [],
+    })
 
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
@@ -999,6 +1019,15 @@ describe('built Workbench Host through the real DSH Loader', () => {
       { projectId: createdProject.project.projectId },
       new AbortController().signal,
     ))).resolves.toEqual(unboundMilestones)
+    await expect(restarted.workbenchAuth.run(() => callRiskRemote(
+      restarted.workbench,
+      'projectRisks',
+      {
+        projectId: createdProject.project.projectId,
+        riskLimit: 10,
+        activityLimit: 10,
+      },
+    ))).resolves.toEqual(emptyRisks)
     await expect(restarted.workbenchAuth.run(() => restarted.workbench.reviewCenter({
       projectId: createdProject.project.projectId,
       status: 'accepted',
