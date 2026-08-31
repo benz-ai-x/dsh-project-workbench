@@ -7,12 +7,11 @@ Last updated: 2026-09-01 01:50 CST (Asia/Shanghai)
 - Repository: `/root/workspace/dsh-project-workbench`
 - Branch: `main`
 - Code checkpoint before this handoff update: `d17f024aab2ffea5ee9e8803d2b49c9e21d0b9ea`
-- `origin/main`: `2f6561c09e0eb604dfbd5d39b2fda37bc2cad540`
-- The local branch is 19 commits ahead before the handoff commit.
+- T10 implementation and acceptance evidence through `797306a` are published on `origin/main`.
 - Pinned Harness checkout: `/root/workspace/deepseek-harness-baseline` at clean detached commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`.
-- Active delivery ticket: [#11 — T10: Bind a Project calendar and manage Milestones](https://github.com/benz-ai-x/dsh-project-workbench/issues/11).
+- Completed delivery ticket: [#11 — T10: Bind a Project calendar and manage Milestones](https://github.com/benz-ai-x/dsh-project-workbench/issues/11).
 
-T10's local implementation and all eight local acceptance checklist items are complete. Issue #11 has not been commented on or closed because this environment has no GitHub CLI, token, or connector authorization. Under the repository Definition of Done, that external administrative step remains open and must not be represented as completed.
+T10's implementation and all eight acceptance checklist items are complete. The default-branch acceptance-evidence commit closes #11; its commit body carries the verification summary because this environment has no GitHub API credential for a separate issue comment.
 
 The next ticket cannot be implemented safely yet: this checkout contains only the broad T11+ placeholder, not the active GitHub ticket or parent spec required by `AGENTS.md`.
 
@@ -90,7 +89,7 @@ This is a visual-font follow-up, not a claim that UI testing as a whole was unav
 ## Environment limitations
 
 - The `dsh-plugin-dev` skill required by `AGENTS.md` is not installed in this environment. Do not substitute a similarly named skill; keep using the checked-in contract/spec and record the limitation until the exact skill is available.
-- GitHub issue mutation is unavailable here. With authorized GitHub access, post the verification evidence above to #11 and close it if the ticket state still matches this checkout.
+- GitHub API issue comments remain unavailable without a token. Default-branch closing commits can still close completed issues through the authenticated Git remote.
 - No local active-ticket specification exists for T11/#12. Fetch and read the ticket and parent spec before implementation.
 
 ## Next-session entry
@@ -98,6 +97,5 @@ This is a visual-font follow-up, not a claim that UI testing as a whole was unav
 1. Read `docs/agent/PROJECT_CONTRACT.md`, `TODO.md`, `dsh-reference.lock.json`, this handoff, the active ticket, and its parent spec completely.
 2. Confirm the main worktree and pinned Harness checkout are clean and at the recorded commits.
 3. Run `node scripts/verify-dsh-context.mjs --require-source`; after dependency installation, run `pnpm context:check:strict`. Stop on any baseline mismatch.
-4. With GitHub authorization, update/close #11 using the recorded evidence.
-5. Obtain the next ticket and parent spec before changing code. Do not infer T11 scope from the broad placeholder.
-6. Keep `UI-MANUAL-01` open until all development is complete, then perform the requested manual CJK-font visual pass.
+4. Obtain the next ticket and parent spec before changing code. Do not infer T11 scope from the broad placeholder.
+5. Keep `UI-MANUAL-01` open until all development is complete, then perform the requested manual CJK-font visual pass.
