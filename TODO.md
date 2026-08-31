@@ -88,6 +88,7 @@
 - [ ] Preview create/existing/migrate compatibility and block missing, hidden, duplicate, unmapped, or in-use destructive changes before provider mutation.
 - [ ] Converge both Workbench-originated and Feishu-originated state changes to Feishu-authoritative custom-field values under Project, task, remote-version, and workflow CAS.
 - [ ] Derive a terminal-state completion suggestion without automatically completing the Feishu task.
+- [x] Build the localized accessible Client workflow editor, allowed-transition selector, explicit completion confirmation, exact retry, stale/conflict handling, and Project/logout/HMR draft cleanup.
 - [ ] Reserve/claim/settle custom-field writes durably so response loss becomes audited unknown and the same command is never blindly redelivered.
 - [ ] Prove Schema v7→v8 restart, exact Task v2 field/value requests, stable create/map/migrate GUIDs, compatibility conflicts, transition matrices, reconciliation, replay/unknown recovery, Client lifecycle, generated Remote, and packed artifacts.
 
