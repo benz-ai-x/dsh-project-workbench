@@ -693,6 +693,8 @@ export interface SuggestedChangeProjection {
 }
 
 export interface ReviewCenterFilter {
+  /** Omitted keeps the backward-compatible T06 SuggestedChange page. */
+  readonly reviewKind?: 'suggested-change'
   readonly projectId: string
   readonly status?: SuggestedChangeEffectiveStatus
   readonly riskLevel?: SuggestedChangeRiskLevel
@@ -714,6 +716,8 @@ export interface SuggestedChangeProposalBuilderProjection {
 }
 
 export interface ReviewCenterProjection {
+  /** Omitted only by pre-T11 stored/generated clients; new Host reads set it. */
+  readonly reviewKind?: 'suggested-change'
   readonly projectId: string
   readonly proposalBuilder: SuggestedChangeProposalBuilderProjection
   readonly items: readonly SuggestedChangeProjection[]
@@ -2080,6 +2084,445 @@ export interface FeishuCalendarEventResult {
   readonly revision: number | null
 }
 
+/** Workbench-owned Deliverable state; closed requests never reopen accepted work. */
+export type ProjectDeliverableState = 'planned' | 'in-review' | 'accepted'
+
+/** One stable, ordered statement evaluated by every formal acceptance decision. */
+export interface DeliverableAcceptanceCriterionProjection {
+  readonly criterionId: string
+  readonly statement: string
+}
+
+/** Browser input for one criterion; identity is always derived by the Host. */
+export interface DeliverableAcceptanceCriterionDraft {
+  readonly statement: string
+  readonly criterionId?: never
+}
+
+/** Immutable responsibility identity retained in every Deliverable snapshot. */
+export interface DeliverableMemberSnapshot {
+  readonly memberId: string
+  readonly displayName: string
+  readonly kind: 'human' | 'agent'
+}
+
+/** Complete immutable responsibility tuple for one Deliverable Plan. */
+export interface DeliverableResponsibilitySnapshot {
+  readonly accountable: DeliverableMemberSnapshot
+  readonly contributors: readonly DeliverableMemberSnapshot[]
+  readonly humanSponsor: DeliverableMemberSnapshot | null
+  readonly acceptor: DeliverableMemberSnapshot
+}
+
+/** Exact source version declared by the Owner; T11 performs no File-source read. */
+export interface DeliverableArtifactVersionRef {
+  readonly kind: 'declared-file-version'
+  readonly source: 'managed' | 'local' | 'feishu'
+  readonly resourceId: string
+  readonly versionId: string
+  readonly displayName: string
+  readonly canonicalUrl: string | null
+  readonly contentDigest: WorkbenchDigest | null
+}
+
+/** Host-normalized immutable candidate with honestly bounded provenance. */
+export interface DeliverableArtifactVersionProjection extends DeliverableArtifactVersionRef {
+  readonly referenceDigest: WorkbenchDigest
+  readonly resolution: 'declared'
+}
+
+/** Immutable semantic plan captured at Deliverable creation. */
+export interface DeliverablePlanProjection {
+  readonly planSnapshotId: string
+  readonly name: string
+  readonly description: string | null
+  readonly criteria: readonly DeliverableAcceptanceCriterionProjection[]
+  readonly responsibility: DeliverableResponsibilitySnapshot
+  readonly taskGuids: readonly string[]
+  readonly digest: WorkbenchDigest
+  readonly createdAt: string
+}
+
+/** Current Feishu-authoritative event fact joined to a Deliverable. */
+export interface DeliverableCalendarProjection {
+  readonly eventId: string
+  readonly eventAppLink: string
+  readonly schedule: ProjectCalendarSchedule
+  readonly remoteStatus: 'confirmed' | 'cancelled' | 'unknown'
+  readonly remoteObservationVersion: string
+  readonly syncState: 'healthy' | 'attention' | 'unknown'
+  readonly lastObservedAt: string
+}
+
+/** Current task truth is joined by GUID and never copied into the immutable plan. */
+export interface DeliverableTaskLinkProjection {
+  readonly taskGuid: string
+  readonly availability: 'available' | 'unavailable'
+  readonly task: ProjectTaskProjection | null
+}
+
+export type DeliverableAcceptancePersistedState =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'needs_changes'
+export type DeliverableAcceptanceEffectiveStatus =
+  | DeliverableAcceptancePersistedState
+  | 'stale'
+export type DeliverableCriterionOutcome = 'met' | 'not-met'
+
+/** One exact per-criterion judgment; the Host requires a complete criterion set. */
+export interface DeliverableCriterionDecisionProjection {
+  readonly criterionId: string
+  readonly outcome: DeliverableCriterionOutcome
+}
+
+/** Browser input cannot add criterion text or an unrecognized criterion identity. */
+export interface DeliverableCriterionDecisionDraft {
+  readonly criterionId: string
+  readonly outcome: DeliverableCriterionOutcome
+}
+
+/** One append-only Owner decision; designated Acceptor remains a separate snapshot. */
+export interface DeliverableAcceptanceDecisionProjection {
+  readonly decisionId: string
+  readonly requestRevision: number
+  readonly outcome: Exclude<DeliverableAcceptancePersistedState, 'pending'>
+  readonly actor: WorkbenchActivityActor
+  readonly designatedAcceptor: DeliverableMemberSnapshot
+  readonly criteria: readonly DeliverableCriterionDecisionProjection[]
+  readonly feedback: string
+  readonly causationId: string
+  readonly receipt: WorkbenchCommandReceipt
+  readonly decidedAt: string
+}
+
+/** One immutable accepted output copied exactly from its Acceptance Request. */
+export interface DeliverableFinalReleaseProjection {
+  readonly finalReleaseId: string
+  readonly acceptanceRequestId: string
+  readonly versions: readonly DeliverableArtifactVersionProjection[]
+  readonly versionsDigest: WorkbenchDigest
+  readonly createdAt: string
+}
+
+export type DeliverableAcceptanceAllowedDecision =
+  | 'approve'
+  | 'reject'
+  | 'request-changes'
+
+/** One frozen acceptance round. Stale is derived from current Deliverable truth. */
+export interface DeliverableAcceptanceRequestProjection {
+  readonly acceptanceRequestId: string
+  readonly sequence: number
+  readonly revision: number
+  readonly deliverableRevision: number
+  readonly plan: DeliverablePlanProjection
+  readonly calendar: DeliverableCalendarProjection
+  readonly taskGuids: readonly string[]
+  readonly candidateVersions: readonly DeliverableArtifactVersionProjection[]
+  readonly candidatesDigest: WorkbenchDigest
+  readonly persistedState: DeliverableAcceptancePersistedState
+  readonly effectiveStatus: DeliverableAcceptanceEffectiveStatus
+  readonly decision: DeliverableAcceptanceDecisionProjection | null
+  readonly allowedDecisions: readonly DeliverableAcceptanceAllowedDecision[]
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Complete authorized Deliverable value with every immutable review round. */
+export interface ProjectDeliverableProjection {
+  readonly deliverableId: string
+  readonly sequence: number
+  readonly revision: number
+  readonly state: ProjectDeliverableState
+  readonly plan: DeliverablePlanProjection
+  readonly calendar: DeliverableCalendarProjection
+  readonly tasks: readonly DeliverableTaskLinkProjection[]
+  readonly acceptanceRequests: readonly DeliverableAcceptanceRequestProjection[]
+  readonly finalRelease: DeliverableFinalReleaseProjection | null
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Safe choice material for a Deliverable responsibility form. */
+export interface DeliverableMemberOption {
+  readonly memberId: string
+  readonly displayName: string
+  readonly kind: 'human' | 'agent'
+  readonly status: ProjectMemberStatus
+  readonly requiresHumanSponsor: boolean
+  readonly canBeHumanSponsor: boolean
+  readonly canAccept: boolean
+}
+
+export type DeliverableActivityAction =
+  | 'deliverable-created'
+  | 'acceptance-requested'
+  | 'acceptance-approved'
+  | 'acceptance-rejected'
+  | 'acceptance-needs-changes'
+  | 'calendar-observed'
+
+/** Authorized replay source; automatic calendar convergence is not a fake audit command. */
+export type DeliverableActivitySource =
+  | {
+    readonly kind: 'audit-event'
+    readonly auditEventId: string
+  }
+  | {
+    readonly kind: 'schedule-change'
+    readonly scheduleChangeId: string
+  }
+
+/** Append-only authorized replay entry; generic Activity stays privacy-redacted. */
+export interface DeliverableActivityEntry {
+  readonly sequence: number
+  readonly activityId: string
+  readonly deliverableId: string
+  readonly deliverableRevision: number
+  readonly action: DeliverableActivityAction
+  readonly source: DeliverableActivitySource
+  readonly planSnapshotId: string
+  readonly acceptanceRequestId: string | null
+  readonly decisionId: string | null
+  readonly occurredAt: string
+}
+
+/** One complete Project-scoped Deliverables workspace and bounded replay feed. */
+export interface ProjectDeliverablesProjection {
+  readonly projectId: string
+  readonly revision: number
+  readonly teamRevision: number
+  readonly taskRevision: number
+  readonly scheduleRevision: number
+  readonly calendarBinding: ProjectCalendarBindingProjection | null
+  readonly memberOptions: readonly DeliverableMemberOption[]
+  readonly taskOptions: readonly ProjectTaskProjection[]
+  readonly deliverables: readonly ProjectDeliverableProjection[]
+  readonly activity: readonly DeliverableActivityEntry[]
+  readonly nextBeforeActivitySequence: number | null
+}
+
+export interface ProjectDeliverablesQuery {
+  readonly projectId: string
+  readonly beforeActivitySequence?: number
+  readonly activityLimit?: number
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+/** Deliverable event creation reuses the T10 existing/create event boundary. */
+export type CreateProjectDeliverableEvent =
+  | {
+    readonly mode: 'existing-event'
+    readonly eventId: string
+    readonly schedule?: never
+  }
+  | {
+    readonly mode: 'create-event'
+    readonly eventId?: never
+    readonly schedule: ProjectCalendarSchedule
+  }
+
+export interface CreateProjectDeliverableRequest {
+  readonly projectId: string
+  readonly name: string
+  readonly description?: string | null
+  readonly criteria: readonly DeliverableAcceptanceCriterionDraft[]
+  readonly accountableMemberId: string
+  readonly contributorMemberIds: readonly string[]
+  readonly humanSponsorMemberId: string | null
+  readonly acceptorMemberId: string
+  readonly taskGuids: readonly string[]
+  readonly event: CreateProjectDeliverableEvent
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: null
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly expectedScheduleRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-project-deliverable-create'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+/** T11 event creation has the same one-attempt truth as T10 event creation. */
+export interface DeliverableCalendarMutationEffectProjection {
+  readonly effectId: string
+  readonly operation: 'event-create'
+  readonly deliverableId: string
+  readonly state: 'prepared' | 'delivered' | 'unknown' | 'failed' | 'conflict'
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Closed, privacy-safe rejection shared by Deliverable commands. */
+export interface ProjectDeliverableConflict {
+  readonly code:
+    | 'calendar-unbound'
+    | 'deliverables-revision-conflict'
+    | 'deliverable-not-found'
+    | 'deliverable-revision-conflict'
+    | 'deliverable-state-conflict'
+    | 'acceptance-request-not-found'
+    | 'acceptance-request-revision-conflict'
+    | 'acceptance-request-pending'
+    | 'acceptance-request-stale'
+    | 'project-schedule-revision-conflict'
+    | 'team-revision-conflict'
+    | 'task-projection-revision-conflict'
+    | 'member-not-found'
+    | 'member-inactive'
+    | 'accountable-also-contributor'
+    | 'human-sponsor-required'
+    | 'human-sponsor-invalid'
+    | 'human-sponsor-forbidden'
+    | 'acceptor-invalid'
+    | 'task-not-in-project'
+    | 'task-unavailable'
+    | 'event-already-used'
+    | 'event-not-selectable'
+    | 'candidate-duplicate'
+    | 'criterion-result-incomplete'
+    | 'criterion-result-invalid'
+    | 'approval-criteria-not-met'
+    | 'needs-changes-criterion-required'
+    | 'deliverable-limit-reached'
+    | 'remote-outcome-unknown'
+    | 'remote-rejected'
+  readonly message: string
+  readonly memberId?: string
+  readonly taskGuid?: string
+  readonly current?: ProjectDeliverablesProjection
+  readonly issue?: FeishuConnectionIssue
+}
+
+export type CreateProjectDeliverableResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectDeliverablesProjection
+    readonly deliverable: ProjectDeliverableProjection
+    readonly effect: DeliverableCalendarMutationEffectProjection | null
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectDeliverableConflict }
+
+export interface RequestDeliverableAcceptanceRequest {
+  readonly projectId: string
+  readonly deliverableId: string
+  readonly candidateVersions: readonly DeliverableArtifactVersionRef[]
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: number
+  readonly expectedTeamRevision: number
+  readonly expectedTaskRevision: number
+  readonly expectedScheduleRevision: number
+  readonly expectedRemoteObservationVersion: string
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly reason: 'owner-deliverable-acceptance-request'
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+export type RequestDeliverableAcceptanceResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectDeliverablesProjection
+    readonly request: DeliverableAcceptanceRequestProjection
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectDeliverableConflict }
+
+interface DecideDeliverableAcceptanceRequestBase {
+  readonly projectId: string
+  readonly deliverableId: string
+  readonly acceptanceRequestId: string
+  readonly criteria: readonly DeliverableCriterionDecisionDraft[]
+  readonly feedback: string
+  readonly expectedDeliverablesRevision: number
+  readonly expectedDeliverableRevision: number
+  readonly expectedAcceptanceRequestRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+  readonly candidateVersions?: never
+}
+
+/** A decision can judge the frozen candidate set but can never replace it. */
+export type DecideDeliverableAcceptanceRequest =
+  | DecideDeliverableAcceptanceRequestBase & {
+    readonly mode: 'approve'
+    readonly reason: 'owner-deliverable-acceptance-approve'
+  }
+  | DecideDeliverableAcceptanceRequestBase & {
+    readonly mode: 'reject'
+    readonly reason: 'owner-deliverable-acceptance-reject'
+  }
+  | DecideDeliverableAcceptanceRequestBase & {
+    readonly mode: 'request-changes'
+    readonly reason: 'owner-deliverable-acceptance-needs-changes'
+  }
+
+export type DecideDeliverableAcceptanceResult =
+  | {
+    readonly ok: true
+    readonly value: ProjectDeliverablesProjection
+    readonly request: DeliverableAcceptanceRequestProjection
+    readonly finalRelease: DeliverableFinalReleaseProjection | null
+    readonly receipt: WorkbenchCommandReceipt
+  }
+  | { readonly ok: false; readonly error: IdempotencyConflict }
+  | { readonly ok: false; readonly error: ProjectNotFoundConflict }
+  | { readonly ok: false; readonly error: ProjectDeliverableConflict }
+
+export interface DeliverableAcceptanceReviewCenterFilter {
+  readonly reviewKind: 'deliverable-acceptance'
+  readonly projectId: string
+  readonly status?: DeliverableAcceptanceEffectiveStatus
+  readonly beforeSequence?: number
+  readonly limit?: number
+  readonly riskLevel?: never
+  readonly actor?: never
+  readonly organizationId?: never
+  readonly teamId?: never
+}
+
+/** One target-specific acceptance card with frozen and current authority side by side. */
+export interface DeliverableAcceptanceReviewItemProjection {
+  readonly deliverableId: string
+  readonly deliverableName: string
+  readonly currentDeliverableRevision: number
+  readonly currentState: ProjectDeliverableState
+  readonly currentCalendar: DeliverableCalendarProjection
+  readonly currentTasks: readonly DeliverableTaskLinkProjection[]
+  readonly request: DeliverableAcceptanceRequestProjection
+  readonly finalRelease: DeliverableFinalReleaseProjection | null
+}
+
+export interface DeliverableAcceptanceReviewCenterProjection {
+  readonly reviewKind: 'deliverable-acceptance'
+  readonly projectId: string
+  readonly items: readonly DeliverableAcceptanceReviewItemProjection[]
+  readonly nextBeforeSequence: number | null
+}
+
+/** Closed Review Center query/result unions; each target keeps a typed command. */
+export type ReviewCenterQuery = ReviewCenterFilter | DeliverableAcceptanceReviewCenterFilter
+export type ReviewCenterResultProjection =
+  | ReviewCenterProjection
+  | DeliverableAcceptanceReviewCenterProjection
+
 /** Durable truth about one committed integration intent. */
 export type WorkbenchOutboxState = 'pending' | 'delivered' | 'unknown' | 'failed'
 
@@ -2115,6 +2558,12 @@ export type WorkbenchProjectCalendarReason =
   | 'owner-project-calendar-bind'
   | 'owner-project-milestone-create'
   | 'owner-project-milestone-date-update'
+export type WorkbenchProjectDeliverableReason =
+  | 'owner-project-deliverable-create'
+  | 'owner-deliverable-acceptance-request'
+  | 'owner-deliverable-acceptance-approve'
+  | 'owner-deliverable-acceptance-reject'
+  | 'owner-deliverable-acceptance-needs-changes'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
@@ -2123,6 +2572,7 @@ export type WorkbenchCommandReason =
   | WorkbenchFeishuConnectionReason
   | WorkbenchFeishuTaskReason
   | WorkbenchProjectCalendarReason
+  | WorkbenchProjectDeliverableReason
 export type WorkbenchAuditAction =
   | 'workbench.status.updated'
   | 'workbench.project.created'
@@ -2145,6 +2595,11 @@ export type WorkbenchAuditAction =
   | 'workbench.project-calendar.bound'
   | 'workbench.project-milestone.created'
   | 'workbench.project-milestone.date-update-requested'
+  | 'workbench.project-deliverable.created'
+  | 'workbench.deliverable-acceptance.requested'
+  | 'workbench.deliverable-acceptance.approved'
+  | 'workbench.deliverable-acceptance.rejected'
+  | 'workbench.deliverable-acceptance.needs-changes'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
@@ -2157,6 +2612,8 @@ export type WorkbenchAuditObjectType =
   | 'feishu-task-workflow'
   | 'project-calendar-binding'
   | 'project-milestone'
+  | 'project-deliverable'
+  | 'deliverable-acceptance-request'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
@@ -2181,6 +2638,11 @@ export type WorkbenchActivitySummaryCode =
   | 'project-calendar-bound'
   | 'project-milestone-created'
   | 'project-milestone-date-update-requested'
+  | 'project-deliverable-created'
+  | 'deliverable-acceptance-requested'
+  | 'deliverable-acceptance-approved'
+  | 'deliverable-acceptance-rejected'
+  | 'deliverable-acceptance-needs-changes'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

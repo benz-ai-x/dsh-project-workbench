@@ -113,7 +113,7 @@ A retained ProjectMember who cannot receive new responsibility but remains visib
 _Avoid_: Deleted member
 
 **Review Center**:
-The authorized Project-scoped projection in which an Owner inspects evidence-backed SuggestedChanges, their typed differences, risk, lifecycle, and retained human decisions.
+The authorized Project-scoped projection in which an Owner inspects one closed review kind at a time: evidence-backed SuggestedChanges or Deliverable Acceptance Requests, with their target-specific lifecycle and retained decisions.
 _Avoid_: Approval queue, arbitrary command console
 
 **SuggestedChange**:
@@ -175,3 +175,43 @@ _Avoid_: ETag, provider revision, update timestamp
 **Project Schedule Change**:
 An append-only, Project-scoped fact emitted in the same transaction as an authoritative Milestone date or remote-status change. Its revisioned feed is the durable dependency-consumer seam for later planning and risk modules.
 _Avoid_: Notification-only event, mutable date history
+
+**Deliverable**:
+A Workbench-owned executable Project object whose immutable plan binds responsibility, Acceptance Criteria, visible execution tasks, and one authoritative calendar event through acceptance to a Final Release.
+_Avoid_: Task, Milestone, mutable file link
+
+**Deliverable Plan**:
+The immutable semantic definition captured when a Deliverable is created: its name, description, ordered Acceptance Criteria, responsibility assignments, task GUID links, and creation provenance.
+_Avoid_: Editable draft, JSON patch
+
+**Acceptance Criterion**:
+One ordered, stable-ID statement in a Deliverable Plan against which every formal acceptance decision records `met` or `not-met`.
+_Avoid_: Task status, optional checklist note
+
+**Designated Acceptor**:
+The active Human ProjectMember assigned to evaluate a Deliverable. In V1 the authenticated Owner records the decision and retains this assignment separately; designation is not proof that the member logged in or signed.
+_Avoid_: Workbench login, external attestation
+
+**Calendar Commitment**:
+The internal closed ownership seam that associates one unique Project calendar event with exactly one Workbench target, currently either a Milestone or Deliverable.
+_Avoid_: Shared event link, generic calendar object
+
+**Declared Artifact Version Reference**:
+An immutable, source-qualified reference to one exact managed, local, or Feishu resource version, optionally carrying a declared content digest. It records Owner intent but does not prove source existence, readability, or permission.
+_Avoid_: Verified file, mutable latest link
+
+**Deliverable Acceptance Request**:
+One immutable review round freezing the exact Deliverable revision, plan, responsibility, calendar observation, task links, and complete candidate artifact-version set presented for acceptance.
+_Avoid_: Mutable review draft, generic SuggestedChange
+
+**Deliverable Acceptance Decision**:
+An append-only Owner disposition of one Acceptance Request—approved, rejected, or needs changes—with mandatory feedback and one result for every frozen Acceptance Criterion.
+_Avoid_: Boolean approval flag, Acceptor login proof
+
+**Final Release**:
+The immutable accepted output created atomically on approval and containing exactly every candidate artifact version frozen by that Acceptance Request.
+_Avoid_: Latest file, replaceable publication pointer
+
+**Deliverable Activity**:
+The separately authorized append-only projection that connects immutable Deliverable plan, acceptance-request, decision, calendar-observation, and responsibility snapshots to their matching audit-event or Project Schedule Change source facts.
+_Avoid_: Generic Activity payload, mutable timeline

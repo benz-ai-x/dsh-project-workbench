@@ -1,19 +1,31 @@
 # Project Workbench handoff
 
-Last updated: 2026-09-01 01:50 CST (Asia/Shanghai)
+Last updated: 2026-09-01 02:40 CST (Asia/Shanghai)
 
 ## Current state
 
 - Repository: `/root/workspace/dsh-project-workbench`
 - Branch: `main`
-- Code checkpoint before this handoff update: `d17f024aab2ffea5ee9e8803d2b49c9e21d0b9ea`
-- T10 implementation and acceptance evidence through `797306a` are published on `origin/main`.
+- Code checkpoint before this handoff update: `c1c6afb`.
+- T10 implementation and acceptance evidence are published on `origin/main` and GitHub Issue #11 is closed.
 - Pinned Harness checkout: `/root/workspace/deepseek-harness-baseline` at clean detached commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`.
 - Completed delivery ticket: [#11 — T10: Bind a Project calendar and manage Milestones](https://github.com/benz-ai-x/dsh-project-workbench/issues/11).
+- Active delivery ticket: [#12 — T11: Deliverable from plan to acceptance](https://github.com/benz-ai-x/dsh-project-workbench/issues/12).
 
-T10's implementation and all eight acceptance checklist items are complete. The default-branch acceptance-evidence commit closes #11; its commit body carries the verification summary because this environment has no GitHub API credential for a separate issue comment.
+T10's implementation and all eight acceptance checklist items are complete. T11's ticket, parent V1 spec/design, required `dsh-plugin-dev` references, and first-party Calendar/File boundaries have now been read. `docs/research/t11-deliverable-acceptance.md`, `CONTEXT.md`, the Project Contract, TODO, and the browser-safe types freeze the implementation boundary before parallel work begins.
 
-The next ticket cannot be implemented safely yet: this checkout contains only the broad T11+ placeholder, not the active GitHub ticket or parent spec required by `AGENTS.md`.
+T11 intentionally records artifact versions as immutable `declared-file-version` references. It does not claim source verification before the later managed/local/Feishu File adapters exist. The authenticated Owner records formal decisions separately from the designated Human Acceptor; T11 does not pretend that a ProjectMember logged in.
+
+## T11 frozen surface
+
+The next implementation adds four explicit Remote behaviors:
+
+1. `projectDeliverables`
+2. `createProjectDeliverable`
+3. `requestDeliverableAcceptance`
+4. `decideDeliverableAcceptance`
+
+The existing `reviewCenter` query becomes a closed `suggested-change | deliverable-acceptance` union while keeping target-specific decision commands. Creation freezes plan/responsibility/task links and binds one unique calendar event. Each acceptance request freezes the complete candidate set; approval copies it exactly into an immutable Final Release. Rejection or needs-changes closes the round and permits a later request. Calendar authority movement makes a pending request stale and unapprovable.
 
 ## T10 delivered surface
 
@@ -88,14 +100,14 @@ This is a visual-font follow-up, not a claim that UI testing as a whole was unav
 
 ## Environment limitations
 
-- The `dsh-plugin-dev` skill required by `AGENTS.md` is not installed in this environment. Do not substitute a similarly named skill; keep using the checked-in contract/spec and record the limitation until the exact skill is available.
-- GitHub API issue comments remain unavailable without a token. Default-branch closing commits can still close completed issues through the authenticated Git remote.
-- No local active-ticket specification exists for T11/#12. Fetch and read the ticket and parent spec before implementation.
+- The container still has no CJK font, so `UI-MANUAL-01` remains the only deferred visual check; automated browser behavior and layout checks remain required.
+- T11 has no live File adapter by design, and verification must not require live production Feishu or File credentials.
 
 ## Next-session entry
 
 1. Read `docs/agent/PROJECT_CONTRACT.md`, `TODO.md`, `dsh-reference.lock.json`, this handoff, the active ticket, and its parent spec completely.
 2. Confirm the main worktree and pinned Harness checkout are clean and at the recorded commits.
 3. Run `node scripts/verify-dsh-context.mjs --require-source`; after dependency installation, run `pnpm context:check:strict`. Stop on any baseline mismatch.
-4. Obtain the next ticket and parent spec before changing code. Do not infer T11 scope from the broad placeholder.
-5. Keep `UI-MANUAL-01` open until all development is complete, then perform the requested manual CJK-font visual pass.
+4. Continue T11 only within the frozen four-method contract and the explicit exclusions in `docs/research/t11-deliverable-acceptance.md`.
+5. Implement from failing public-seam tests, integrate independent worktrees through main, and run focused checks after each integration.
+6. Keep `UI-MANUAL-01` open until all development is complete, then perform the requested manual CJK-font visual pass.
