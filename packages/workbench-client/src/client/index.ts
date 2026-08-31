@@ -147,6 +147,47 @@ export type {
   WorkbenchProjectDeliverablesSelection,
   WorkbenchProjectDeliverablesTransportCode,
 } from './project-deliverables-controller.ts'
+export {
+  INITIAL_WORKBENCH_PROJECT_RISKS_STATE,
+  MAX_PROJECT_RISK_ASSUMPTION_LENGTH,
+  MAX_PROJECT_RISK_ASSUMPTIONS,
+  MAX_PROJECT_RISK_CONFIDENCE_RATIONALE_LENGTH,
+  MAX_PROJECT_RISK_CONTRIBUTORS,
+  MAX_PROJECT_RISK_DEPENDENCIES,
+  MAX_PROJECT_RISK_EVIDENCE,
+  MAX_PROJECT_RISK_STATEMENT_LENGTH,
+  MAX_PROJECT_RISK_TRANSITION_RATIONALE_LENGTH,
+  MAX_PROJECT_RISK_TREATMENT_TASKS,
+  MAX_PROJECT_RISK_TRIGGER_LENGTH,
+  WorkbenchProjectRisksController,
+} from './project-risk-controller.ts'
+export type {
+  WorkbenchProjectRiskAssessmentEditorDraft,
+  WorkbenchProjectRiskFilters,
+  WorkbenchProjectRiskRevisionDraft,
+  WorkbenchProjectRisksClientState,
+  WorkbenchProjectRisksConflictCode,
+  WorkbenchProjectRisksControllerOptions,
+  WorkbenchProjectRisksIssue,
+  WorkbenchProjectRisksOperation,
+  WorkbenchProjectRisksPhase,
+  WorkbenchProjectRisksRemote,
+  WorkbenchProjectRisksSelection,
+  WorkbenchProjectRisksTransportCode,
+  WorkbenchProjectRiskTransitionDraft,
+} from './project-risk-controller.ts'
+export {
+  projectRiskActivityActionKey,
+  projectRiskCategoryKey,
+  projectRiskClosureReasonKey,
+  projectRiskConfidenceKey,
+  projectRiskEvidenceKindKey,
+  projectRiskExposureLevelKey,
+  projectRiskImpactBandKey,
+  projectRiskLikelihoodBandKey,
+  projectRiskStatusKey,
+  projectRiskTriggerStateKey,
+} from './risk-presentation.ts'
 export type {
   WorkbenchReviewClientState,
   WorkbenchAcceptanceDecisionDraft,
@@ -238,6 +279,8 @@ export { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
 export type { ProjectTasksPanelProps } from './ProjectTasksPanel.tsx'
 export { ProjectMilestonesPanel } from './ProjectMilestonesPanel.tsx'
 export type { ProjectMilestonesPanelProps } from './ProjectMilestonesPanel.tsx'
+export { ProjectRisksPanel } from './ProjectRisksPanel.tsx'
+export type { ProjectRisksPanelProps } from './ProjectRisksPanel.tsx'
 export { ProjectTaskWorkflowPanel } from './ProjectTaskWorkflowPanel.tsx'
 export type { ProjectTaskWorkflowPanelProps } from './ProjectTaskWorkflowPanel.tsx'
 export { WorkbenchStatusPage } from './WorkbenchStatusPage.tsx'

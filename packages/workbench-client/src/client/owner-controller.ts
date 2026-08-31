@@ -38,6 +38,10 @@ import {
   WorkbenchProjectDeliverablesController,
   type WorkbenchProjectDeliverablesRemote,
 } from './project-deliverables-controller.ts'
+import {
+  WorkbenchProjectRisksController,
+  type WorkbenchProjectRisksRemote,
+} from './project-risk-controller.ts'
 
 /** User-visible shell modes. */
 export type OwnerPhase =
@@ -73,6 +77,7 @@ export interface OwnerClientState {
   readonly projectTasks: WorkbenchProjectTasksController | null
   readonly projectMilestones: WorkbenchProjectMilestonesController | null
   readonly projectDeliverables: WorkbenchProjectDeliverablesController | null
+  readonly projectRisks: WorkbenchProjectRisksController | null
   readonly activity: WorkbenchActivityController | null
   readonly recoveryCode: string | null
   readonly issue: OwnerIssue | null
@@ -89,6 +94,7 @@ const INITIAL_STATE: OwnerClientState = Object.freeze({
   projectTasks: null,
   projectMilestones: null,
   projectDeliverables: null,
+  projectRisks: null,
   activity: null,
   recoveryCode: null,
   issue: null,
@@ -119,6 +125,7 @@ export class OwnerController {
   private projectTasks: WorkbenchProjectTasksController | null = null
   private projectMilestones: WorkbenchProjectMilestonesController | null = null
   private projectDeliverables: WorkbenchProjectDeliverablesController | null = null
+  private projectRisks: WorkbenchProjectRisksController | null = null
   private activity: WorkbenchActivityController | null = null
   private projectSelectionOff: (() => void) | null = null
   private authEpoch = 0
@@ -131,7 +138,8 @@ export class OwnerController {
     private readonly auth: OwnerAuthHttp,
     private readonly remote: WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
       & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote & WorkbenchProjectTasksRemote
-      & WorkbenchProjectMilestonesRemote & WorkbenchProjectDeliverablesRemote,
+      & WorkbenchProjectMilestonesRemote & WorkbenchProjectDeliverablesRemote
+      & WorkbenchProjectRisksRemote,
     private readonly options: OwnerControllerOptions = {},
   ) {}
 
@@ -159,6 +167,7 @@ export class OwnerController {
     this.projectTasks?.markDisconnected()
     this.projectMilestones?.markDisconnected()
     this.projectDeliverables?.markDisconnected()
+    this.projectRisks?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -211,6 +220,7 @@ export class OwnerController {
     this.projectTasks?.markDisconnected()
     this.projectMilestones?.markDisconnected()
     this.projectDeliverables?.markDisconnected()
+    this.projectRisks?.markDisconnected()
     this.activity?.markDisconnected()
 
     const unavailable = ownerIssue(connectionFallbackOperation(this.state.phase), 'unavailable')
@@ -236,6 +246,7 @@ export class OwnerController {
     this.projectTasks?.markDisconnected()
     this.projectMilestones?.markDisconnected()
     this.projectDeliverables?.markDisconnected()
+    this.projectRisks?.markDisconnected()
     this.activity?.markDisconnected()
     return this.track(this.doProbe(true))
   }
@@ -256,6 +267,7 @@ export class OwnerController {
     const currentProjectTasks = this.projectTasks
     const currentProjectMilestones = this.projectMilestones
     const currentProjectDeliverables = this.projectDeliverables
+    const currentProjectRisks = this.projectRisks
     const currentActivity = this.activity
     this.projectSelectionOff?.()
     this.projectSelectionOff = null
@@ -267,6 +279,7 @@ export class OwnerController {
     this.projectTasks = null
     this.projectMilestones = null
     this.projectDeliverables = null
+    this.projectRisks = null
     this.activity = null
     const statusDisposal = currentStatus?.dispose()
     const projectDisposal = currentProjects?.dispose()
@@ -276,6 +289,7 @@ export class OwnerController {
     const projectTasksDisposal = currentProjectTasks?.dispose()
     const projectMilestonesDisposal = currentProjectMilestones?.dispose()
     const projectDeliverablesDisposal = currentProjectDeliverables?.dispose()
+    const projectRisksDisposal = currentProjectRisks?.dispose()
     const activityDisposal = currentActivity?.dispose()
     this.state = INITIAL_STATE
     this.listeners.clear()
@@ -288,6 +302,7 @@ export class OwnerController {
     if (projectTasksDisposal !== undefined) pending.push(projectTasksDisposal)
     if (projectMilestonesDisposal !== undefined) pending.push(projectMilestonesDisposal)
     if (projectDeliverablesDisposal !== undefined) pending.push(projectDeliverablesDisposal)
+    if (projectRisksDisposal !== undefined) pending.push(projectRisksDisposal)
     if (activityDisposal !== undefined) pending.push(activityDisposal)
     this.disposal = Promise.allSettled(pending).then(() => undefined)
     return this.disposal
@@ -345,6 +360,7 @@ export class OwnerController {
             projectTasks: null,
             projectMilestones: null,
             projectDeliverables: null,
+            projectRisks: null,
             activity: null,
             recoveryCode: null,
             issue,
@@ -366,6 +382,7 @@ export class OwnerController {
         projectTasks: null,
         projectMilestones: null,
         projectDeliverables: null,
+        projectRisks: null,
         activity: null,
         recoveryCode: result.value.recoveryCode,
         issue: null,
@@ -423,6 +440,7 @@ export class OwnerController {
     this.projectTasks?.markDisconnected()
     this.projectMilestones?.markDisconnected()
     this.projectDeliverables?.markDisconnected()
+    this.projectRisks?.markDisconnected()
     this.activity?.markDisconnected()
     this.publish({ ...this.state, phase: 'logout-pending', issue: null })
     try {
@@ -452,6 +470,7 @@ export class OwnerController {
         projectTasks: null,
         projectMilestones: null,
         projectDeliverables: null,
+        projectRisks: null,
         activity: null,
         recoveryCode: null,
         issue: null,
@@ -501,6 +520,7 @@ export class OwnerController {
           projectTasks: null,
           projectMilestones: null,
           projectDeliverables: null,
+          projectRisks: null,
           activity: null,
           recoveryCode: this.state.recoveryCode,
           issue: null,
@@ -525,6 +545,7 @@ export class OwnerController {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -542,6 +563,7 @@ export class OwnerController {
     if ((this.status !== null || this.projects !== null || this.projectTeam !== null
       || this.review !== null || this.feishuConnection !== null || this.projectTasks !== null
       || this.projectMilestones !== null || this.projectDeliverables !== null
+      || this.projectRisks !== null
       || this.activity !== null)
       && existingAccess?.state === 'signed-in'
       && existingAccess.ownerId !== access.ownerId) {
@@ -552,6 +574,7 @@ export class OwnerController {
       || this.projectTeam === null || this.review === null
       || this.feishuConnection === null || this.projectTasks === null
       || this.projectMilestones === null || this.projectDeliverables === null
+      || this.projectRisks === null
       || this.activity === null
     const status = this.status ?? this.createStatusController()
     const projects = this.projects ?? this.createProjectController()
@@ -562,6 +585,7 @@ export class OwnerController {
     const projectMilestones = this.projectMilestones ?? this.createProjectMilestonesController()
     const projectDeliverables = this.projectDeliverables
       ?? this.createProjectDeliverablesController()
+    const projectRisks = this.projectRisks ?? this.createProjectRisksController()
     const activity = this.activity ?? this.createActivityController()
     this.status = status
     this.projects = projects
@@ -571,6 +595,7 @@ export class OwnerController {
     this.projectTasks = projectTasks
     this.projectMilestones = projectMilestones
     this.projectDeliverables = projectDeliverables
+    this.projectRisks = projectRisks
     this.activity = activity
     this.publish({
       phase: 'authenticated',
@@ -583,12 +608,14 @@ export class OwnerController {
       projectTasks,
       projectMilestones,
       projectDeliverables,
+      projectRisks,
       activity,
       recoveryCode: null,
       issue: null,
     })
     this.bindProjectSelection(
       projects, projectTeam, review, projectTasks, projectMilestones, projectDeliverables,
+      projectRisks,
     )
     this.scheduleExpiry(access)
     if (created || refreshStatus) {
@@ -601,6 +628,7 @@ export class OwnerController {
         created ? Promise.resolve() : projectTasks.connectionReset(),
         created ? Promise.resolve() : projectMilestones.connectionReset(),
         created ? Promise.resolve() : projectDeliverables.connectionReset(),
+        created ? Promise.resolve() : projectRisks.connectionReset(),
         activity.refresh(),
       ])
     }
@@ -637,6 +665,7 @@ export class OwnerController {
         void this.activity?.refresh()
         void this.review?.refresh()
         void this.projectDeliverables?.refresh()
+        void this.projectRisks?.refresh()
       },
     })
   }
@@ -668,6 +697,7 @@ export class OwnerController {
       onCommitted: () => {
         void this.activity?.refresh()
         void this.projectDeliverables?.refresh()
+        void this.projectRisks?.refresh()
       },
     })
   }
@@ -694,6 +724,14 @@ export class OwnerController {
     })
   }
 
+  private createProjectRisksController(): WorkbenchProjectRisksController {
+    return new WorkbenchProjectRisksController(this.remote, {
+      onBeforeProtectedOperation: () => this.admitProtectedOperation(),
+      onTransportFailure: () => { this.revalidateAfterStatusFailure() },
+      onCommitted: () => { void this.activity?.refresh() },
+    })
+  }
+
   private bindProjectSelection(
     projects: WorkbenchProjectController,
     projectTeam: WorkbenchProjectTeamController,
@@ -701,6 +739,7 @@ export class OwnerController {
     projectTasks: WorkbenchProjectTasksController,
     projectMilestones: WorkbenchProjectMilestonesController,
     projectDeliverables: WorkbenchProjectDeliverablesController,
+    projectRisks: WorkbenchProjectRisksController,
   ): void {
     this.projectSelectionOff?.()
     const sync = () => {
@@ -711,12 +750,14 @@ export class OwnerController {
         projectTasks.clearSelection()
         projectMilestones.clearSelection()
         projectDeliverables.clearSelection()
+        projectRisks.clearSelection()
       } else {
         void projectTeam.selectProject(detail.project.projectId, detail.project.name)
         void review.selectProject(detail.project.projectId, detail.project.name)
         void projectTasks.selectProject(detail.project.projectId, detail.project.name)
         void projectMilestones.selectProject(detail.project.projectId, detail.project.name)
         void projectDeliverables.selectProject(detail.project.projectId, detail.project.name)
+        void projectRisks.selectProject(detail.project.projectId, detail.project.name)
       }
     }
     this.projectSelectionOff = projects.subscribe(sync)
@@ -742,6 +783,7 @@ export class OwnerController {
     const currentProjectTasks = this.projectTasks
     const currentProjectMilestones = this.projectMilestones
     const currentProjectDeliverables = this.projectDeliverables
+    const currentProjectRisks = this.projectRisks
     const currentActivity = this.activity
     this.projectSelectionOff?.()
     this.projectSelectionOff = null
@@ -753,6 +795,7 @@ export class OwnerController {
     this.projectTasks = null
     this.projectMilestones = null
     this.projectDeliverables = null
+    this.projectRisks = null
     this.activity = null
     return Promise.allSettled([
       currentStatus?.dispose() ?? Promise.resolve(),
@@ -763,6 +806,7 @@ export class OwnerController {
       currentProjectTasks?.dispose() ?? Promise.resolve(),
       currentProjectMilestones?.dispose() ?? Promise.resolve(),
       currentProjectDeliverables?.dispose() ?? Promise.resolve(),
+      currentProjectRisks?.dispose() ?? Promise.resolve(),
       currentActivity?.dispose() ?? Promise.resolve(),
     ]).then(() => undefined)
   }
@@ -834,6 +878,7 @@ export class OwnerController {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -858,6 +903,7 @@ export class OwnerController {
       && this.projectTasks !== null
       && this.projectMilestones !== null
       && this.projectDeliverables !== null
+      && this.projectRisks !== null
       && this.activity !== null) {
       this.publish({
         ...this.state,
@@ -870,6 +916,7 @@ export class OwnerController {
         projectTasks: this.projectTasks,
         projectMilestones: this.projectMilestones,
         projectDeliverables: this.projectDeliverables,
+        projectRisks: this.projectRisks,
         activity: this.activity,
         issue,
       })

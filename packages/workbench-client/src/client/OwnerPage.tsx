@@ -21,6 +21,7 @@ import {
 import { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
 import { ProjectMilestonesPanel } from './ProjectMilestonesPanel.tsx'
 import { ProjectDeliverablesPanel } from './ProjectDeliverablesPanel.tsx'
+import { ProjectRisksPanel } from './ProjectRisksPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -237,6 +238,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.projectTasks !== null
     && state.projectMilestones !== null
     && state.projectDeliverables !== null
+    && state.projectRisks !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -288,6 +290,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
             t={t}
           />
           <ProjectDeliverablesPanel controller={state.projectDeliverables} t={t} />
+          <ProjectRisksPanel controller={state.projectRisks} t={t} />
           <ReviewCenterPanel controller={state.review} t={t} />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
