@@ -35,6 +35,9 @@ export type WorkbenchAction =
   | 'workbench.project.deliverable.activity.read'
   | 'workbench.project.deliverable.write'
   | 'workbench.project.deliverable.accept'
+  | 'workbench.project.risk.read'
+  | 'workbench.project.risk.activity.read'
+  | 'workbench.project.risk.write'
 
 /** The only authenticated principal shape admitted by the V1 policy. */
 export interface OwnerPrincipal {

@@ -6,6 +6,7 @@ import type {
   CreateProjectDeliverableResult,
   CreateProjectResult,
   CreateProjectMilestoneResult,
+  CreateProjectRiskResult,
   DecideDeliverableAcceptanceResult,
   DecideSuggestedChangeResult,
   DeliverableAcceptanceReviewCenterFilter,
@@ -31,6 +32,10 @@ import type {
   ProjectDeliverablesProjection,
   ProjectCalendarSchedule,
   ProjectMilestonesProjection,
+  ProjectRisksProjection,
+  ProjectRiskProjection,
+  ProjectRiskHistoryEntry,
+  ProjectRiskStatus,
   ProjectMemberDraft,
   ProjectMemberStatus,
   ProjectQuery,
@@ -48,6 +53,7 @@ import type {
   ReconcileProjectCalendarResult,
   ReferenceFeishuTaskResult,
   RequestDeliverableAcceptanceResult,
+  ReviseProjectRiskResult,
   ReviewCenterProjection,
   ReviewCenterQuery,
   ReviewCenterResultProjection,
@@ -59,6 +65,7 @@ import type {
   VerifyFeishuIdentityRouteResult,
   UpdateFeishuTaskResult,
   UpdateProjectMilestoneDateResult,
+  TransitionProjectRiskResult,
   WorkbenchActivityFilter,
   WorkbenchActivityProjection,
   WorkbenchAuditIntegrityProjection,
@@ -68,6 +75,12 @@ import type {
   WorkbenchStatusChangeReason,
   WorkbenchStatusSnapshot,
 } from './client.ts'
+import type {
+  NormalizedProjectRiskAssessment,
+  NormalizedProjectRiskAssessmentIntent,
+  NormalizedProjectRiskTransition,
+  NormalizedProjectRiskTransitionIntent,
+} from './project-risk.ts'
 import type {
   WorkbenchFeishuCalendarEventSnapshot,
   WorkbenchFeishuCalendarRoute,
@@ -809,6 +822,114 @@ export interface WorkbenchProjectDeliverablesReadQuery {
   readonly activityLimit?: number
 }
 
+/** Host-fixed Risk scope, filters, and three independent descending pages. */
+export interface WorkbenchProjectRisksReadQuery {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly projectId: string
+  readonly exposure?: import('./client.ts').ProjectRiskExposureLevel
+  readonly status?: ProjectRiskStatus
+  readonly riskOwnerMemberId?: string
+  readonly triggerState?: import('./client.ts').ProjectRiskTriggerState
+  readonly triggerContains?: string
+  readonly reviewFrom?: string
+  readonly reviewTo?: string
+  readonly selectedRiskId?: string
+  readonly beforeRiskSequence?: number
+  readonly riskLimit?: number
+  readonly beforeActivitySequence?: number
+  readonly activityLimit?: number
+  readonly beforeHistorySequence?: number
+  readonly historyLimit?: number
+}
+
+interface WorkbenchProjectRiskReplayBase {
+  readonly organizationId: string
+  readonly teamId: string
+  readonly actorId: string
+  readonly projectId: string
+  readonly expectedRisksRevision: number
+  readonly expectedRiskRevision: number | null
+  readonly expectedTaskRevision: number
+  readonly idempotencyKey: string
+  readonly causationId: string
+}
+
+/** Receipt-only lookup material; normalized intent may never be persisted verbatim. */
+export type WorkbenchProjectRiskReplayQuery =
+  | WorkbenchProjectRiskReplayBase & {
+    readonly mode: 'create'
+    readonly riskId?: never
+    readonly assessment: NormalizedProjectRiskAssessmentIntent
+    readonly expectedRiskRevision: null
+    readonly expectedTeamRevision: number
+    readonly reason: 'owner-project-risk-create'
+  }
+  | WorkbenchProjectRiskReplayBase & {
+    readonly mode: 'revise'
+    readonly riskId: string
+    readonly assessment: NormalizedProjectRiskAssessmentIntent
+    readonly expectedRiskRevision: number
+    readonly expectedTeamRevision: number
+    readonly reason: 'owner-project-risk-revise'
+  }
+  | WorkbenchProjectRiskReplayBase & {
+    readonly mode: 'transition'
+    readonly riskId: string
+    readonly transition: NormalizedProjectRiskTransitionIntent
+    readonly expectedRiskRevision: number
+    readonly expectedTeamRevision?: never
+    readonly reason: 'owner-project-risk-transition'
+  }
+
+interface WorkbenchProjectRiskMutationBase {
+  readonly activityId: string
+  readonly projectId: string
+  readonly expectedRisksRevision: number
+  readonly expectedRiskRevision: number | null
+  readonly expectedTaskRevision: number
+  readonly command: WorkbenchCommandMetadata
+}
+
+export interface WorkbenchProjectRiskCreationMutation extends WorkbenchProjectRiskMutationBase {
+  readonly riskId: string
+  readonly assessmentId: string
+  readonly assessment: NormalizedProjectRiskAssessment
+  readonly intent: NormalizedProjectRiskAssessmentIntent
+  readonly expectedRiskRevision: null
+  readonly expectedTeamRevision: number
+  readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-risk-create' }
+}
+
+export interface WorkbenchProjectRiskRevisionMutation extends WorkbenchProjectRiskMutationBase {
+  readonly riskId: string
+  readonly assessmentId: string
+  readonly assessment: NormalizedProjectRiskAssessment
+  readonly intent: NormalizedProjectRiskAssessmentIntent
+  readonly expectedRiskRevision: number
+  readonly expectedTeamRevision: number
+  readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-risk-revise' }
+}
+
+export interface WorkbenchProjectRiskTransitionMutation extends WorkbenchProjectRiskMutationBase {
+  readonly riskId: string
+  readonly transitionId: string
+  readonly transition: NormalizedProjectRiskTransition
+  readonly intent: NormalizedProjectRiskTransitionIntent
+  readonly expectedRiskRevision: number
+  readonly command: WorkbenchCommandMetadata & { readonly reason: 'owner-project-risk-transition' }
+}
+
+export type WorkbenchProjectRiskMutation =
+  | WorkbenchProjectRiskCreationMutation
+  | WorkbenchProjectRiskRevisionMutation
+  | WorkbenchProjectRiskTransitionMutation
+
+export type WorkbenchProjectRiskCommandResult =
+  | CreateProjectRiskResult
+  | ReviseProjectRiskResult
+  | TransitionProjectRiskResult
+
 export type WorkbenchProjectDeliverableEventIntent =
   | { readonly mode: 'existing-event'; readonly eventId: string }
   | { readonly mode: 'create-event'; readonly schedule: ProjectCalendarSchedule }
@@ -1301,6 +1422,31 @@ export interface WorkbenchRepository {
     mutation: WorkbenchDeliverableAcceptanceDecisionMutation,
     signal: AbortSignal,
   ): Promise<DecideDeliverableAcceptanceResult>
+  /** Read one detached Risk page plus its independently paged authorized replay. */
+  readProjectRisks(
+    query: WorkbenchProjectRisksReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectRisksProjection | null>
+  /** Receipt-first lookup before current dates, lifecycle, or CAS are consulted. */
+  replayProjectRiskCommand(
+    query: WorkbenchProjectRiskReplayQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchProjectRiskCommandResult | null>
+  /** Atomically append the first assessment and advance the Project Risk head. */
+  commitProjectRiskCreation(
+    mutation: WorkbenchProjectRiskCreationMutation,
+    signal: AbortSignal,
+  ): Promise<CreateProjectRiskResult>
+  /** Atomically replace the complete assessment while retaining history. */
+  commitProjectRiskRevision(
+    mutation: WorkbenchProjectRiskRevisionMutation,
+    signal: AbortSignal,
+  ): Promise<ReviseProjectRiskResult>
+  /** Atomically append one explicit lifecycle transition without task writes. */
+  commitProjectRiskTransition(
+    mutation: WorkbenchProjectRiskTransitionMutation,
+    signal: AbortSignal,
+  ): Promise<TransitionProjectRiskResult>
   /** Return a redacted, organization-scoped Activity page. */
   readActivity(query: WorkbenchActivityQuery, signal: AbortSignal): Promise<WorkbenchActivityProjection>
   /** Recompute the complete versioned hash chain and compare its stored head. */
@@ -1488,6 +1634,98 @@ export function deliverableAcceptanceReviewCenterProjection(
       }),
     }))),
     nextBeforeSequence: value.nextBeforeSequence,
+  })
+}
+
+function projectRiskProjection(value: ProjectRiskProjection): ProjectRiskProjection {
+  const assessment = value.currentAssessment
+  const cloneEvidence = (item: typeof assessment.evidence[number]) => Object.freeze({ ...item })
+  const cloneDependency = (item: typeof assessment.dependencies[number]) => Object.freeze({ ...item })
+  const currentAssessment = Object.freeze({
+    ...assessment,
+    statement: Object.freeze({ ...assessment.statement }),
+    trigger: Object.freeze({ ...assessment.trigger }),
+    probability: Object.freeze({ ...assessment.probability }),
+    impact: Object.freeze({ ...assessment.impact }),
+    assumptions: Object.freeze([...assessment.assumptions]),
+    responsibility: Object.freeze({
+      accountable: Object.freeze({ ...assessment.responsibility.accountable }),
+      contributors: Object.freeze(assessment.responsibility.contributors.map(
+        member => Object.freeze({ ...member }),
+      )),
+      humanSponsor: assessment.responsibility.humanSponsor === null
+        ? null
+        : Object.freeze({ ...assessment.responsibility.humanSponsor }),
+    }),
+    evidence: Object.freeze(assessment.evidence.map(cloneEvidence)),
+    dependencies: Object.freeze(assessment.dependencies.map(cloneDependency)),
+    mitigationTaskGuids: Object.freeze([...assessment.mitigationTaskGuids]),
+    contingencyTaskGuids: Object.freeze([...assessment.contingencyTaskGuids]),
+    exposure: Object.freeze({ ...assessment.exposure }),
+  })
+  return Object.freeze({
+    ...value,
+    currentAssessment,
+    treatmentTasks: Object.freeze(value.treatmentTasks.map(link => Object.freeze({
+      ...link,
+      task: link.task === null ? null : projectTaskProjection(link.task),
+    }))),
+  })
+}
+
+/** Detach the complete authorized Risk workspace at the repository boundary. */
+export function projectRisksProjection(value: ProjectRisksProjection): ProjectRisksProjection {
+  const risks = Object.freeze(value.risks.map(projectRiskProjection))
+  const cloneHistory = (entry: ProjectRiskHistoryEntry): ProjectRiskHistoryEntry => {
+    if (entry.kind === 'assessment') {
+      return Object.freeze({
+        kind: 'assessment',
+        sequence: entry.sequence,
+        assessment: projectRiskProjection({
+          ...value.selectedRisk!.risk,
+          currentAssessment: entry.assessment,
+          treatmentTasks: [],
+        }).currentAssessment,
+        source: Object.freeze({ ...entry.source }),
+        actor: Object.freeze({ ...entry.actor }),
+        causationId: entry.causationId,
+      })
+    }
+    return Object.freeze({
+      kind: 'transition',
+      sequence: entry.sequence,
+      transition: Object.freeze({ ...entry.transition }),
+      source: Object.freeze({ ...entry.source }),
+      actor: Object.freeze({ ...entry.actor }),
+      causationId: entry.causationId,
+    })
+  }
+  const selectedRisk = value.selectedRisk === null ? null : Object.freeze({
+    risk: projectRiskProjection(value.selectedRisk.risk),
+    history: Object.freeze(value.selectedRisk.history.map(cloneHistory)),
+    nextBeforeHistorySequence: value.selectedRisk.nextBeforeHistorySequence,
+  })
+  return Object.freeze({
+    ...value,
+    risks,
+    selectedRisk,
+    activity: Object.freeze(value.activity.map(entry => Object.freeze({
+      ...entry,
+      actor: Object.freeze({ ...entry.actor }),
+    }))),
+    memberOptions: Object.freeze(value.memberOptions.map(option => Object.freeze({ ...option }))),
+    evidenceOptions: Object.freeze(value.evidenceOptions.map(option => Object.freeze({
+      ...option,
+      ...(option.kind === 'project-schedule-change'
+        ? { changedFields: Object.freeze([...option.changedFields]) }
+        : {}),
+    }))),
+    dependencyOptions: Object.freeze(value.dependencyOptions.map(option => Object.freeze({
+      ...option,
+      statement: Object.freeze({ ...option.statement }),
+      exposure: Object.freeze({ ...option.exposure }),
+    }))),
+    taskOptions: Object.freeze(value.taskOptions.map(projectTaskProjection)),
   })
 }
 

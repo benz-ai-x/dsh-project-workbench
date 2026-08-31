@@ -21,6 +21,8 @@ import type {
   CreateProjectResult,
   CreateProjectMilestoneRequest,
   CreateProjectMilestoneResult,
+  CreateProjectRiskRequest,
+  CreateProjectRiskResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
   DecideDeliverableAcceptanceRequest,
@@ -58,6 +60,9 @@ import type {
   ProjectCalendarSchedule,
   ProjectMilestonesProjection,
   ProjectMilestonesQuery,
+  ProjectRisksProjection,
+  ProjectRisksQuery,
+  ProjectRiskConflict,
   ProjectMemberDraft,
   ProjectQuery,
   ProjectResponsibilitySuggestedValue,
@@ -81,6 +86,8 @@ import type {
   ReferenceFeishuTaskResult,
   RequestDeliverableAcceptanceRequest,
   RequestDeliverableAcceptanceResult,
+  ReviseProjectRiskRequest,
+  ReviseProjectRiskResult,
   ReviewCenterFilter,
   ReviewCenterQuery,
   ReviewCenterResultProjection,
@@ -104,12 +111,15 @@ import type {
   UpdateFeishuTaskResult,
   UpdateProjectMilestoneDateRequest,
   UpdateProjectMilestoneDateResult,
+  TransitionProjectRiskRequest,
+  TransitionProjectRiskResult,
 } from './client.ts'
 import {
   deliverableAcceptanceReviewCenterProjection,
   projectDetailProjection,
   projectDeliverablesProjection,
   projectMilestonesProjection,
+  projectRisksProjection,
   projectResult,
   projectStartProjection,
   projectTeamCommandResult,
@@ -139,8 +149,18 @@ import {
   type WorkbenchDeliverableCalendarCreationReservationMutation,
   type WorkbenchProjectDeliverableMutation,
   type WorkbenchProjectDeliverableReplayQuery,
+  type WorkbenchProjectRiskCreationMutation,
+  type WorkbenchProjectRiskReplayQuery,
+  type WorkbenchProjectRiskRevisionMutation,
+  type WorkbenchProjectRiskTransitionMutation,
   type WorkbenchProjectMilestoneReplayQuery,
 } from './repository.ts'
+import {
+  normalizeProjectRiskAssessment,
+  normalizeProjectRiskAssessmentIntent,
+  normalizeProjectRiskTransition,
+  normalizeProjectRiskTransitionIntent,
+} from './project-risk.ts'
 import type { AuthorizedScope, WorkbenchAction, WorkbenchAuthorization } from './authorization.ts'
 import type {
   WorkbenchFeishuTaskEventObservation,
@@ -185,6 +205,10 @@ export interface WorkbenchIdGenerator {
   nextDeliverableDecisionId?(): string
   nextDeliverableFinalReleaseId?(): string
   nextDeliverableActivityId?(): string
+  nextProjectRiskId?(): string
+  nextProjectRiskAssessmentId?(): string
+  nextProjectRiskTransitionId?(): string
+  nextProjectRiskActivityId?(): string
 }
 
 /** Stable identity for a future independently versioned external capability. */
@@ -296,6 +320,10 @@ export const randomWorkbenchIds: WorkbenchIdGenerator = Object.freeze({
   nextDeliverableDecisionId: () => `acceptance-decision-${randomUUID()}`,
   nextDeliverableFinalReleaseId: () => `final-release-${randomUUID()}`,
   nextDeliverableActivityId: () => `deliverable-activity-${randomUUID()}`,
+  nextProjectRiskId: () => `risk-${randomUUID()}`,
+  nextProjectRiskAssessmentId: () => `risk-assessment-${randomUUID()}`,
+  nextProjectRiskTransitionId: () => `risk-transition-${randomUUID()}`,
+  nextProjectRiskActivityId: () => `risk-activity-${randomUUID()}`,
 })
 
 export const noWorkbenchExternalAdapters: WorkbenchExternalAdapters = Object.freeze({})
@@ -1781,6 +1809,332 @@ export class WorkbenchScenario {
         projectDeliverablesProjection(projection),
         operationSignal,
       )
+    })
+  }
+
+  /** Read the Risk register and its separately authorized replay in one projection. */
+  projectRisks(
+    query: ProjectRisksQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectRisksProjection | null> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'projectRisks')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await requireIdenticalScopes(
+        this.options.authorization,
+        'workbench.project.risk.read',
+        'workbench.project.risk.activity.read',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateProjectRisksQuery(query)
+      const projection = await this.options.repository.readProjectRisks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        ...normalized,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      if (projection === null) return null
+      return this.options.authorization.filterProjection(
+        'workbench.project.risk.read',
+        projectRisksProjection(projection),
+        operationSignal,
+      )
+    })
+  }
+
+  /** Create one research Risk with a complete first assessment. */
+  createProjectRisk(
+    request: CreateProjectRiskRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectRiskResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'createProjectRisk')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.risk.write',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateCreateProjectRiskRequest(request)
+      const replayQuery: WorkbenchProjectRiskReplayQuery = Object.freeze({
+        mode: 'create',
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        assessment: normalized.assessment,
+        expectedRisksRevision: normalized.expectedRisksRevision,
+        expectedRiskRevision: null,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: 'owner-project-risk-create',
+      })
+      const replay = await this.options.repository.replayProjectRiskCommand(
+        replayQuery,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (replay !== null) return replay as CreateProjectRiskResult
+      const detail = await this.options.repository.readProject(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      if (detail === null) return projectRiskProjectMissing(normalized.projectId)
+      const occurredAt = commandInstant(this.options.clock)
+      const assessment = normalizedRiskAssessment(normalized.assessment, {
+        assessedAt: occurredAt,
+        projectTimezone: detail.project.timezone,
+        previousTrigger: null,
+      })
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const mutation: WorkbenchProjectRiskCreationMutation = Object.freeze({
+        riskId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskId,
+          `risk-${commandId}`,
+          'Project Risk',
+        ),
+        assessmentId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskAssessmentId,
+          `risk-assessment-${commandId}`,
+          'Project Risk assessment',
+        ),
+        activityId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskActivityId,
+          `risk-activity-${commandId}`,
+          'Project Risk Activity',
+        ),
+        projectId: normalized.projectId,
+        assessment,
+        intent: normalized.assessment,
+        expectedRisksRevision: normalized.expectedRisksRevision,
+        expectedRiskRevision: null,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        command: projectRiskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          'owner-project-risk-create',
+          occurredAt,
+        ),
+      })
+      return this.options.repository.commitProjectRiskCreation(mutation, operationSignal)
+    })
+  }
+
+  /** Append one complete immutable assessment replacement. */
+  reviseProjectRisk(
+    request: ReviseProjectRiskRequest,
+    signal: AbortSignal,
+  ): Promise<ReviseProjectRiskResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'reviseProjectRisk')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.risk.write',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateReviseProjectRiskRequest(request)
+      const replayQuery: WorkbenchProjectRiskReplayQuery = Object.freeze({
+        mode: 'revise',
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        riskId: normalized.riskId,
+        assessment: normalized.assessment,
+        expectedRisksRevision: normalized.expectedRisksRevision,
+        expectedRiskRevision: normalized.expectedRiskRevision,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: 'owner-project-risk-revise',
+      })
+      const replay = await this.options.repository.replayProjectRiskCommand(
+        replayQuery,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (replay !== null) return replay as ReviseProjectRiskResult
+      const detail = await this.options.repository.readProject(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      if (detail === null) return projectRiskProjectMissing(normalized.projectId)
+      const current = await this.options.repository.readProjectRisks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+        selectedRiskId: normalized.riskId,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      if (current === null) return projectRiskProjectMissing(normalized.projectId)
+      const risk = current.selectedRisk?.risk
+      if (risk === undefined) return projectRiskFailure('risk-not-found', 'Project Risk was not found')
+      if (risk.status === 'closed') return projectRiskFailure('risk-closed', 'Closed Project Risks are terminal')
+      const occurredAt = commandInstant(this.options.clock)
+      const assessment = normalizedRiskAssessment(normalized.assessment, {
+        assessedAt: occurredAt,
+        projectTimezone: detail.project.timezone,
+        previousTrigger: risk.currentAssessment.trigger,
+      })
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const mutation: WorkbenchProjectRiskRevisionMutation = Object.freeze({
+        riskId: normalized.riskId,
+        assessmentId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskAssessmentId,
+          `risk-assessment-${commandId}`,
+          'Project Risk assessment',
+        ),
+        activityId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskActivityId,
+          `risk-activity-${commandId}`,
+          'Project Risk Activity',
+        ),
+        projectId: normalized.projectId,
+        assessment,
+        intent: normalized.assessment,
+        expectedRisksRevision: normalized.expectedRisksRevision,
+        expectedRiskRevision: normalized.expectedRiskRevision,
+        expectedTeamRevision: normalized.expectedTeamRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        command: projectRiskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          'owner-project-risk-revise',
+          occurredAt,
+        ),
+      })
+      return this.options.repository.commitProjectRiskRevision(mutation, operationSignal)
+    })
+  }
+
+  /** Append one explicit disposition transition; no task adapter is consulted. */
+  transitionProjectRisk(
+    request: TransitionProjectRiskRequest,
+    signal: AbortSignal,
+  ): Promise<TransitionProjectRiskResult> {
+    return this.execute(async (lifetimeSignal) => {
+      requireSignal(signal, 'transitionProjectRisk')
+      const operationSignal = AbortSignal.any([signal, lifetimeSignal])
+      const scope = await this.options.authorization.require(
+        'workbench.project.risk.write',
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      const normalized = validateTransitionProjectRiskRequest(request)
+      const replayQuery: WorkbenchProjectRiskReplayQuery = Object.freeze({
+        mode: 'transition',
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        actorId: scope.ownerId,
+        projectId: normalized.projectId,
+        riskId: normalized.riskId,
+        transition: normalized.transition,
+        expectedRisksRevision: normalized.expectedRisksRevision,
+        expectedRiskRevision: normalized.expectedRiskRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        idempotencyKey: normalized.idempotencyKey,
+        causationId: normalized.causationId,
+        reason: 'owner-project-risk-transition',
+      })
+      const replay = await this.options.repository.replayProjectRiskCommand(
+        replayQuery,
+        operationSignal,
+      )
+      throwIfCancelled(operationSignal)
+      if (replay !== null) return replay as TransitionProjectRiskResult
+      const detail = await this.options.repository.readProject(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      if (detail === null) return projectRiskProjectMissing(normalized.projectId)
+      const current = await this.options.repository.readProjectRisks(Object.freeze({
+        organizationId: scope.organizationId,
+        teamId: scope.teamId,
+        projectId: normalized.projectId,
+        selectedRiskId: normalized.riskId,
+      }), operationSignal)
+      throwIfCancelled(operationSignal)
+      if (current === null) return projectRiskProjectMissing(normalized.projectId)
+      const risk = current.selectedRisk?.risk
+      if (risk === undefined) return projectRiskFailure('risk-not-found', 'Project Risk was not found')
+      if (risk.status === 'closed') return projectRiskFailure('risk-closed', 'Closed Project Risks are terminal')
+      const occurredAt = commandInstant(this.options.clock)
+      const availableMitigationTaskCount = risk.treatmentTasks.filter(
+        link => link.role === 'mitigation' && link.availability === 'available',
+      ).length
+      let transition
+      try {
+        transition = normalizedRiskTransition(normalized.transition, {
+          currentStatus: risk.status,
+          currentNextReviewOn: risk.currentAssessment.nextReviewOn,
+          availableMitigationTaskCount,
+          occurredAt,
+          projectTimezone: detail.project.timezone,
+        })
+      } catch (error) {
+        if (!(error instanceof TypeError)) throw error
+        if (error.message.includes('overdue')) {
+          return projectRiskFailure('risk-review-overdue', 'Risk review is overdue')
+        }
+        if (error.message.includes('mitigation')) {
+          return projectRiskFailure(
+            'mitigation-task-required',
+            'Mitigate requires an available mitigation task',
+          )
+        }
+        return projectRiskFailure(
+          'invalid-status-transition',
+          'Project Risk status transition is not allowed',
+        )
+      }
+      const commandId = generatedId(this.options.ids.nextCommandId(), 'command')
+      const mutation: WorkbenchProjectRiskTransitionMutation = Object.freeze({
+        riskId: normalized.riskId,
+        transitionId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskTransitionId,
+          `risk-transition-${commandId}`,
+          'Project Risk transition',
+        ),
+        activityId: nextDeliverableIdentity(
+          this.options.ids.nextProjectRiskActivityId,
+          `risk-activity-${commandId}`,
+          'Project Risk Activity',
+        ),
+        projectId: normalized.projectId,
+        transition,
+        intent: normalized.transition,
+        expectedRisksRevision: normalized.expectedRisksRevision,
+        expectedRiskRevision: normalized.expectedRiskRevision,
+        expectedTaskRevision: normalized.expectedTaskRevision,
+        command: projectRiskCommand(
+          this.options.ids,
+          commandId,
+          scope,
+          normalized.idempotencyKey,
+          normalized.causationId,
+          'owner-project-risk-transition',
+          occurredAt,
+        ),
+      })
+      return this.options.repository.commitProjectRiskTransition(mutation, operationSignal)
     })
   }
 
@@ -5505,6 +5859,251 @@ async function requireIdenticalScopes(
     throw forbidden('Workbench authorization capabilities resolved to different scopes')
   }
   return left
+}
+
+function normalizeRiskPolicyInput<T>(operation: () => T, field: string): T {
+  try {
+    return operation()
+  } catch (error) {
+    if (error instanceof TypeError) throw badRequest(error.message, { field })
+    throw error
+  }
+}
+
+function validateProjectRisksQuery(value: ProjectRisksQuery) {
+  const record = exactRecord(value, 'projectRisks query', ['projectId'], [
+    'exposure', 'status', 'riskOwnerMemberId', 'triggerState', 'triggerContains',
+    'reviewFrom', 'reviewTo', 'selectedRiskId', 'beforeRiskSequence', 'riskLimit',
+    'beforeActivitySequence', 'activityLimit', 'beforeHistorySequence', 'historyLimit',
+  ])
+  const exposure = record.exposure
+  if (exposure !== undefined && exposure !== 'low' && exposure !== 'medium' && exposure !== 'high') {
+    throw badRequest('exposure is not supported', { field: 'exposure' })
+  }
+  const status = record.status
+  if (status !== undefined && status !== 'research' && status !== 'watch'
+    && status !== 'mitigate' && status !== 'accept' && status !== 'closed') {
+    throw badRequest('status is not supported', { field: 'status' })
+  }
+  const triggerState = record.triggerState
+  if (triggerState !== undefined && triggerState !== 'unknown'
+    && triggerState !== 'not-met' && triggerState !== 'met') {
+    throw badRequest('triggerState is not supported', { field: 'triggerState' })
+  }
+  const triggerContains = record.triggerContains === undefined
+    ? undefined
+    : typeof record.triggerContains === 'string'
+      ? record.triggerContains.normalize('NFKC').trim().toLocaleLowerCase('und')
+      : (() => { throw badRequest('triggerContains must be a string', { field: 'triggerContains' }) })()
+  if (triggerContains !== undefined && [...triggerContains].length > 1_000) {
+    throw badRequest('triggerContains must not exceed 1000 characters', { field: 'triggerContains' })
+  }
+  const reviewFrom = record.reviewFrom === undefined
+    ? undefined
+    : strictRiskDate(record.reviewFrom, 'reviewFrom')
+  const reviewTo = record.reviewTo === undefined
+    ? undefined
+    : strictRiskDate(record.reviewTo, 'reviewTo')
+  if (reviewFrom !== undefined && reviewTo !== undefined && reviewFrom > reviewTo) {
+    throw badRequest('reviewFrom must not be after reviewTo', { field: 'reviewFrom' })
+  }
+  const cursor = (candidate: unknown, field: string) => candidate === undefined
+    ? undefined
+    : positiveRevision(candidate, field)
+  const limit = (candidate: unknown, field: string) => {
+    const normalized = cursor(candidate, field)
+    if (normalized !== undefined && normalized > 100) {
+      throw badRequest(`${field} must not exceed 100`, { field })
+    }
+    return normalized
+  }
+  const beforeRiskSequence = cursor(record.beforeRiskSequence, 'beforeRiskSequence')
+  const riskLimit = limit(record.riskLimit, 'riskLimit')
+  const beforeActivitySequence = cursor(record.beforeActivitySequence, 'beforeActivitySequence')
+  const activityLimit = limit(record.activityLimit, 'activityLimit')
+  const beforeHistorySequence = cursor(record.beforeHistorySequence, 'beforeHistorySequence')
+  const historyLimit = limit(record.historyLimit, 'historyLimit')
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    ...(exposure === undefined ? {} : { exposure }),
+    ...(status === undefined ? {} : { status }),
+    ...(record.riskOwnerMemberId === undefined
+      ? {}
+      : { riskOwnerMemberId: safeId(record.riskOwnerMemberId, 'riskOwnerMemberId') }),
+    ...(triggerState === undefined ? {} : { triggerState }),
+    ...(triggerContains === undefined || triggerContains.length === 0 ? {} : { triggerContains }),
+    ...(reviewFrom === undefined ? {} : { reviewFrom }),
+    ...(reviewTo === undefined ? {} : { reviewTo }),
+    ...(record.selectedRiskId === undefined
+      ? {}
+      : { selectedRiskId: safeId(record.selectedRiskId, 'selectedRiskId') }),
+    ...(beforeRiskSequence === undefined ? {} : { beforeRiskSequence }),
+    ...(riskLimit === undefined ? {} : { riskLimit }),
+    ...(beforeActivitySequence === undefined ? {} : { beforeActivitySequence }),
+    ...(activityLimit === undefined ? {} : { activityLimit }),
+    ...(beforeHistorySequence === undefined ? {} : { beforeHistorySequence }),
+    ...(historyLimit === undefined ? {} : { historyLimit }),
+  })
+}
+
+function strictRiskDate(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !STRICT_DATE.test(value)) {
+    throw badRequest(`${field} must be an ISO date`, { field })
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  if (!Number.isFinite(date.valueOf()) || date.toISOString().slice(0, 10) !== value) {
+    throw badRequest(`${field} must be a valid ISO date`, { field })
+  }
+  return value
+}
+
+function validateCreateProjectRiskRequest(value: CreateProjectRiskRequest) {
+  const record = exactRecord(value, 'createProjectRisk request', [
+    'projectId', 'assessment', 'expectedRisksRevision', 'expectedRiskRevision',
+    'expectedTeamRevision', 'expectedTaskRevision', 'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.expectedRiskRevision !== null) {
+    throw badRequest('expectedRiskRevision must be null for create', { field: 'expectedRiskRevision' })
+  }
+  if (record.reason !== 'owner-project-risk-create') {
+    throw badRequest('reason must be owner-project-risk-create', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    assessment: normalizeRiskPolicyInput(
+      () => normalizeProjectRiskAssessmentIntent(record.assessment),
+      'assessment',
+    ),
+    expectedRisksRevision: nonNegativeRevision(record.expectedRisksRevision, 'expectedRisksRevision'),
+    expectedRiskRevision: null,
+    expectedTeamRevision: nonNegativeRevision(record.expectedTeamRevision, 'expectedTeamRevision'),
+    expectedTaskRevision: nonNegativeRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-risk-create' as const,
+  })
+}
+
+function validateReviseProjectRiskRequest(value: ReviseProjectRiskRequest) {
+  const record = exactRecord(value, 'reviseProjectRisk request', [
+    'projectId', 'riskId', 'assessment', 'expectedRisksRevision', 'expectedRiskRevision',
+    'expectedTeamRevision', 'expectedTaskRevision', 'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.reason !== 'owner-project-risk-revise') {
+    throw badRequest('reason must be owner-project-risk-revise', { field: 'reason' })
+  }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    riskId: safeId(record.riskId, 'riskId'),
+    assessment: normalizeRiskPolicyInput(
+      () => normalizeProjectRiskAssessmentIntent(record.assessment),
+      'assessment',
+    ),
+    expectedRisksRevision: nonNegativeRevision(record.expectedRisksRevision, 'expectedRisksRevision'),
+    expectedRiskRevision: positiveRevision(record.expectedRiskRevision, 'expectedRiskRevision'),
+    expectedTeamRevision: nonNegativeRevision(record.expectedTeamRevision, 'expectedTeamRevision'),
+    expectedTaskRevision: nonNegativeRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-risk-revise' as const,
+  })
+}
+
+function validateTransitionProjectRiskRequest(value: TransitionProjectRiskRequest) {
+  const candidateStatus = typeof value === 'object' && value !== null
+    ? Reflect.get(value, 'status')
+    : undefined
+  const record = exactRecord(value, 'transitionProjectRisk request', [
+    'projectId', 'riskId', 'status', 'rationale',
+    ...(candidateStatus === 'closed' ? ['closureReason'] : []),
+    'expectedRisksRevision', 'expectedRiskRevision', 'expectedTaskRevision',
+    'idempotencyKey', 'causationId', 'reason',
+  ])
+  if (record.reason !== 'owner-project-risk-transition') {
+    throw badRequest('reason must be owner-project-risk-transition', { field: 'reason' })
+  }
+  const transitionValue = candidateStatus === 'closed'
+    ? { status: record.status, rationale: record.rationale, closureReason: record.closureReason }
+    : { status: record.status, rationale: record.rationale }
+  return Object.freeze({
+    projectId: safeId(record.projectId, 'projectId'),
+    riskId: safeId(record.riskId, 'riskId'),
+    transition: normalizeRiskPolicyInput(
+      () => normalizeProjectRiskTransitionIntent(transitionValue),
+      'transition',
+    ),
+    expectedRisksRevision: nonNegativeRevision(record.expectedRisksRevision, 'expectedRisksRevision'),
+    expectedRiskRevision: positiveRevision(record.expectedRiskRevision, 'expectedRiskRevision'),
+    expectedTaskRevision: nonNegativeRevision(record.expectedTaskRevision, 'expectedTaskRevision'),
+    idempotencyKey: validateCommandKey(record.idempotencyKey, 'idempotencyKey'),
+    causationId: validateCommandKey(record.causationId, 'causationId'),
+    reason: 'owner-project-risk-transition' as const,
+  })
+}
+
+function normalizedRiskAssessment(
+  value: ReturnType<typeof normalizeProjectRiskAssessmentIntent>,
+  options: Parameters<typeof normalizeProjectRiskAssessment>[1],
+) {
+  const { exposure: _exposure, ...draft } = value
+  return normalizeRiskPolicyInput(
+    () => normalizeProjectRiskAssessment(draft, options),
+    'assessment',
+  )
+}
+
+function normalizedRiskTransition(
+  value: ReturnType<typeof normalizeProjectRiskTransitionIntent>,
+  options: Parameters<typeof normalizeProjectRiskTransition>[1],
+) {
+  const draft = value.toStatus === 'closed'
+    ? { status: value.toStatus, rationale: value.rationale, closureReason: value.closureReason }
+    : { status: value.toStatus, rationale: value.rationale }
+  return normalizeProjectRiskTransition(draft, options)
+}
+
+function projectRiskCommand<R extends
+  | 'owner-project-risk-create'
+  | 'owner-project-risk-revise'
+  | 'owner-project-risk-transition'>(
+  ids: WorkbenchIdGenerator,
+  commandId: string,
+  scope: AuthorizedScope,
+  idempotencyKey: string,
+  causationId: string,
+  reason: R,
+  occurredAt: string,
+) {
+  return Object.freeze({
+    commandId,
+    auditEventId: generatedId(ids.nextAuditEventId(), 'audit event'),
+    outboxId: generatedId(ids.nextOutboxId(), 'outbox'),
+    idempotencyKey,
+    causationId,
+    reason,
+    actor: Object.freeze({
+      kind: 'owner' as const,
+      id: scope.ownerId,
+      organizationId: scope.organizationId,
+      teamId: scope.teamId,
+    }),
+    occurredAt,
+  })
+}
+
+function projectRiskFailure<T>(code: ProjectRiskConflict['code'], message: string): T {
+  return Object.freeze({ ok: false, error: Object.freeze({ code, message }) }) as T
+}
+
+function projectRiskProjectMissing<T>(projectId: string): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found' as const,
+      message: 'Workbench Project was not found in the authorized scope',
+      projectId,
+    }),
+  }) as T
 }
 
 function validateProjectDeliverablesQuery(

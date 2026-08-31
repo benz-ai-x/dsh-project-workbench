@@ -2991,6 +2991,10 @@ export type WorkbenchProjectDeliverableReason =
   | 'owner-deliverable-acceptance-approve'
   | 'owner-deliverable-acceptance-reject'
   | 'owner-deliverable-acceptance-needs-changes'
+export type WorkbenchProjectRiskReason =
+  | 'owner-project-risk-create'
+  | 'owner-project-risk-revise'
+  | 'owner-project-risk-transition'
 export type WorkbenchCommandReason =
   | WorkbenchStatusChangeReason
   | WorkbenchProjectCreateReason
@@ -3000,6 +3004,7 @@ export type WorkbenchCommandReason =
   | WorkbenchFeishuTaskReason
   | WorkbenchProjectCalendarReason
   | WorkbenchProjectDeliverableReason
+  | WorkbenchProjectRiskReason
 export type WorkbenchAuditAction =
   | 'workbench.status.updated'
   | 'workbench.project.created'
@@ -3027,6 +3032,9 @@ export type WorkbenchAuditAction =
   | 'workbench.deliverable-acceptance.approved'
   | 'workbench.deliverable-acceptance.rejected'
   | 'workbench.deliverable-acceptance.needs-changes'
+  | 'workbench.project-risk.created'
+  | 'workbench.project-risk.revised'
+  | 'workbench.project-risk.transitioned'
 export type WorkbenchAuditObjectType =
   | 'workbench-status'
   | 'project'
@@ -3041,6 +3049,7 @@ export type WorkbenchAuditObjectType =
   | 'project-milestone'
   | 'project-deliverable'
   | 'deliverable-acceptance-request'
+  | 'project-risk'
 export type WorkbenchActivitySummaryCode =
   | 'status-revision-committed'
   | 'project-created-from-template'
@@ -3070,6 +3079,9 @@ export type WorkbenchActivitySummaryCode =
   | 'deliverable-acceptance-approved'
   | 'deliverable-acceptance-rejected'
   | 'deliverable-acceptance-needs-changes'
+  | 'project-risk-created'
+  | 'project-risk-revised'
+  | 'project-risk-transitioned'
 
 /** Browser-supplied Activity filters; omitted project means every visible scope. */
 export interface WorkbenchActivityFilter {

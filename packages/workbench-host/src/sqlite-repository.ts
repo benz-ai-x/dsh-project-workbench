@@ -13,6 +13,7 @@ import type {
   CreateProjectDeliverableResult,
   CreateProjectResult,
   CreateProjectMilestoneResult,
+  CreateProjectRiskResult,
   DecideSuggestedChangeResult,
   DecideDeliverableAcceptanceResult,
   DeliverableAcceptanceDecisionProjection,
@@ -57,6 +58,14 @@ import type {
   ProjectCalendarSchedule,
   ProjectMilestoneProjection,
   ProjectMilestonesProjection,
+  ProjectRiskActivityEntry,
+  ProjectRiskAssessmentProjection,
+  ProjectRiskConflict,
+  ProjectRiskHistoryEntry,
+  ProjectRiskMemberSnapshot,
+  ProjectRiskProjection,
+  ProjectRiskStatus,
+  ProjectRisksProjection,
   ProjectScheduleChangeProjection,
   ProjectMemberProjection,
   ProjectMemberStatus,
@@ -74,6 +83,7 @@ import type {
   ReconcileProjectCalendarResult,
   ReferenceFeishuTaskResult,
   RequestDeliverableAcceptanceResult,
+  ReviseProjectRiskResult,
   ReviewCenterProjection,
   ReviewCenterResultProjection,
   SetStatusResult,
@@ -82,6 +92,7 @@ import type {
   VerifyFeishuIdentityRouteResult,
   UpdateFeishuTaskResult,
   UpdateProjectMilestoneDateResult,
+  TransitionProjectRiskResult,
   SuggestedChangeDecisionMode,
   SuggestedChangeEvidenceProjection,
   SuggestedChangePersistedState,
@@ -120,6 +131,7 @@ import {
   deliverableAcceptanceReviewCenterProjection,
   projectDeliverablesProjection,
   projectMilestonesProjection,
+  projectRisksProjection,
   projectTasksProjection,
   reviewCenterProjection,
   statusResult,
@@ -170,6 +182,13 @@ import {
   type WorkbenchProjectDeliverableMutation,
   type WorkbenchProjectDeliverableReplayQuery,
   type WorkbenchProjectDeliverablesReadQuery,
+  type WorkbenchProjectRiskCommandResult,
+  type WorkbenchProjectRiskCreationMutation,
+  type WorkbenchProjectRiskMutation,
+  type WorkbenchProjectRiskReplayQuery,
+  type WorkbenchProjectRiskRevisionMutation,
+  type WorkbenchProjectRisksReadQuery,
+  type WorkbenchProjectRiskTransitionMutation,
   type WorkbenchProjectMilestoneMutation,
   type WorkbenchProjectMilestoneReplayQuery,
   type WorkbenchProjectMilestonesReadQuery,
@@ -191,6 +210,12 @@ import {
   type WorkbenchSuggestedChangeDecisionMutation,
   type WorkbenchSuggestedChangeProposalMutation,
 } from './repository.ts'
+import {
+  assertProjectRiskDependencyGraph,
+  normalizeProjectRiskAssessment,
+  normalizeProjectRiskTransition,
+  type NormalizedProjectRiskAssessment,
+} from './project-risk.ts'
 import type {
   WorkbenchFeishuCalendarEventSnapshot,
   WorkbenchFeishuCalendarRoute,
@@ -346,6 +371,17 @@ const DELIVERABLE_REQUEST_OBJECT_TYPE = 'deliverable-acceptance-request'
 const DELIVERABLE_CREATE_OUTBOX_TOPIC = 'workbench.project-deliverable.created.v1'
 const DELIVERABLE_REQUEST_OUTBOX_TOPIC = 'workbench.deliverable-acceptance.requested.v1'
 const DELIVERABLE_DECISION_OUTBOX_TOPIC = 'workbench.deliverable-acceptance.decided.v1'
+const PROJECT_RISK_CREATE_COMMAND_TYPE = 'workbench.project-risk.create'
+const PROJECT_RISK_REVISE_COMMAND_TYPE = 'workbench.project-risk.revise'
+const PROJECT_RISK_TRANSITION_COMMAND_TYPE = 'workbench.project-risk.transition'
+const PROJECT_RISK_CREATE_AUDIT_ACTION = 'workbench.project-risk.created'
+const PROJECT_RISK_REVISE_AUDIT_ACTION = 'workbench.project-risk.revised'
+const PROJECT_RISK_TRANSITION_AUDIT_ACTION = 'workbench.project-risk.transitioned'
+const PROJECT_RISK_CREATE_SUMMARY = 'project-risk-created'
+const PROJECT_RISK_REVISE_SUMMARY = 'project-risk-revised'
+const PROJECT_RISK_TRANSITION_SUMMARY = 'project-risk-transitioned'
+const PROJECT_RISK_OBJECT_TYPE = 'project-risk'
+const PROJECT_RISK_OUTBOX_TOPIC = 'workbench.project-risk.committed.v1'
 const MAX_REVIEW_CENTER_LIMIT = 50
 const MAX_SUGGESTED_CHANGE_EVIDENCE = 20
 const MAX_SUGGESTED_CHANGE_FEEDBACK_LENGTH = 2_000
@@ -377,6 +413,10 @@ const MAX_DELIVERABLE_CRITERIA = 20
 const MAX_DELIVERABLE_TASKS = 50
 const MAX_DELIVERABLE_CANDIDATES = 20
 const MAX_DELIVERABLE_ACTIVITY_LIMIT = 100
+const MAX_PROJECT_RISKS = 500
+const MAX_PROJECT_RISK_PAGE_LIMIT = 100
+const MAX_PROJECT_RISK_ACTIVITY_LIMIT = 100
+const MAX_PROJECT_RISK_HISTORY_LIMIT = 100
 
 export type WorkbenchJournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
@@ -878,6 +918,94 @@ interface DeliverableActivityRow {
   readonly occurred_at: string
 }
 
+interface ProjectRiskHeadRow {
+  readonly project_id: string
+  readonly organization_id: string
+  readonly team_id: string
+  readonly revision: number
+  readonly next_risk_sequence: number
+  readonly next_activity_sequence: number
+  readonly updated_at: string
+}
+
+interface ProjectRiskRow {
+  readonly id: string
+  readonly project_id: string
+  readonly sequence: number
+  readonly revision: number
+  readonly status: string
+  readonly closure_reason: string | null
+  readonly current_assessment_id: string
+  readonly next_assessment_sequence: number
+  readonly next_transition_sequence: number
+  readonly next_history_sequence: number
+  readonly creation_command_id: string
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface ProjectRiskAssessmentRow {
+  readonly id: string
+  readonly project_id: string
+  readonly risk_id: string
+  readonly sequence: number
+  readonly history_sequence: number
+  readonly assessment_json: string
+  readonly assessment_digest: string
+  readonly category: string
+  readonly trigger_statement: string
+  readonly trigger_state: string
+  readonly trigger_observed_at: string | null
+  readonly exposure_level: string
+  readonly accountable_member_id: string
+  readonly assessment_horizon_end: string
+  readonly next_review_on: string
+  readonly actor_kind: string
+  readonly actor_id: string
+  readonly causation_id: string
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly assessed_at: string
+}
+
+interface ProjectRiskTransitionRow {
+  readonly id: string
+  readonly project_id: string
+  readonly risk_id: string
+  readonly sequence: number
+  readonly history_sequence: number
+  readonly from_status: string
+  readonly to_status: string
+  readonly rationale: string
+  readonly closure_reason: string | null
+  readonly actor_kind: string
+  readonly actor_id: string
+  readonly causation_id: string
+  readonly command_id: string
+  readonly audit_event_id: string
+  readonly occurred_at: string
+}
+
+interface ProjectRiskActivityRow {
+  readonly project_id: string
+  readonly sequence: number
+  readonly id: string
+  readonly risk_id: string
+  readonly risk_revision: number
+  readonly action: string
+  readonly assessment_id: string | null
+  readonly transition_id: string | null
+  readonly from_status: string | null
+  readonly to_status: string
+  readonly rationale: string | null
+  readonly closure_reason: string | null
+  readonly actor_kind: string
+  readonly actor_id: string
+  readonly audit_event_id: string
+  readonly causation_id: string
+  readonly occurred_at: string
+}
+
 interface DeliverableCalendarEffectRow {
   readonly id: string
   readonly project_id: string
@@ -1220,6 +1348,8 @@ const REQUIRED_IMMUTABILITY_TRIGGERS = [
   'workbench_project_risk_no_delete',
   'workbench_project_risk_assessment_no_update',
   'workbench_project_risk_assessment_no_delete',
+  'workbench_project_risk_member_no_update',
+  'workbench_project_risk_member_no_delete',
   'workbench_project_risk_evidence_no_update',
   'workbench_project_risk_evidence_no_delete',
   'workbench_project_risk_dependency_no_update',
@@ -1899,7 +2029,8 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
       }
       if (mutation.status === 'inactive'
         && (isMemberInCurrentResponsibility(database, head, mutation.memberId)
-          || isMemberInOpenDeliverable(database, mutation.projectId, mutation.memberId))) {
+          || isMemberInOpenDeliverable(database, mutation.projectId, mutation.memberId)
+          || isMemberInActiveProjectRisk(database, mutation.projectId, mutation.memberId))) {
         database.exec('ROLLBACK')
         began = false
         return projectTeamCommandResult({
@@ -4848,6 +4979,50 @@ export class SqliteWorkbenchRepository implements WorkbenchRepository {
   ): Promise<DecideDeliverableAcceptanceResult> {
     throwIfAborted(signal)
     return commitDeliverableAcceptanceDecision(this.requireDatabase(), mutation, signal)
+  }
+
+  async readProjectRisks(
+    query: WorkbenchProjectRisksReadQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectRisksProjection | null> {
+    throwIfAborted(signal)
+    const value = readProjectRisksProjection(this.requireDatabase(), query)
+    throwIfAborted(signal)
+    return value === null ? null : projectRisksProjection(value)
+  }
+
+  async replayProjectRiskCommand(
+    query: WorkbenchProjectRiskReplayQuery,
+    signal: AbortSignal,
+  ): Promise<WorkbenchProjectRiskCommandResult | null> {
+    throwIfAborted(signal)
+    const value = replayProjectRiskCommand(this.requireDatabase(), query)
+    throwIfAborted(signal)
+    return value
+  }
+
+  async commitProjectRiskCreation(
+    mutation: WorkbenchProjectRiskCreationMutation,
+    signal: AbortSignal,
+  ): Promise<CreateProjectRiskResult> {
+    throwIfAborted(signal)
+    return commitProjectRiskAssessment(this.requireDatabase(), mutation, signal)
+  }
+
+  async commitProjectRiskRevision(
+    mutation: WorkbenchProjectRiskRevisionMutation,
+    signal: AbortSignal,
+  ): Promise<ReviseProjectRiskResult> {
+    throwIfAborted(signal)
+    return commitProjectRiskAssessment(this.requireDatabase(), mutation, signal)
+  }
+
+  async commitProjectRiskTransition(
+    mutation: WorkbenchProjectRiskTransitionMutation,
+    signal: AbortSignal,
+  ): Promise<TransitionProjectRiskResult> {
+    throwIfAborted(signal)
+    return commitProjectRiskTransition(this.requireDatabase(), mutation, signal)
   }
 
   async readActivity(
@@ -8115,6 +8290,19 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
         FOREIGN KEY (assessment_id) REFERENCES workbench_project_risk_assessment (id)
       ) STRICT, WITHOUT ROWID;
 
+      CREATE TABLE workbench_project_risk_assessment_member (
+        assessment_id TEXT NOT NULL CHECK (length(assessment_id) BETWEEN 1 AND 128),
+        role TEXT NOT NULL CHECK (role IN ('accountable', 'contributor', 'human-sponsor')),
+        ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+        member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 1 AND 128),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
+        kind TEXT NOT NULL CHECK (kind IN ('human', 'agent')),
+        PRIMARY KEY (assessment_id, role, ordinal),
+        UNIQUE (assessment_id, role, member_id),
+        FOREIGN KEY (assessment_id) REFERENCES workbench_project_risk_assessment (id),
+        FOREIGN KEY (member_id) REFERENCES workbench_project_member (id)
+      ) STRICT, WITHOUT ROWID;
+
       CREATE TABLE workbench_project_risk_dependency (
         assessment_id TEXT NOT NULL CHECK (length(assessment_id) BETWEEN 1 AND 128),
         risk_id TEXT NOT NULL CHECK (length(risk_id) BETWEEN 1 AND 128),
@@ -8208,6 +8396,8 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
         ON workbench_project_risk_dependency (depends_on_risk_id, risk_id);
       CREATE INDEX workbench_project_risk_task_use
         ON workbench_project_risk_task (task_guid, role, assessment_id);
+      CREATE INDEX workbench_project_risk_member_use
+        ON workbench_project_risk_assessment_member (member_id, assessment_id);
 
       CREATE TRIGGER workbench_project_risk_head_scope_no_update BEFORE UPDATE OF
         project_id, organization_id, team_id ON workbench_project_risk_head
@@ -8227,6 +8417,12 @@ function applyMigration(database: DatabaseSync, targetVersion: number): void {
       CREATE TRIGGER workbench_project_risk_assessment_no_delete
         BEFORE DELETE ON workbench_project_risk_assessment
       BEGIN SELECT RAISE(ABORT, 'workbench Project Risk assessments cannot be deleted'); END;
+      CREATE TRIGGER workbench_project_risk_member_no_update
+        BEFORE UPDATE ON workbench_project_risk_assessment_member
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk responsibility is immutable'); END;
+      CREATE TRIGGER workbench_project_risk_member_no_delete
+        BEFORE DELETE ON workbench_project_risk_assessment_member
+      BEGIN SELECT RAISE(ABORT, 'workbench Project Risk responsibility cannot be deleted'); END;
       CREATE TRIGGER workbench_project_risk_evidence_no_update
         BEFORE UPDATE ON workbench_project_risk_evidence
       BEGIN SELECT RAISE(ABORT, 'workbench Project Risk evidence is immutable'); END;
@@ -8468,6 +8664,10 @@ function validateSchema(database: DatabaseSync): void {
   database.prepare(`
     SELECT assessment_id, ordinal, kind, reference_id
     FROM workbench_project_risk_evidence LIMIT 1
+  `)
+  database.prepare(`
+    SELECT assessment_id, role, ordinal, member_id, display_name, kind
+    FROM workbench_project_risk_assessment_member LIMIT 1
   `)
   database.prepare(`
     SELECT assessment_id, risk_id, depends_on_risk_id
@@ -11101,6 +11301,31 @@ function auditEventFromRow(row: AuditRow): AuditEvent {
       summary: { code: PROJECT_RESPONSIBILITY_SUMMARY, changedFields: Object.freeze(expectedFields) },
     }
   }
+  const riskVocabulary = storedProjectRiskVocabulary(row.command_type)
+  if (riskVocabulary !== null) {
+    const projectId = nullableString(row.project_id, 'Audit Project id')
+    if (projectId === null
+      || row.action !== riskVocabulary.auditAction
+      || row.reason_code !== riskVocabulary.reason
+      || row.object_type !== PROJECT_RISK_OBJECT_TYPE
+      || row.summary_code !== riskVocabulary.summaryCode
+      || changedFields.length !== riskVocabulary.changedFields.length
+      || changedFields.some((field, index) => field !== riskVocabulary.changedFields[index])) {
+      throw new Error('Workbench database contains unsupported Project Risk audit fields')
+    }
+    return {
+      ...common,
+      action: riskVocabulary.auditAction,
+      scope: { organizationId, teamId, projectId },
+      reason: { code: riskVocabulary.reason },
+      object: { type: PROJECT_RISK_OBJECT_TYPE, id: objectId, version: objectVersion },
+      command: { id: commandId, type: riskVocabulary.commandType },
+      summary: {
+        code: riskVocabulary.summaryCode,
+        changedFields: Object.freeze([...riskVocabulary.changedFields]),
+      },
+    }
+  }
   const calendarVocabulary = storedCalendarVocabulary(row.command_type)
   if (calendarVocabulary !== null) {
     const projectId = nullableString(row.project_id, 'Audit Project id')
@@ -12172,6 +12397,10 @@ function assertValidCommandReceipt(database: DatabaseSync, row: ReceiptIntegrity
     assertValidProjectResponsibilityReceipt(database, row)
     return
   }
+  if (storedProjectRiskVocabulary(row.command_type) !== null) {
+    assertValidProjectRiskReceipt(database, row)
+    return
+  }
   if (storedCalendarVocabulary(row.command_type) !== null) {
     assertValidCalendarReceipt(database, row)
     return
@@ -12221,6 +12450,99 @@ function assertValidDeliverableReceipt(row: ReceiptIntegrityRow): void {
   })
   if (row.outbox_payload_json !== expectedPayload) {
     throw new Error('Workbench Deliverable receipt does not match its privacy-safe Outbox intent')
+  }
+}
+
+function assertValidProjectRiskReceipt(database: DatabaseSync, row: ReceiptIntegrityRow): void {
+  const vocabulary = storedProjectRiskVocabulary(row.command_type)
+  if (vocabulary === null || row.audit_project_id === null
+    || row.audit_action !== vocabulary.auditAction
+    || row.audit_reason_code !== vocabulary.reason
+    || row.audit_object_type !== PROJECT_RISK_OBJECT_TYPE
+    || row.audit_summary_code !== vocabulary.summaryCode
+    || row.outbox_topic !== PROJECT_RISK_OUTBOX_TOPIC
+    || row.outbox_project_id !== row.audit_project_id
+    || row.outbox_object_type !== PROJECT_RISK_OBJECT_TYPE
+    || row.outbox_object_id !== row.audit_object_id) {
+    throw new Error('Workbench Project Risk receipt has mismatched durable vocabulary')
+  }
+  const receipt = decodeProjectRiskReceiptPointer(row.result_json, row)
+  if (canonicalizeJson(receipt) !== row.result_json
+    || receipt.mode !== vocabulary.mode
+    || receipt.projectId !== row.audit_project_id
+    || receipt.riskId !== row.audit_object_id
+    || receipt.riskRevision !== row.audit_object_version) {
+    throw new Error('Workbench Project Risk receipt pointer disagrees with its audit object')
+  }
+  const risk = projectRiskRow(database, receipt.projectId, receipt.riskId)
+  if (risk === null || risk.revision < receipt.riskRevision
+    || (vocabulary.mode === 'create' && risk.creation_command_id !== row.command_id)) {
+    throw new Error('Workbench Project Risk receipt lost its domain aggregate')
+  }
+
+  let status: ProjectRiskStatus
+  if (vocabulary.mode === 'transition') {
+    const transition = database.prepare(`
+      SELECT id, project_id, risk_id, sequence, history_sequence, from_status,
+        to_status, rationale, closure_reason, actor_kind, actor_id, causation_id,
+        command_id, audit_event_id, occurred_at
+      FROM workbench_project_risk_transition WHERE command_id = ?
+    `).get(row.command_id) as ProjectRiskTransitionRow | undefined
+    if (transition === undefined
+      || transition.project_id !== receipt.projectId
+      || transition.risk_id !== receipt.riskId
+      || transition.history_sequence !== receipt.riskRevision
+      || transition.audit_event_id !== row.audit_event_id
+      || transition.actor_id !== row.receipt_actor_id
+      || transition.causation_id !== row.audit_causation_id
+      || transition.occurred_at !== row.audit_occurred_at) {
+      throw new Error('Workbench Project Risk transition receipt lost its immutable transition')
+    }
+    status = transition.to_status as ProjectRiskStatus
+  } else {
+    const assessment = database.prepare(`
+      SELECT id, project_id, risk_id, sequence, history_sequence, assessment_json,
+        assessment_digest, category, trigger_statement, trigger_state,
+        trigger_observed_at, exposure_level, accountable_member_id,
+        assessment_horizon_end, next_review_on, actor_kind, actor_id, causation_id,
+        command_id, audit_event_id, assessed_at
+      FROM workbench_project_risk_assessment WHERE command_id = ?
+    `).get(row.command_id) as ProjectRiskAssessmentRow | undefined
+    if (assessment === undefined
+      || assessment.project_id !== receipt.projectId
+      || assessment.risk_id !== receipt.riskId
+      || assessment.history_sequence !== receipt.riskRevision
+      || (vocabulary.mode === 'create') !== (assessment.sequence === 1)
+      || assessment.audit_event_id !== row.audit_event_id
+      || assessment.actor_id !== row.receipt_actor_id
+      || assessment.causation_id !== row.audit_causation_id
+      || assessment.assessed_at !== row.audit_occurred_at) {
+      throw new Error('Workbench Project Risk assessment receipt lost its immutable assessment')
+    }
+    projectRiskAssessmentFromRow(assessment)
+    const priorTransition = database.prepare(`
+      SELECT to_status FROM workbench_project_risk_transition
+      WHERE risk_id = ? AND history_sequence < ?
+      ORDER BY history_sequence DESC LIMIT 1
+    `).get(receipt.riskId, receipt.riskRevision) as { readonly to_status: string } | undefined
+    status = (priorTransition?.to_status ?? 'research') as ProjectRiskStatus
+  }
+  if (!['research', 'watch', 'mitigate', 'accept', 'closed'].includes(status)) {
+    throw new Error('Workbench Project Risk receipt contains an invalid historical status')
+  }
+  const expectedPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: row.command_id,
+    auditEventId: row.audit_event_id,
+    projectId: receipt.projectId,
+    riskId: receipt.riskId,
+    riskRevision: receipt.riskRevision,
+    action: vocabulary.mode,
+    status,
+    causationId: row.audit_causation_id,
+  })
+  if (row.outbox_payload_json !== expectedPayload) {
+    throw new Error('Workbench Project Risk receipt does not match its redacted Outbox intent')
   }
 }
 
@@ -13442,6 +13764,24 @@ function activityItem(row: ActivityRow): WorkbenchActivityItem {
       summaryCode: PROJECT_RESPONSIBILITY_SUMMARY,
       objectType: PROJECT_RESPONSIBILITY_OBJECT_TYPE,
     }
+  } else if (row.command_type === PROJECT_RISK_CREATE_COMMAND_TYPE
+    || row.command_type === PROJECT_RISK_REVISE_COMMAND_TYPE
+    || row.command_type === PROJECT_RISK_TRANSITION_COMMAND_TYPE) {
+    const riskVocabulary = storedProjectRiskVocabulary(row.command_type)
+    if (riskVocabulary === null
+      || row.action !== riskVocabulary.auditAction
+      || row.reason_code !== riskVocabulary.reason
+      || row.object_type !== PROJECT_RISK_OBJECT_TYPE
+      || row.summary_code !== riskVocabulary.summaryCode
+      || projectId === null) {
+      throw new Error('Workbench database contains an unsupported Project Risk Activity row')
+    }
+    vocabulary = {
+      action: riskVocabulary.auditAction,
+      reason: riskVocabulary.reason,
+      summaryCode: riskVocabulary.summaryCode,
+      objectType: PROJECT_RISK_OBJECT_TYPE,
+    }
   } else {
     const calendarVocabulary = storedCalendarVocabulary(row.command_type)
     if (calendarVocabulary !== null) {
@@ -14164,6 +14504,57 @@ interface StoredFeishuVocabulary {
   readonly summaryCode: WorkbenchActivitySummaryCode
   readonly changedFields: readonly string[]
   readonly outboxTopic: string
+}
+
+interface StoredProjectRiskVocabulary {
+  readonly mode: ProjectRiskReceiptPointer['mode']
+  readonly commandType:
+    | typeof PROJECT_RISK_CREATE_COMMAND_TYPE
+    | typeof PROJECT_RISK_REVISE_COMMAND_TYPE
+    | typeof PROJECT_RISK_TRANSITION_COMMAND_TYPE
+  readonly auditAction:
+    | typeof PROJECT_RISK_CREATE_AUDIT_ACTION
+    | typeof PROJECT_RISK_REVISE_AUDIT_ACTION
+    | typeof PROJECT_RISK_TRANSITION_AUDIT_ACTION
+  readonly reason:
+    | 'owner-project-risk-create'
+    | 'owner-project-risk-revise'
+    | 'owner-project-risk-transition'
+  readonly summaryCode:
+    | typeof PROJECT_RISK_CREATE_SUMMARY
+    | typeof PROJECT_RISK_REVISE_SUMMARY
+    | typeof PROJECT_RISK_TRANSITION_SUMMARY
+  readonly changedFields: readonly ['riskRevision', 'status']
+}
+
+function storedProjectRiskVocabulary(commandType: string): StoredProjectRiskVocabulary | null {
+  switch (commandType) {
+    case PROJECT_RISK_CREATE_COMMAND_TYPE: return {
+      mode: 'create',
+      commandType: PROJECT_RISK_CREATE_COMMAND_TYPE,
+      auditAction: PROJECT_RISK_CREATE_AUDIT_ACTION,
+      reason: 'owner-project-risk-create',
+      summaryCode: PROJECT_RISK_CREATE_SUMMARY,
+      changedFields: ['riskRevision', 'status'],
+    }
+    case PROJECT_RISK_REVISE_COMMAND_TYPE: return {
+      mode: 'revise',
+      commandType: PROJECT_RISK_REVISE_COMMAND_TYPE,
+      auditAction: PROJECT_RISK_REVISE_AUDIT_ACTION,
+      reason: 'owner-project-risk-revise',
+      summaryCode: PROJECT_RISK_REVISE_SUMMARY,
+      changedFields: ['riskRevision', 'status'],
+    }
+    case PROJECT_RISK_TRANSITION_COMMAND_TYPE: return {
+      mode: 'transition',
+      commandType: PROJECT_RISK_TRANSITION_COMMAND_TYPE,
+      auditAction: PROJECT_RISK_TRANSITION_AUDIT_ACTION,
+      reason: 'owner-project-risk-transition',
+      summaryCode: PROJECT_RISK_TRANSITION_SUMMARY,
+      changedFields: ['riskRevision', 'status'],
+    }
+    default: return null
+  }
 }
 
 interface StoredFeishuTaskVocabulary {
@@ -24558,6 +24949,1455 @@ function finiteMutationNumber(value: number, label: string): void {
   if (typeof value !== 'number' || !Number.isFinite(value) || Object.is(value, -0)) {
     throw new TypeError(`${label} must be a finite number other than negative zero`)
   }
+}
+
+function readProjectRiskHead(
+  database: DatabaseSync,
+  query: Pick<WorkbenchProjectRisksReadQuery, 'organizationId' | 'teamId' | 'projectId'>,
+): ProjectRiskHeadRow | null {
+  const row = database.prepare(`
+    SELECT project_id, organization_id, team_id, revision,
+      next_risk_sequence, next_activity_sequence, updated_at
+    FROM workbench_project_risk_head
+    WHERE project_id = ? AND organization_id = ? AND team_id = ?
+  `).get(query.projectId, query.organizationId, query.teamId) as ProjectRiskHeadRow | undefined
+  if (row === undefined) return null
+  positiveInteger(row.revision, 'Project Risk aggregate revision', true)
+  positiveInteger(row.next_risk_sequence, 'Project Risk next sequence')
+  positiveInteger(row.next_activity_sequence, 'Project Risk next Activity sequence')
+  return row
+}
+
+function projectRiskRow(database: DatabaseSync, projectId: string, riskId: string): ProjectRiskRow | null {
+  const row = database.prepare(`
+    SELECT id, project_id, sequence, revision, status, closure_reason,
+      current_assessment_id, next_assessment_sequence, next_transition_sequence,
+      next_history_sequence, creation_command_id, created_at, updated_at
+    FROM workbench_project_risk WHERE project_id = ? AND id = ?
+  `).get(projectId, riskId) as ProjectRiskRow | undefined
+  return row ?? null
+}
+
+function projectRiskAssessmentRow(
+  database: DatabaseSync,
+  assessmentId: string,
+): ProjectRiskAssessmentRow {
+  const row = database.prepare(`
+    SELECT id, project_id, risk_id, sequence, history_sequence, assessment_json,
+      assessment_digest, category, trigger_statement, trigger_state, trigger_observed_at,
+      exposure_level, accountable_member_id, assessment_horizon_end, next_review_on,
+      actor_kind, actor_id, causation_id, command_id, audit_event_id, assessed_at
+    FROM workbench_project_risk_assessment WHERE id = ?
+  `).get(assessmentId) as ProjectRiskAssessmentRow | undefined
+  if (row === undefined) throw new Error('Workbench Project Risk lost its current assessment')
+  return row
+}
+
+function projectRiskAssessmentFromRow(row: ProjectRiskAssessmentRow): ProjectRiskAssessmentProjection {
+  let value: unknown
+  try {
+    value = JSON.parse(row.assessment_json)
+  } catch {
+    throw new Error('Workbench Project Risk assessment contains invalid JSON')
+  }
+  const record = objectValue(value, 'Stored Project Risk assessment')
+  if (record.assessmentId !== row.id
+    || record.sequence !== row.sequence
+    || record.digest !== row.assessment_digest
+    || record.category !== row.category
+    || record.assessedAt !== row.assessed_at) {
+    throw new Error('Workbench Project Risk assessment disagrees with its indexed facts')
+  }
+  return value as ProjectRiskAssessmentProjection
+}
+
+function projectRiskTreatmentTasks(
+  assessment: ProjectRiskAssessmentProjection,
+  tasks: readonly ProjectTaskProjection[],
+): ProjectRiskProjection['treatmentTasks'] {
+  const link = (role: 'mitigation' | 'contingency', taskGuid: string) => {
+    const task = tasks.find(candidate => candidate.taskGuid === taskGuid) ?? null
+    return Object.freeze({
+      role,
+      taskGuid,
+      availability: task === null ? 'unavailable' as const : 'available' as const,
+      task,
+    })
+  }
+  return Object.freeze([
+    ...assessment.mitigationTaskGuids.map(taskGuid => link('mitigation', taskGuid)),
+    ...assessment.contingencyTaskGuids.map(taskGuid => link('contingency', taskGuid)),
+  ])
+}
+
+function projectRiskFromRow(
+  database: DatabaseSync,
+  row: ProjectRiskRow,
+  tasks: readonly ProjectTaskProjection[],
+): ProjectRiskProjection {
+  const assessment = projectRiskAssessmentFromRow(
+    projectRiskAssessmentRow(database, row.current_assessment_id),
+  )
+  return Object.freeze({
+    riskId: row.id,
+    sequence: row.sequence,
+    revision: row.revision,
+    status: row.status as ProjectRiskStatus,
+    closureReason: row.closure_reason as ProjectRiskProjection['closureReason'],
+    currentAssessment: assessment,
+    treatmentTasks: projectRiskTreatmentTasks(assessment, tasks),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function normalizedTriggerSearch(value: string): string {
+  return value.normalize('NFKC').trim().toLocaleLowerCase('und')
+}
+
+function validateProjectRisksReadQuery(query: WorkbenchProjectRisksReadQuery): void {
+  validateBoundedReference(query.organizationId, 'Project Risk organization id')
+  validateBoundedReference(query.teamId, 'Project Risk team id')
+  validateBoundedReference(query.projectId, 'Project Risk Project id')
+  for (const [value, label, maximum] of [
+    [query.riskLimit, 'Risk limit', MAX_PROJECT_RISK_PAGE_LIMIT],
+    [query.activityLimit, 'Risk Activity limit', MAX_PROJECT_RISK_ACTIVITY_LIMIT],
+    [query.historyLimit, 'Risk history limit', MAX_PROJECT_RISK_HISTORY_LIMIT],
+  ] as const) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > maximum)) {
+      throw new TypeError(`${label} must be an integer from 1 to ${String(maximum)}`)
+    }
+  }
+  for (const [value, label] of [
+    [query.beforeRiskSequence, 'Risk cursor'],
+    [query.beforeActivitySequence, 'Risk Activity cursor'],
+    [query.beforeHistorySequence, 'Risk history cursor'],
+  ] as const) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+      throw new TypeError(`${label} must be a positive safe integer`)
+    }
+  }
+  if (query.reviewFrom !== undefined) validateRiskDate(query.reviewFrom, 'reviewFrom')
+  if (query.reviewTo !== undefined) validateRiskDate(query.reviewTo, 'reviewTo')
+  if (query.reviewFrom !== undefined && query.reviewTo !== undefined
+    && query.reviewFrom > query.reviewTo) {
+    throw new TypeError('reviewFrom must not be after reviewTo')
+  }
+  if (query.triggerContains !== undefined && normalizedTriggerSearch(query.triggerContains).length > 1_000) {
+    throw new TypeError('triggerContains is too long')
+  }
+}
+
+function readProjectRiskActivity(
+  database: DatabaseSync,
+  query: WorkbenchProjectRisksReadQuery,
+): Readonly<{ items: readonly ProjectRiskActivityEntry[]; next: number | null }> {
+  const limit = query.activityLimit ?? 50
+  const rows = database.prepare(`
+    SELECT project_id, sequence, id, risk_id, risk_revision, action,
+      assessment_id, transition_id, from_status, to_status, rationale,
+      closure_reason, actor_kind, actor_id, audit_event_id, causation_id, occurred_at
+    FROM workbench_project_risk_activity
+    WHERE project_id = ? AND (? IS NULL OR sequence < ?)
+    ORDER BY sequence DESC LIMIT ?
+  `).all(
+    query.projectId,
+    query.beforeActivitySequence ?? null,
+    query.beforeActivitySequence ?? null,
+    limit + 1,
+  ) as unknown as ProjectRiskActivityRow[]
+  const hasMore = rows.length > limit
+  const visible = hasMore ? rows.slice(0, limit) : rows
+  const items = Object.freeze(visible.map((row): ProjectRiskActivityEntry => Object.freeze({
+    sequence: row.sequence,
+    activityId: row.id,
+    riskId: row.risk_id,
+    riskRevision: row.risk_revision,
+    action: row.action as ProjectRiskActivityEntry['action'],
+    assessmentId: row.assessment_id,
+    transitionId: row.transition_id,
+    fromStatus: row.from_status as ProjectRiskActivityEntry['fromStatus'],
+    toStatus: row.to_status as ProjectRiskStatus,
+    rationale: row.rationale,
+    closureReason: row.closure_reason as ProjectRiskActivityEntry['closureReason'],
+    actor: Object.freeze({ kind: 'owner', id: row.actor_id }),
+    auditEventId: row.audit_event_id,
+    causationId: row.causation_id,
+    occurredAt: row.occurred_at,
+  })))
+  return Object.freeze({ items, next: hasMore ? items.at(-1)?.sequence ?? null : null })
+}
+
+function readProjectRiskHistory(
+  database: DatabaseSync,
+  risk: ProjectRiskRow,
+  query: WorkbenchProjectRisksReadQuery,
+): Readonly<{ items: readonly ProjectRiskHistoryEntry[]; next: number | null }> {
+  const limit = query.historyLimit ?? 50
+  const assessments = database.prepare(`
+    SELECT id, project_id, risk_id, sequence, history_sequence, assessment_json,
+      assessment_digest, category, trigger_statement, trigger_state, trigger_observed_at,
+      exposure_level, accountable_member_id, assessment_horizon_end, next_review_on,
+      actor_kind, actor_id, causation_id, command_id, audit_event_id, assessed_at
+    FROM workbench_project_risk_assessment
+    WHERE risk_id = ? AND (? IS NULL OR history_sequence < ?)
+    ORDER BY history_sequence DESC LIMIT ?
+  `).all(
+    risk.id,
+    query.beforeHistorySequence ?? null,
+    query.beforeHistorySequence ?? null,
+    limit + 1,
+  ) as unknown as ProjectRiskAssessmentRow[]
+  const transitions = database.prepare(`
+    SELECT id, project_id, risk_id, sequence, history_sequence, from_status,
+      to_status, rationale, closure_reason, actor_kind, actor_id, causation_id,
+      command_id, audit_event_id, occurred_at
+    FROM workbench_project_risk_transition
+    WHERE risk_id = ? AND (? IS NULL OR history_sequence < ?)
+    ORDER BY history_sequence DESC LIMIT ?
+  `).all(
+    risk.id,
+    query.beforeHistorySequence ?? null,
+    query.beforeHistorySequence ?? null,
+    limit + 1,
+  ) as unknown as ProjectRiskTransitionRow[]
+  const combined: ProjectRiskHistoryEntry[] = [
+    ...assessments.map((row): ProjectRiskHistoryEntry => Object.freeze({
+      kind: 'assessment',
+      sequence: row.history_sequence,
+      assessment: projectRiskAssessmentFromRow(row),
+      source: Object.freeze({ kind: 'audit-event', auditEventId: row.audit_event_id }),
+      actor: Object.freeze({ kind: 'owner', id: row.actor_id }),
+      causationId: row.causation_id,
+    })),
+    ...transitions.map((row): ProjectRiskHistoryEntry => Object.freeze({
+      kind: 'transition',
+      sequence: row.history_sequence,
+      transition: Object.freeze({
+        transitionId: row.id,
+        sequence: row.sequence,
+        fromStatus: row.from_status as ProjectRiskStatus,
+        toStatus: row.to_status as ProjectRiskStatus,
+        rationale: row.rationale,
+        closureReason: row.closure_reason as ProjectRiskProjection['closureReason'],
+        occurredAt: row.occurred_at,
+      }),
+      source: Object.freeze({ kind: 'audit-event', auditEventId: row.audit_event_id }),
+      actor: Object.freeze({ kind: 'owner', id: row.actor_id }),
+      causationId: row.causation_id,
+    })),
+  ]
+  combined.sort((left, right) => right.sequence - left.sequence)
+  const hasMore = combined.length > limit
+  const items = Object.freeze((hasMore ? combined.slice(0, limit) : combined))
+  return Object.freeze({ items, next: hasMore ? items.at(-1)?.sequence ?? null : null })
+}
+
+function readProjectRiskEvidenceOptions(
+  database: DatabaseSync,
+  projectId: string,
+): ProjectRisksProjection['evidenceOptions'] {
+  const auditRows = database.prepare(`
+    SELECT id, occurred_at, summary_code FROM workbench_audit_event
+    WHERE project_id = ? ORDER BY sequence DESC LIMIT 50
+  `).all(projectId) as unknown as Array<{
+    readonly id: string
+    readonly occurred_at: string
+    readonly summary_code: string
+  }>
+  const scheduleRows = database.prepare(`
+    SELECT id, occurred_at, source, changed_fields_json
+    FROM workbench_project_schedule_change
+    WHERE project_id = ? ORDER BY sequence DESC LIMIT 50
+  `).all(projectId) as unknown as Array<{
+    readonly id: string
+    readonly occurred_at: string
+    readonly source: string
+    readonly changed_fields_json: string
+  }>
+  return Object.freeze([
+    ...auditRows.map(row => Object.freeze({
+      kind: 'workbench-audit-event' as const,
+      auditEventId: row.id,
+      occurredAt: row.occurred_at,
+      summaryCode: row.summary_code as WorkbenchActivitySummaryCode,
+    })),
+    ...scheduleRows.map((row) => {
+      const changedFields = JSON.parse(row.changed_fields_json) as unknown
+      if (!Array.isArray(changedFields)
+        || changedFields.some(value => value !== 'start' && value !== 'end')) {
+        throw new Error('Workbench schedule evidence has invalid changed fields')
+      }
+      return Object.freeze({
+        kind: 'project-schedule-change' as const,
+        scheduleChangeId: row.id,
+        occurredAt: row.occurred_at,
+        source: row.source as ProjectScheduleChangeProjection['source'],
+        changedFields: Object.freeze([...changedFields]) as ProjectScheduleChangeProjection['changedFields'],
+      })
+    }),
+  ])
+}
+
+function readProjectRisksProjection(
+  database: DatabaseSync,
+  query: WorkbenchProjectRisksReadQuery,
+): ProjectRisksProjection | null {
+  validateProjectRisksReadQuery(query)
+  const head = readProjectRiskHead(database, query)
+  if (head === null) return null
+  const team = readProjectTeamSync(database, query)
+  const taskProjection = readProjectTasksProjection(database, query)
+  if (team === null || taskProjection === null) {
+    throw new Error('Workbench Project Risk lost a Team or Task dependency')
+  }
+  const rows = database.prepare(`
+    SELECT risk.id, risk.project_id, risk.sequence, risk.revision, risk.status,
+      risk.closure_reason, risk.current_assessment_id, risk.next_assessment_sequence,
+      risk.next_transition_sequence, risk.next_history_sequence,
+      risk.creation_command_id, risk.created_at, risk.updated_at
+    FROM workbench_project_risk AS risk
+    INNER JOIN workbench_project_risk_assessment AS assessment
+      ON assessment.id = risk.current_assessment_id
+    WHERE risk.project_id = ?
+      AND (? IS NULL OR risk.sequence < ?)
+      AND (? IS NULL OR assessment.exposure_level = ?)
+      AND (? IS NULL OR risk.status = ?)
+      AND (? IS NULL OR assessment.accountable_member_id = ?)
+      AND (? IS NULL OR assessment.trigger_state = ?)
+      AND (? IS NULL OR assessment.next_review_on >= ?)
+      AND (? IS NULL OR assessment.next_review_on <= ?)
+    ORDER BY risk.sequence DESC LIMIT ${MAX_PROJECT_RISKS + 1}
+  `).all(
+    query.projectId,
+    query.beforeRiskSequence ?? null, query.beforeRiskSequence ?? null,
+    query.exposure ?? null, query.exposure ?? null,
+    query.status ?? null, query.status ?? null,
+    query.riskOwnerMemberId ?? null, query.riskOwnerMemberId ?? null,
+    query.triggerState ?? null, query.triggerState ?? null,
+    query.reviewFrom ?? null, query.reviewFrom ?? null,
+    query.reviewTo ?? null, query.reviewTo ?? null,
+  ) as unknown as ProjectRiskRow[]
+  if (rows.length > MAX_PROJECT_RISKS) throw new Error('Workbench Project exceeds its Risk limit')
+  const triggerContains = query.triggerContains === undefined
+    ? ''
+    : normalizedTriggerSearch(query.triggerContains)
+  const searched = triggerContains.length === 0 ? rows : rows.filter((row) => {
+    const assessment = projectRiskAssessmentRow(database, row.current_assessment_id)
+    return normalizedTriggerSearch(assessment.trigger_statement).includes(triggerContains)
+  })
+  const limit = query.riskLimit ?? 50
+  const hasMore = searched.length > limit
+  const visibleRows = hasMore ? searched.slice(0, limit) : searched
+  const risks = Object.freeze(visibleRows.map(row =>
+    projectRiskFromRow(database, row, taskProjection.tasks)))
+  const selectedRow = query.selectedRiskId === undefined
+    ? null
+    : projectRiskRow(database, query.projectId, query.selectedRiskId)
+  const selectedRisk = selectedRow === null ? null : (() => {
+    const history = readProjectRiskHistory(database, selectedRow, query)
+    return Object.freeze({
+      risk: projectRiskFromRow(database, selectedRow, taskProjection.tasks),
+      history: history.items,
+      nextBeforeHistorySequence: history.next,
+    })
+  })()
+  const activity = readProjectRiskActivity(database, query)
+  const allRows = database.prepare(`
+    SELECT id, project_id, sequence, revision, status, closure_reason,
+      current_assessment_id, next_assessment_sequence, next_transition_sequence,
+      next_history_sequence, creation_command_id, created_at, updated_at
+    FROM workbench_project_risk WHERE project_id = ? ORDER BY sequence DESC
+  `).all(query.projectId) as unknown as ProjectRiskRow[]
+  return projectRisksProjection(Object.freeze({
+    projectId: query.projectId,
+    revision: head.revision,
+    teamRevision: team.teamRevision,
+    taskRevision: taskProjection.revision,
+    risks,
+    nextBeforeRiskSequence: hasMore ? risks.at(-1)?.sequence ?? null : null,
+    selectedRisk,
+    activity: activity.items,
+    nextBeforeActivitySequence: activity.next,
+    memberOptions: Object.freeze(team.members.map(member => Object.freeze({
+      memberId: member.memberId,
+      displayName: member.displayName,
+      kind: member.kind,
+      status: member.status,
+      requiresHumanSponsor: member.kind === 'agent'
+        || (member.kind === 'human' && member.identity.type === 'external'),
+      canBeHumanSponsor: member.kind === 'human' && member.status === 'active',
+    }))),
+    evidenceOptions: readProjectRiskEvidenceOptions(database, query.projectId),
+    dependencyOptions: Object.freeze(allRows.map((row) => {
+      const risk = projectRiskFromRow(database, row, taskProjection.tasks)
+      return Object.freeze({
+        riskId: row.id,
+        status: risk.status,
+        statement: risk.currentAssessment.statement,
+        exposure: risk.currentAssessment.exposure,
+        selectable: risk.status !== 'closed' && row.id !== query.selectedRiskId,
+      })
+    })),
+    taskOptions: taskProjection.tasks,
+  }))
+}
+
+function validateRiskDate(value: string, label: string): void {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    throw new TypeError(`${label} must be an ISO date`)
+  }
+  const [yearValue, monthValue, dayValue] = value.split('-')
+  const year = Number(yearValue)
+  const month = Number(monthValue)
+  const day = Number(dayValue)
+  const date = new Date(`${value}T00:00:00.000Z`)
+  if (year < 1 || date.getUTCFullYear() !== year
+    || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) {
+    throw new TypeError(`${label} must be a valid ISO date`)
+  }
+}
+
+type ProjectRiskReceiptPointer = Readonly<{
+  ok: true
+  mode: 'create' | 'revise' | 'transition'
+  projectId: string
+  riskId: string
+  riskRevision: number
+  receipt: Readonly<{ commandId: string; auditEventId: string; outboxId: string }>
+}>
+
+function projectRiskMode(
+  value: WorkbenchProjectRiskReplayQuery | WorkbenchProjectRiskMutation,
+): ProjectRiskReceiptPointer['mode'] {
+  if ('mode' in value) return value.mode
+  if (value.command.reason === 'owner-project-risk-create') return 'create'
+  if (value.command.reason === 'owner-project-risk-revise') return 'revise'
+  return 'transition'
+}
+
+function projectRiskCommandType(
+  mode: ProjectRiskReceiptPointer['mode'],
+): AuditEvent['command']['type'] {
+  if (mode === 'create') return PROJECT_RISK_CREATE_COMMAND_TYPE
+  if (mode === 'revise') return PROJECT_RISK_REVISE_COMMAND_TYPE
+  return PROJECT_RISK_TRANSITION_COMMAND_TYPE
+}
+
+function projectRiskRequestHash(
+  value: WorkbenchProjectRiskReplayQuery | WorkbenchProjectRiskMutation,
+): string {
+  const mode = projectRiskMode(value)
+  const intent = 'mode' in value
+    ? value.mode === 'transition' ? value.transition : value.assessment
+    : 'transition' in value ? value.intent : value.intent
+  return digest(canonicalizeJson({
+    schemaVersion: 'project-risk-command-v1',
+    mode,
+    projectId: value.projectId,
+    ...(mode !== 'create' && 'riskId' in value && value.riskId !== undefined
+      ? { riskId: value.riskId }
+      : {}),
+    intent,
+    expectedRisksRevision: value.expectedRisksRevision,
+    expectedRiskRevision: value.expectedRiskRevision,
+    ...('expectedTeamRevision' in value && value.expectedTeamRevision !== undefined
+      ? { expectedTeamRevision: value.expectedTeamRevision }
+      : {}),
+    expectedTaskRevision: value.expectedTaskRevision,
+    reason: 'mode' in value ? value.reason : value.command.reason,
+    causationId: 'mode' in value ? value.causationId : value.command.causationId,
+  }))
+}
+
+function riskIdempotencyConflict<T>(): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'idempotency-conflict' as const,
+      message: 'Workbench idempotency key was already used for different intent',
+    }),
+  }) as T
+}
+
+function riskConflict<T>(
+  code: ProjectRiskConflict['code'],
+  message: string,
+  revisions: Pick<ProjectRiskConflict, 'expectedRevision' | 'currentRevision'> = {},
+): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code, message, ...revisions }),
+  }) as T
+}
+
+function riskProjectNotFound<T>(projectId: string): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      code: 'project-not-found' as const,
+      message: 'Workbench Project was not found in the authorized scope',
+      projectId,
+    }),
+  }) as T
+}
+
+function decodeProjectRiskReceiptPointer(value: string, receipt: ReceiptRow): ProjectRiskReceiptPointer {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('Workbench Project Risk receipt contains invalid JSON')
+  }
+  if (canonicalizeJson(parsed) !== value) {
+    throw new Error('Workbench Project Risk receipt is not canonical JSON')
+  }
+  const record = objectValue(parsed, 'Project Risk receipt')
+  validateExactMutationKeys(
+    record,
+    'Project Risk receipt',
+    ['ok', 'mode', 'projectId', 'riskId', 'riskRevision', 'receipt'],
+  )
+  const identities = objectValue(record.receipt, 'Project Risk receipt identities')
+  validateExactMutationKeys(
+    identities,
+    'Project Risk receipt identities',
+    ['commandId', 'auditEventId', 'outboxId'],
+  )
+  const pointer = Object.freeze({
+    ok: true as const,
+    mode: record.mode as ProjectRiskReceiptPointer['mode'],
+    projectId: boundedReference(record.projectId, 'Receipt Project id'),
+    riskId: boundedReference(record.riskId, 'Receipt Risk id'),
+    riskRevision: positiveInteger(record.riskRevision, 'Receipt Risk revision'),
+    receipt: Object.freeze({
+      commandId: boundedReference(identities.commandId, 'Receipt command id'),
+      auditEventId: boundedReference(identities.auditEventId, 'Receipt audit id'),
+      outboxId: boundedReference(identities.outboxId, 'Receipt Outbox id'),
+    }),
+  })
+  if (record.ok !== true
+    || !['create', 'revise', 'transition'].includes(pointer.mode)
+    || pointer.receipt.commandId !== receipt.command_id
+    || pointer.receipt.auditEventId !== receipt.audit_event_id
+    || pointer.receipt.outboxId !== receipt.outbox_id) {
+    throw new Error('Workbench Project Risk receipt identities are inconsistent')
+  }
+  return pointer
+}
+
+function projectRiskResultFromPointer(
+  database: DatabaseSync,
+  pointer: ProjectRiskReceiptPointer,
+  organizationId: string,
+  teamId: string,
+): WorkbenchProjectRiskCommandResult {
+  const value = readProjectRisksProjection(database, {
+    organizationId,
+    teamId,
+    projectId: pointer.projectId,
+    selectedRiskId: pointer.riskId,
+  })
+  if (value === null || value.selectedRisk === null) {
+    throw new Error('Workbench Project Risk receipt lost its domain projection')
+  }
+  if (value.selectedRisk.risk.revision < pointer.riskRevision) {
+    throw new Error('Workbench Project Risk receipt points past the aggregate revision')
+  }
+  return Object.freeze({
+    ok: true,
+    value,
+    risk: value.selectedRisk.risk,
+    receipt: pointer.receipt,
+  })
+}
+
+function replayProjectRiskCommand(
+  database: DatabaseSync,
+  query: WorkbenchProjectRiskReplayQuery,
+): WorkbenchProjectRiskCommandResult | null {
+  const keyHash = idempotencyKeyHash(query.idempotencyKey)
+  const receipt = database.prepare(`
+    SELECT command_type, request_hash, command_id, audit_event_id, outbox_id, result_json
+    FROM workbench_command_receipt
+    WHERE organization_id = ? AND actor_id = ? AND idempotency_key_hash = ?
+  `).get(query.organizationId, query.actorId, keyHash) as ReceiptRow | undefined
+  if (receipt === undefined) return null
+  const mode = query.mode
+  if (receipt.command_type !== projectRiskCommandType(mode)
+    || receipt.request_hash !== projectRiskRequestHash(query)) {
+    return riskIdempotencyConflict()
+  }
+  const pointer = decodeProjectRiskReceiptPointer(receipt.result_json, receipt)
+  if (pointer.mode !== mode || pointer.projectId !== query.projectId) {
+    throw new Error('Workbench Project Risk receipt pointer changed intent')
+  }
+  return projectRiskResultFromPointer(database, pointer, query.organizationId, query.teamId)
+}
+
+function projectRiskReplayFromMutation(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectRiskMutation,
+): WorkbenchProjectRiskCommandResult | null {
+  const mode = projectRiskMode(mutation)
+  const query = mode === 'transition'
+    ? Object.freeze({
+      mode,
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      actorId: mutation.command.actor.id,
+      projectId: mutation.projectId,
+      riskId: mutation.riskId,
+      transition: (mutation as WorkbenchProjectRiskTransitionMutation).intent,
+      expectedRisksRevision: mutation.expectedRisksRevision,
+      expectedRiskRevision: mutation.expectedRiskRevision as number,
+      expectedTaskRevision: mutation.expectedTaskRevision,
+      idempotencyKey: mutation.command.idempotencyKey,
+      causationId: mutation.command.causationId,
+      reason: 'owner-project-risk-transition' as const,
+    })
+    : Object.freeze({
+      mode,
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      actorId: mutation.command.actor.id,
+      projectId: mutation.projectId,
+      ...(mode === 'revise' ? { riskId: mutation.riskId } : {}),
+      assessment: (mutation as WorkbenchProjectRiskCreationMutation
+        | WorkbenchProjectRiskRevisionMutation).intent,
+      expectedRisksRevision: mutation.expectedRisksRevision,
+      expectedRiskRevision: mutation.expectedRiskRevision,
+      expectedTeamRevision: (mutation as WorkbenchProjectRiskCreationMutation
+        | WorkbenchProjectRiskRevisionMutation).expectedTeamRevision,
+      expectedTaskRevision: mutation.expectedTaskRevision,
+      idempotencyKey: mutation.command.idempotencyKey,
+      causationId: mutation.command.causationId,
+      reason: mode === 'create'
+        ? 'owner-project-risk-create' as const
+        : 'owner-project-risk-revise' as const,
+    })
+  return replayProjectRiskCommand(database, query as WorkbenchProjectRiskReplayQuery)
+}
+
+interface RiskResponsibilityPlan {
+  readonly accountable: ProjectRiskMemberSnapshot
+  readonly contributors: readonly ProjectRiskMemberSnapshot[]
+  readonly humanSponsor: ProjectRiskMemberSnapshot | null
+  readonly rows: readonly ProjectMemberRow[]
+}
+
+function riskMemberSnapshot(row: ProjectMemberRow): ProjectRiskMemberSnapshot {
+  return Object.freeze({
+    memberId: row.id,
+    displayName: row.display_name,
+    kind: row.kind as ProjectRiskMemberSnapshot['kind'],
+  })
+}
+
+function validateProjectRiskResponsibility(
+  database: DatabaseSync,
+  projectId: string,
+  assessment: NormalizedProjectRiskAssessment,
+): RiskResponsibilityPlan | ProjectRiskConflict {
+  const ids = [
+    assessment.accountableMemberId,
+    ...assessment.contributorMemberIds,
+    ...(assessment.humanSponsorMemberId === null ? [] : [assessment.humanSponsorMemberId]),
+  ]
+  const rows: ProjectMemberRow[] = []
+  for (const memberId of ids) {
+    const row = readProjectMember(database, projectId, memberId)
+    if (row === null) return Object.freeze({ code: 'member-not-found', message: 'A referenced Project member was not found' })
+    if (row.status !== 'active') return Object.freeze({ code: 'member-inactive', message: 'A referenced Project member is inactive' })
+    rows.push(row)
+  }
+  const accountable = rows[0]
+  if (accountable === undefined) throw new Error('Workbench Risk Accountable disappeared')
+  const sponsor = assessment.humanSponsorMemberId === null
+    ? null
+    : rows.find(row => row.id === assessment.humanSponsorMemberId) ?? null
+  const sponsorRequired = accountable.kind === 'agent' || accountable.identity_type === 'external'
+  if (sponsorRequired && sponsor === null) {
+    return Object.freeze({ code: 'human-sponsor-required', message: 'Risk Accountable requires a Human Sponsor' })
+  }
+  if (!sponsorRequired && sponsor !== null) {
+    return Object.freeze({ code: 'human-sponsor-forbidden', message: 'This Risk Accountable cannot have a Human Sponsor' })
+  }
+  if (sponsor !== null && (sponsor.kind !== 'human' || sponsor.id === accountable.id)) {
+    return Object.freeze({ code: 'human-sponsor-invalid', message: 'Risk Human Sponsor must be a distinct active human' })
+  }
+  const contributors = assessment.contributorMemberIds.map((memberId) => {
+    const row = rows.find(candidate => candidate.id === memberId)
+    if (row === undefined) throw new Error('Workbench Risk Contributor disappeared')
+    return riskMemberSnapshot(row)
+  })
+  return Object.freeze({
+    accountable: riskMemberSnapshot(accountable),
+    contributors: Object.freeze(contributors),
+    humanSponsor: sponsor === null ? null : riskMemberSnapshot(sponsor),
+    rows: Object.freeze(rows),
+  })
+}
+
+function isRiskConflict(value: RiskResponsibilityPlan | ProjectRiskConflict): value is ProjectRiskConflict {
+  return 'code' in value
+}
+
+function validateProjectRiskEvidence(
+  database: DatabaseSync,
+  projectId: string,
+  assessment: NormalizedProjectRiskAssessment,
+): ProjectRiskConflict | null {
+  for (const evidence of assessment.evidence) {
+    if (evidence.kind === 'workbench-audit-event') {
+      const row = database.prepare(`
+        SELECT project_id FROM workbench_audit_event WHERE id = ?
+      `).get(evidence.auditEventId) as { readonly project_id: string | null } | undefined
+      if (row === undefined) return Object.freeze({ code: 'evidence-not-found', message: 'A Risk evidence fact was not found' })
+      if (row.project_id !== projectId) return Object.freeze({ code: 'evidence-project-mismatch', message: 'Risk evidence belongs to another Project' })
+    } else {
+      const row = database.prepare(`
+        SELECT project_id FROM workbench_project_schedule_change WHERE id = ?
+      `).get(evidence.scheduleChangeId) as { readonly project_id: string } | undefined
+      if (row === undefined) return Object.freeze({ code: 'evidence-not-found', message: 'A Risk evidence fact was not found' })
+      if (row.project_id !== projectId) return Object.freeze({ code: 'evidence-project-mismatch', message: 'Risk evidence belongs to another Project' })
+    }
+  }
+  return null
+}
+
+function validateProjectRiskDependencies(
+  database: DatabaseSync,
+  projectId: string,
+  riskId: string,
+  assessment: NormalizedProjectRiskAssessment,
+): ProjectRiskConflict | null {
+  for (const dependency of assessment.dependencies) {
+    if (dependency.riskId === riskId) return Object.freeze({ code: 'dependency-self-reference', message: 'A Risk cannot depend on itself' })
+    const row = database.prepare(`SELECT project_id FROM workbench_project_risk WHERE id = ?`).get(
+      dependency.riskId,
+    ) as { readonly project_id: string } | undefined
+    if (row === undefined) return Object.freeze({ code: 'dependency-not-found', message: 'A Risk dependency was not found' })
+    if (row.project_id !== projectId) return Object.freeze({ code: 'dependency-project-mismatch', message: 'A Risk dependency belongs to another Project' })
+  }
+  const graphRows = database.prepare(`
+    SELECT risk.id, dependency.depends_on_risk_id
+    FROM workbench_project_risk AS risk
+    LEFT JOIN workbench_project_risk_dependency AS dependency
+      ON dependency.assessment_id = risk.current_assessment_id
+    WHERE risk.project_id = ?
+  `).all(projectId) as unknown as Array<{
+    readonly id: string
+    readonly depends_on_risk_id: string | null
+  }>
+  const graph = new Map<string, string[]>()
+  for (const row of graphRows) {
+    const edges = graph.get(row.id) ?? []
+    if (row.depends_on_risk_id !== null) edges.push(row.depends_on_risk_id)
+    graph.set(row.id, edges)
+  }
+  try {
+    assertProjectRiskDependencyGraph(riskId, assessment.dependencies, graph)
+  } catch {
+    return Object.freeze({ code: 'dependency-cycle', message: 'Risk dependencies would create a cycle' })
+  }
+  return null
+}
+
+function validateProjectRiskTasks(
+  tasks: ProjectTasksProjection,
+  assessment: NormalizedProjectRiskAssessment,
+): ProjectRiskConflict | null {
+  const visible = new Set(tasks.tasks.map(task => task.taskGuid))
+  for (const taskGuid of [
+    ...assessment.mitigationTaskGuids,
+    ...assessment.contingencyTaskGuids,
+  ]) {
+    if (!visible.has(taskGuid)) return Object.freeze({ code: 'task-not-in-project', message: 'A treatment task is not currently visible in this Project' })
+  }
+  return null
+}
+
+function projectRiskTimezone(
+  database: DatabaseSync,
+  projectId: string,
+  organizationId: string,
+  teamId: string,
+): string | null {
+  const row = database.prepare(`
+    SELECT timezone FROM workbench_project
+    WHERE id = ? AND organization_id = ? AND team_id = ?
+  `).get(projectId, organizationId, teamId) as { readonly timezone: string } | undefined
+  return row?.timezone ?? null
+}
+
+function insertProjectRiskAssessment(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectRiskCreationMutation | WorkbenchProjectRiskRevisionMutation,
+  assessmentSequence: number,
+  historySequence: number,
+  responsibility: RiskResponsibilityPlan,
+): ProjectRiskAssessmentProjection {
+  const assessment: ProjectRiskAssessmentProjection = Object.freeze({
+    assessmentId: mutation.assessmentId,
+    sequence: assessmentSequence,
+    statement: mutation.assessment.statement,
+    category: mutation.assessment.category,
+    trigger: mutation.assessment.trigger,
+    probability: mutation.assessment.probability,
+    impact: mutation.assessment.impact,
+    confidence: mutation.assessment.confidence,
+    confidenceRationale: mutation.assessment.confidenceRationale,
+    assessmentHorizonEnd: mutation.assessment.assessmentHorizonEnd,
+    nextReviewOn: mutation.assessment.nextReviewOn,
+    assumptions: mutation.assessment.assumptions,
+    responsibility: Object.freeze({
+      accountable: responsibility.accountable,
+      contributors: responsibility.contributors,
+      humanSponsor: responsibility.humanSponsor,
+    }),
+    evidence: mutation.assessment.evidence,
+    dependencies: mutation.assessment.dependencies,
+    mitigationTaskGuids: mutation.assessment.mitigationTaskGuids,
+    contingencyTaskGuids: mutation.assessment.contingencyTaskGuids,
+    exposure: mutation.assessment.exposure,
+    digest: mutation.assessment.digest,
+    assessedAt: mutation.assessment.assessedAt,
+  })
+  const inserted = database.prepare(`
+    INSERT INTO workbench_project_risk_assessment (
+      id, project_id, risk_id, sequence, history_sequence, assessment_json,
+      assessment_digest, category, trigger_statement, trigger_state,
+      trigger_observed_at, exposure_level, accountable_member_id,
+      assessment_horizon_end, next_review_on, actor_kind, actor_id,
+      causation_id, command_id, audit_event_id, assessed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?, ?)
+  `).run(
+    mutation.assessmentId,
+    mutation.projectId,
+    mutation.riskId,
+    assessmentSequence,
+    historySequence,
+    canonicalizeJson(assessment),
+    assessment.digest,
+    assessment.category,
+    assessment.trigger.statement,
+    assessment.trigger.state,
+    assessment.trigger.observedAt,
+    assessment.exposure.level,
+    mutation.assessment.accountableMemberId,
+    assessment.assessmentHorizonEnd,
+    assessment.nextReviewOn,
+    mutation.command.actor.id,
+    mutation.command.causationId,
+    mutation.command.commandId,
+    mutation.command.auditEventId,
+    assessment.assessedAt,
+  )
+  if (inserted.changes !== 1) throw new Error('Workbench Project Risk assessment was not inserted')
+  const insertMember = database.prepare(`
+    INSERT INTO workbench_project_risk_assessment_member (
+      assessment_id, role, ordinal, member_id, display_name, kind
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `)
+  const members = [
+    ['accountable', 1, responsibility.accountable] as const,
+    ...responsibility.contributors.map((member, index) =>
+      ['contributor', index + 1, member] as const),
+    ...(responsibility.humanSponsor === null
+      ? []
+      : [['human-sponsor', 1, responsibility.humanSponsor] as const]),
+  ]
+  for (const [role, ordinal, member] of members) {
+    insertMember.run(mutation.assessmentId, role, ordinal, member.memberId, member.displayName, member.kind)
+  }
+  const insertEvidence = database.prepare(`
+    INSERT INTO workbench_project_risk_evidence (assessment_id, ordinal, kind, reference_id)
+    VALUES (?, ?, ?, ?)
+  `)
+  mutation.assessment.evidence.forEach((item, index) => insertEvidence.run(
+    mutation.assessmentId,
+    index + 1,
+    item.kind,
+    item.kind === 'workbench-audit-event' ? item.auditEventId : item.scheduleChangeId,
+  ))
+  const insertDependency = database.prepare(`
+    INSERT INTO workbench_project_risk_dependency (assessment_id, risk_id, depends_on_risk_id)
+    VALUES (?, ?, ?)
+  `)
+  for (const item of mutation.assessment.dependencies) {
+    insertDependency.run(mutation.assessmentId, mutation.riskId, item.riskId)
+  }
+  const insertTask = database.prepare(`
+    INSERT INTO workbench_project_risk_task (assessment_id, role, task_guid) VALUES (?, ?, ?)
+  `)
+  for (const taskGuid of mutation.assessment.mitigationTaskGuids) {
+    insertTask.run(mutation.assessmentId, 'mitigation', taskGuid)
+  }
+  for (const taskGuid of mutation.assessment.contingencyTaskGuids) {
+    insertTask.run(mutation.assessmentId, 'contingency', taskGuid)
+  }
+  return assessment
+}
+
+function insertProjectRiskLedger(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectRiskMutation,
+  mode: ProjectRiskReceiptPointer['mode'],
+  status: ProjectRiskStatus,
+  riskRevision: number,
+): ProjectRiskReceiptPointer {
+  const commandType = projectRiskCommandType(mode)
+  const action = mode === 'create'
+    ? PROJECT_RISK_CREATE_AUDIT_ACTION
+    : mode === 'revise' ? PROJECT_RISK_REVISE_AUDIT_ACTION : PROJECT_RISK_TRANSITION_AUDIT_ACTION
+  const summary = mode === 'create'
+    ? PROJECT_RISK_CREATE_SUMMARY
+    : mode === 'revise' ? PROJECT_RISK_REVISE_SUMMARY : PROJECT_RISK_TRANSITION_SUMMARY
+  const outboxPayload = canonicalizeJson({
+    schemaVersion: 1,
+    commandId: mutation.command.commandId,
+    auditEventId: mutation.command.auditEventId,
+    projectId: mutation.projectId,
+    riskId: mutation.riskId,
+    riskRevision,
+    action: mode,
+    status,
+    causationId: mutation.command.causationId,
+  })
+  const outbox = database.prepare(`
+    INSERT INTO workbench_outbox (
+      id, command_id, organization_id, topic, effect_key, project_id,
+      object_type, object_id, object_version, causation_id, payload_json,
+      state, attempt_count, created_at, updated_at, error_code
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NULL)
+  `).run(
+    mutation.command.outboxId,
+    mutation.command.commandId,
+    mutation.command.actor.organizationId,
+    PROJECT_RISK_OUTBOX_TOPIC,
+    `workbench:${mutation.command.outboxId}`,
+    mutation.projectId,
+    PROJECT_RISK_OBJECT_TYPE,
+    mutation.riskId,
+    riskRevision,
+    mutation.command.causationId,
+    outboxPayload,
+    mutation.command.occurredAt,
+    mutation.command.occurredAt,
+  )
+  if (outbox.changes !== 1) throw new Error('Workbench Project Risk Outbox was not inserted')
+  const head = readAuditHead(database)
+  const sequence = head.sequence + 1
+  const event = createAuditEvent({
+    sequence: String(sequence),
+    previousHash: auditHash(head.head_hash),
+    auditId: mutation.command.auditEventId,
+    occurredAt: mutation.command.occurredAt,
+    actor: { kind: 'owner', id: mutation.command.actor.id },
+    action,
+    scope: {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    },
+    reason: { code: mutation.command.reason },
+    object: { type: PROJECT_RISK_OBJECT_TYPE, id: mutation.riskId, version: String(riskRevision) },
+    command: { id: mutation.command.commandId, type: commandType },
+    causation: { id: mutation.command.causationId },
+    outbox: { id: mutation.command.outboxId, state: 'pending' },
+    outcome: 'committed',
+    summary: { code: summary, changedFields: ['riskRevision', 'status'] },
+  })
+  insertAuditEvent(database, event)
+  const advancedAudit = database.prepare(`
+    UPDATE workbench_audit_head SET sequence = ?, head_hash = ?
+    WHERE singleton = 1 AND sequence = ? AND head_hash = ?
+  `).run(sequence, event.eventHash, head.sequence, head.head_hash)
+  if (advancedAudit.changes !== 1) throw new Error('Workbench Project Risk audit head lost its CAS')
+  const pointer: ProjectRiskReceiptPointer = Object.freeze({
+    ok: true,
+    mode,
+    projectId: mutation.projectId,
+    riskId: mutation.riskId,
+    riskRevision,
+    receipt: Object.freeze({
+      commandId: mutation.command.commandId,
+      auditEventId: mutation.command.auditEventId,
+      outboxId: mutation.command.outboxId,
+    }),
+  })
+  const receipt = database.prepare(`
+    INSERT INTO workbench_command_receipt (
+      organization_id, actor_id, idempotency_key_hash, command_type,
+      request_hash, command_id, audit_event_id, outbox_id, result_json, committed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    mutation.command.actor.organizationId,
+    mutation.command.actor.id,
+    idempotencyKeyHash(mutation.command.idempotencyKey),
+    commandType,
+    projectRiskRequestHash(mutation),
+    mutation.command.commandId,
+    mutation.command.auditEventId,
+    mutation.command.outboxId,
+    canonicalizeJson(pointer),
+    mutation.command.occurredAt,
+  )
+  if (receipt.changes !== 1) throw new Error('Workbench Project Risk receipt was not inserted')
+  return pointer
+}
+
+function riskCommandResult<T extends WorkbenchProjectRiskCommandResult>(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectRiskMutation,
+  pointer: ProjectRiskReceiptPointer,
+): T {
+  return projectRiskResultFromPointer(
+    database,
+    pointer,
+    mutation.command.actor.organizationId,
+    mutation.command.actor.teamId,
+  ) as T
+}
+
+function commitProjectRiskAssessment<T extends CreateProjectRiskResult | ReviseProjectRiskResult>(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectRiskCreationMutation | WorkbenchProjectRiskRevisionMutation,
+  signal: AbortSignal,
+): T {
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    throwIfAborted(signal)
+    const replay = projectRiskReplayFromMutation(database, mutation)
+    if (replay !== null) {
+      database.exec('COMMIT')
+      began = false
+      return replay as T
+    }
+    const query = {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    }
+    const head = readProjectRiskHead(database, query)
+    if (head === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskProjectNotFound(mutation.projectId)
+    }
+    if (head.revision !== mutation.expectedRisksRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risks-revision-conflict', 'Project Risk aggregate revision changed', {
+        expectedRevision: mutation.expectedRisksRevision,
+        currentRevision: head.revision,
+      })
+    }
+    const team = readProjectTeamSync(database, query)
+    const tasks = readProjectTasksProjection(database, query)
+    if (team === null || tasks === null) throw new Error('Workbench Risk dependency heads disappeared')
+    if (team.teamRevision !== mutation.expectedTeamRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('team-revision-conflict', 'Project Team revision changed')
+    }
+    if (tasks.revision !== mutation.expectedTaskRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('task-projection-revision-conflict', 'Project Task projection revision changed')
+    }
+    const existing = projectRiskRow(database, mutation.projectId, mutation.riskId)
+    const creating = mutation.command.reason === 'owner-project-risk-create'
+    if (creating && existing !== null) throw new Error('Workbench generated duplicate Risk identity')
+    if (!creating && existing === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risk-not-found', 'Project Risk was not found')
+    }
+    if (!creating && existing?.status === 'closed') {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risk-closed', 'Closed Project Risks are terminal')
+    }
+    if (!creating && existing?.revision !== mutation.expectedRiskRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risk-revision-conflict', 'Project Risk revision changed', {
+        expectedRevision: mutation.expectedRiskRevision as number,
+        currentRevision: (existing as ProjectRiskRow).revision,
+      })
+    }
+    if (creating) {
+      const count = integerField(database.prepare(`
+        SELECT COUNT(*) AS count FROM workbench_project_risk WHERE project_id = ?
+      `).get(mutation.projectId), 'count')
+      if (count >= MAX_PROJECT_RISKS) {
+        database.exec('ROLLBACK')
+        began = false
+        return riskConflict('risk-limit-reached', 'Project Risk limit reached')
+      }
+    }
+    const timezone = projectRiskTimezone(
+      database,
+      mutation.projectId,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+    )
+    if (timezone === null) throw new Error('Workbench Risk Project timezone disappeared')
+    const previousTrigger = existing === null
+      ? null
+      : projectRiskAssessmentFromRow(
+        projectRiskAssessmentRow(database, existing.current_assessment_id),
+      ).trigger
+    const { exposure: _exposure, ...assessmentDraft } = mutation.intent
+    const normalized = normalizeProjectRiskAssessment(assessmentDraft, {
+      assessedAt: mutation.command.occurredAt,
+      projectTimezone: timezone,
+      previousTrigger,
+    })
+    if (canonicalizeJson(normalized) !== canonicalizeJson(mutation.assessment)) {
+      throw new Error('Workbench Project Risk assessment escaped Host policy')
+    }
+    const responsibility = validateProjectRiskResponsibility(database, mutation.projectId, normalized)
+    if (isRiskConflict(responsibility)) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict(responsibility.code, responsibility.message)
+    }
+    const evidenceConflict = validateProjectRiskEvidence(database, mutation.projectId, normalized)
+    if (evidenceConflict !== null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict(evidenceConflict.code, evidenceConflict.message)
+    }
+    const dependencyConflict = validateProjectRiskDependencies(
+      database,
+      mutation.projectId,
+      mutation.riskId,
+      normalized,
+    )
+    if (dependencyConflict !== null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict(dependencyConflict.code, dependencyConflict.message)
+    }
+    const taskConflict = validateProjectRiskTasks(tasks, normalized)
+    if (taskConflict !== null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict(taskConflict.code, taskConflict.message)
+    }
+    if (existing?.status === 'mitigate' && normalized.mitigationTaskGuids.length < 1) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('mitigation-task-required', 'Mitigate requires an available mitigation task')
+    }
+    const riskRevision = (existing?.revision ?? 0) + 1
+    const assessmentSequence = existing?.next_assessment_sequence ?? 1
+    const historySequence = existing?.next_history_sequence ?? 1
+    if (creating) {
+      database.prepare(`
+        INSERT INTO workbench_project_risk (
+          id, project_id, sequence, revision, status, closure_reason,
+          current_assessment_id, next_assessment_sequence, next_transition_sequence,
+          next_history_sequence, creation_command_id, created_at, updated_at
+        ) VALUES (?, ?, ?, 1, 'research', NULL, ?, 2, 1, 2, ?, ?, ?)
+      `).run(
+        mutation.riskId,
+        mutation.projectId,
+        head.next_risk_sequence,
+        mutation.assessmentId,
+        mutation.command.commandId,
+        mutation.command.occurredAt,
+        mutation.command.occurredAt,
+      )
+    }
+    insertProjectRiskAssessment(
+      database,
+      mutation,
+      assessmentSequence,
+      historySequence,
+      responsibility,
+    )
+    if (!creating) {
+      const updated = database.prepare(`
+        UPDATE workbench_project_risk SET revision = ?, current_assessment_id = ?,
+          next_assessment_sequence = ?, next_history_sequence = ?, updated_at = ?
+        WHERE id = ? AND revision = ? AND status <> 'closed'
+      `).run(
+        riskRevision,
+        mutation.assessmentId,
+        assessmentSequence + 1,
+        historySequence + 1,
+        mutation.command.occurredAt,
+        mutation.riskId,
+        (existing as ProjectRiskRow).revision,
+      )
+      if (updated.changes !== 1) throw new Error('Workbench Project Risk revision lost its CAS')
+    }
+    const action = creating ? 'risk-created' : 'risk-revised'
+    database.prepare(`
+      INSERT INTO workbench_project_risk_activity (
+        project_id, sequence, id, risk_id, risk_revision, action,
+        assessment_id, transition_id, from_status, to_status, rationale,
+        closure_reason, actor_kind, actor_id, audit_event_id, causation_id, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, 'owner', ?, ?, ?, ?)
+    `).run(
+      mutation.projectId,
+      head.next_activity_sequence,
+      mutation.activityId,
+      mutation.riskId,
+      riskRevision,
+      action,
+      mutation.assessmentId,
+      existing?.status ?? 'research',
+      mutation.command.actor.id,
+      mutation.command.auditEventId,
+      mutation.command.causationId,
+      mutation.command.occurredAt,
+    )
+    const advanced = database.prepare(`
+      UPDATE workbench_project_risk_head SET revision = ?, next_risk_sequence = ?,
+        next_activity_sequence = ?, updated_at = ?
+      WHERE project_id = ? AND revision = ?
+    `).run(
+      head.revision + 1,
+      creating ? head.next_risk_sequence + 1 : head.next_risk_sequence,
+      head.next_activity_sequence + 1,
+      mutation.command.occurredAt,
+      mutation.projectId,
+      head.revision,
+    )
+    if (advanced.changes !== 1) throw new Error('Workbench Project Risk head lost its CAS')
+    const pointer = insertProjectRiskLedger(
+      database,
+      mutation,
+      creating ? 'create' : 'revise',
+      existing?.status as ProjectRiskStatus | undefined ?? 'research',
+      riskRevision,
+    )
+    const result = riskCommandResult<T>(database, mutation, pointer)
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function commitProjectRiskTransition(
+  database: DatabaseSync,
+  mutation: WorkbenchProjectRiskTransitionMutation,
+  signal: AbortSignal,
+): TransitionProjectRiskResult {
+  let began = false
+  try {
+    database.exec('BEGIN IMMEDIATE')
+    began = true
+    throwIfAborted(signal)
+    const replay = projectRiskReplayFromMutation(database, mutation)
+    if (replay !== null) {
+      database.exec('COMMIT')
+      began = false
+      return replay as TransitionProjectRiskResult
+    }
+    const query = {
+      organizationId: mutation.command.actor.organizationId,
+      teamId: mutation.command.actor.teamId,
+      projectId: mutation.projectId,
+    }
+    const head = readProjectRiskHead(database, query)
+    if (head === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskProjectNotFound(mutation.projectId)
+    }
+    if (head.revision !== mutation.expectedRisksRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risks-revision-conflict', 'Project Risk aggregate revision changed', {
+        expectedRevision: mutation.expectedRisksRevision,
+        currentRevision: head.revision,
+      })
+    }
+    const row = projectRiskRow(database, mutation.projectId, mutation.riskId)
+    if (row === null) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risk-not-found', 'Project Risk was not found')
+    }
+    if (row.status === 'closed') {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risk-closed', 'Closed Project Risks are terminal')
+    }
+    if (row.revision !== mutation.expectedRiskRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('risk-revision-conflict', 'Project Risk revision changed', {
+        expectedRevision: mutation.expectedRiskRevision,
+        currentRevision: row.revision,
+      })
+    }
+    const tasks = readProjectTasksProjection(database, query)
+    if (tasks === null) throw new Error('Workbench Risk Task projection disappeared')
+    if (tasks.revision !== mutation.expectedTaskRevision) {
+      database.exec('ROLLBACK')
+      began = false
+      return riskConflict('task-projection-revision-conflict', 'Project Task projection revision changed')
+    }
+    const assessment = projectRiskAssessmentFromRow(
+      projectRiskAssessmentRow(database, row.current_assessment_id),
+    )
+    const availableMitigationTaskCount = assessment.mitigationTaskGuids.filter(
+      taskGuid => tasks.tasks.some(task => task.taskGuid === taskGuid),
+    ).length
+    const timezone = projectRiskTimezone(
+      database,
+      mutation.projectId,
+      mutation.command.actor.organizationId,
+      mutation.command.actor.teamId,
+    )
+    if (timezone === null) throw new Error('Workbench Risk Project timezone disappeared')
+    let normalized
+    try {
+      const transitionDraft = mutation.intent.toStatus === 'closed'
+        ? {
+          status: mutation.intent.toStatus,
+          rationale: mutation.intent.rationale,
+          closureReason: mutation.intent.closureReason,
+        }
+        : { status: mutation.intent.toStatus, rationale: mutation.intent.rationale }
+      normalized = normalizeProjectRiskTransition(transitionDraft, {
+        currentStatus: row.status as ProjectRiskStatus,
+        currentNextReviewOn: assessment.nextReviewOn,
+        availableMitigationTaskCount,
+        occurredAt: mutation.command.occurredAt,
+        projectTimezone: timezone,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      database.exec('ROLLBACK')
+      began = false
+      if (message.includes('overdue')) return riskConflict('risk-review-overdue', 'Risk review is overdue')
+      if (message.includes('mitigation')) return riskConflict('mitigation-task-required', 'Mitigate requires an available mitigation task')
+      return riskConflict('invalid-status-transition', 'Project Risk status transition is not allowed')
+    }
+    if (canonicalizeJson(normalized) !== canonicalizeJson(mutation.transition)) {
+      throw new Error('Workbench Project Risk transition escaped Host policy')
+    }
+    const riskRevision = row.revision + 1
+    const transitionSequence = row.next_transition_sequence
+    const historySequence = row.next_history_sequence
+    database.prepare(`
+      INSERT INTO workbench_project_risk_transition (
+        id, project_id, risk_id, sequence, history_sequence, from_status,
+        to_status, rationale, closure_reason, actor_kind, actor_id, causation_id,
+        command_id, audit_event_id, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?, ?)
+    `).run(
+      mutation.transitionId,
+      mutation.projectId,
+      mutation.riskId,
+      transitionSequence,
+      historySequence,
+      normalized.fromStatus,
+      normalized.toStatus,
+      normalized.rationale,
+      normalized.closureReason,
+      mutation.command.actor.id,
+      mutation.command.causationId,
+      mutation.command.commandId,
+      mutation.command.auditEventId,
+      normalized.occurredAt,
+    )
+    const updated = database.prepare(`
+      UPDATE workbench_project_risk SET revision = ?, status = ?, closure_reason = ?,
+        next_transition_sequence = ?, next_history_sequence = ?, updated_at = ?
+      WHERE id = ? AND revision = ? AND status = ?
+    `).run(
+      riskRevision,
+      normalized.toStatus,
+      normalized.closureReason,
+      transitionSequence + 1,
+      historySequence + 1,
+      mutation.command.occurredAt,
+      mutation.riskId,
+      row.revision,
+      row.status,
+    )
+    if (updated.changes !== 1) throw new Error('Workbench Project Risk transition lost its CAS')
+    database.prepare(`
+      INSERT INTO workbench_project_risk_activity (
+        project_id, sequence, id, risk_id, risk_revision, action,
+        assessment_id, transition_id, from_status, to_status, rationale,
+        closure_reason, actor_kind, actor_id, audit_event_id, causation_id, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, 'risk-transitioned', NULL, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?)
+    `).run(
+      mutation.projectId,
+      head.next_activity_sequence,
+      mutation.activityId,
+      mutation.riskId,
+      riskRevision,
+      mutation.transitionId,
+      normalized.fromStatus,
+      normalized.toStatus,
+      normalized.rationale,
+      normalized.closureReason,
+      mutation.command.actor.id,
+      mutation.command.auditEventId,
+      mutation.command.causationId,
+      normalized.occurredAt,
+    )
+    const advanced = database.prepare(`
+      UPDATE workbench_project_risk_head SET revision = ?, next_activity_sequence = ?, updated_at = ?
+      WHERE project_id = ? AND revision = ?
+    `).run(
+      head.revision + 1,
+      head.next_activity_sequence + 1,
+      mutation.command.occurredAt,
+      mutation.projectId,
+      head.revision,
+    )
+    if (advanced.changes !== 1) throw new Error('Workbench Project Risk head lost its CAS')
+    const pointer = insertProjectRiskLedger(
+      database,
+      mutation,
+      'transition',
+      normalized.toStatus,
+      riskRevision,
+    )
+    const result = riskCommandResult<TransitionProjectRiskResult>(database, mutation, pointer)
+    throwIfAborted(signal)
+    database.exec('COMMIT')
+    began = false
+    return result
+  } catch (error: unknown) {
+    if (began) rollback(database, error)
+    throw error
+  }
+}
+
+function isMemberInActiveProjectRisk(
+  database: DatabaseSync,
+  projectId: string,
+  memberId: string,
+): boolean {
+  const row = database.prepare(`
+    SELECT EXISTS (
+      SELECT 1 FROM workbench_project_risk AS risk
+      INNER JOIN workbench_project_risk_assessment_member AS member
+        ON member.assessment_id = risk.current_assessment_id
+      WHERE risk.project_id = ? AND risk.status <> 'closed' AND member.member_id = ?
+    ) AS present
+  `).get(projectId, memberId) as { readonly present: 0 | 1 } | undefined
+  if (row === undefined) throw new Error('Workbench Project Risk member-use query failed')
+  return row.present === 1
 }
 
 function finiteNumber(value: unknown, label: string): number {

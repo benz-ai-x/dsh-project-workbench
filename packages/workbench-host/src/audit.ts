@@ -77,6 +77,9 @@ export interface AuditCommandReference {
     | 'workbench.deliverable-acceptance.approve'
     | 'workbench.deliverable-acceptance.reject'
     | 'workbench.deliverable-acceptance.needs-changes'
+    | 'workbench.project-risk.create'
+    | 'workbench.project-risk.revise'
+    | 'workbench.project-risk.transition'
 }
 
 export interface AuditCausationReference {
@@ -454,6 +457,11 @@ function normalizeReason(value: unknown): AuditReason {
     && record.code !== 'owner-deliverable-acceptance-approve'
     && record.code !== 'owner-deliverable-acceptance-reject'
     && record.code !== 'owner-deliverable-acceptance-needs-changes') {
+    if (record.code === 'owner-project-risk-create'
+      || record.code === 'owner-project-risk-revise'
+      || record.code === 'owner-project-risk-transition') {
+      return Object.freeze({ code: record.code })
+    }
     throw new TypeError('Audit reason code is unsupported')
   }
   return Object.freeze({ code: record.code })
@@ -563,6 +571,9 @@ function auditAction(value: unknown): WorkbenchAuditAction {
     && value !== 'workbench.deliverable-acceptance.approved'
     && value !== 'workbench.deliverable-acceptance.rejected'
     && value !== 'workbench.deliverable-acceptance.needs-changes') {
+    if (value === 'workbench.project-risk.created'
+      || value === 'workbench.project-risk.revised'
+      || value === 'workbench.project-risk.transitioned') return value
     throw new TypeError('Audit action is unsupported')
   }
   return value
@@ -582,6 +593,7 @@ function auditObjectType(value: unknown): WorkbenchAuditObjectType {
     && value !== 'project-milestone'
     && value !== 'project-deliverable'
     && value !== 'deliverable-acceptance-request') {
+    if (value === 'project-risk') return value
     throw new TypeError('Audit object type is unsupported')
   }
   return value
@@ -614,6 +626,9 @@ function auditCommandType(value: unknown): AuditCommandReference['type'] {
     && value !== 'workbench.deliverable-acceptance.approve'
     && value !== 'workbench.deliverable-acceptance.reject'
     && value !== 'workbench.deliverable-acceptance.needs-changes') {
+    if (value === 'workbench.project-risk.create'
+      || value === 'workbench.project-risk.revise'
+      || value === 'workbench.project-risk.transition') return value
     throw new TypeError('Audit command type is unsupported')
   }
   return value
@@ -648,6 +663,9 @@ function auditSummaryCode(value: unknown): WorkbenchActivitySummaryCode {
     && value !== 'deliverable-acceptance-approved'
     && value !== 'deliverable-acceptance-rejected'
     && value !== 'deliverable-acceptance-needs-changes') {
+    if (value === 'project-risk-created'
+      || value === 'project-risk-revised'
+      || value === 'project-risk-transitioned') return value
     throw new TypeError('Audit summary code is unsupported')
   }
   return value
@@ -858,6 +876,27 @@ function assertCorrelatedVocabulary(
           && command.type === 'workbench.deliverable-acceptance.needs-changes'
           && summary.code === 'deliverable-acceptance-needs-changes'
           && exactChangedFields(summary, ['acceptanceDecision', 'deliverableState'])
+          && scope.projectId !== null
+      case 'workbench.project-risk.created':
+        return reason.code === 'owner-project-risk-create'
+          && object.type === 'project-risk'
+          && command.type === 'workbench.project-risk.create'
+          && summary.code === 'project-risk-created'
+          && exactChangedFields(summary, ['riskRevision', 'status'])
+          && scope.projectId !== null
+      case 'workbench.project-risk.revised':
+        return reason.code === 'owner-project-risk-revise'
+          && object.type === 'project-risk'
+          && command.type === 'workbench.project-risk.revise'
+          && summary.code === 'project-risk-revised'
+          && exactChangedFields(summary, ['riskRevision', 'status'])
+          && scope.projectId !== null
+      case 'workbench.project-risk.transitioned':
+        return reason.code === 'owner-project-risk-transition'
+          && object.type === 'project-risk'
+          && command.type === 'workbench.project-risk.transition'
+          && summary.code === 'project-risk-transitioned'
+          && exactChangedFields(summary, ['riskRevision', 'status'])
           && scope.projectId !== null
     }
   })()

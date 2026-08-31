@@ -105,6 +105,10 @@ describe('WorkbenchService', () => {
       { method: 'createProjectDeliverable', invocation: { kind: 'direct' } },
       { method: 'requestDeliverableAcceptance', invocation: { kind: 'direct' } },
       { method: 'decideDeliverableAcceptance', invocation: { kind: 'direct' } },
+      { method: 'projectRisks', invocation: { kind: 'direct' } },
+      { method: 'createProjectRisk', invocation: { kind: 'direct' } },
+      { method: 'reviseProjectRisk', invocation: { kind: 'direct' } },
+      { method: 'transitionProjectRisk', invocation: { kind: 'direct' } },
       { method: 'proposeProjectResponsibilityChange', invocation: { kind: 'direct' } },
       { method: 'decideSuggestedChange', invocation: { kind: 'direct' } },
     ])

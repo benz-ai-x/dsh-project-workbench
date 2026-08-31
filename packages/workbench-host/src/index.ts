@@ -17,6 +17,8 @@ import type {
   ConfigureFeishuTaskWorkflowResult,
   CreateProjectMilestoneRequest,
   CreateProjectMilestoneResult,
+  CreateProjectRiskRequest,
+  CreateProjectRiskResult,
   CreateProjectDeliverableRequest,
   CreateProjectDeliverableResult,
   CreateProjectRequest,
@@ -40,6 +42,8 @@ import type {
   ProjectDeliverablesQuery,
   ProjectMilestonesProjection,
   ProjectMilestonesQuery,
+  ProjectRisksProjection,
+  ProjectRisksQuery,
   ProjectQuery,
   ProjectStartFilter,
   ProjectStartProjection,
@@ -58,6 +62,8 @@ import type {
   ReferenceFeishuTaskResult,
   RequestDeliverableAcceptanceRequest,
   RequestDeliverableAcceptanceResult,
+  ReviseProjectRiskRequest,
+  ReviseProjectRiskResult,
   ReviewCenterQuery,
   ReviewCenterResultProjection,
   SetProjectMemberStatusRequest,
@@ -76,6 +82,8 @@ import type {
   UpdateFeishuTaskResult,
   UpdateProjectMilestoneDateRequest,
   UpdateProjectMilestoneDateResult,
+  TransitionProjectRiskRequest,
+  TransitionProjectRiskResult,
 } from './client.ts'
 import type { WorkbenchRepository } from './repository.ts'
 import {
@@ -646,6 +654,42 @@ export class WorkbenchService extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<DecideDeliverableAcceptanceResult> {
     return this.scenario.decideDeliverableAcceptance(request, signal)
+  }
+
+  /** Read one Project's Risk register, choices, and selected history. */
+  @Remote
+  projectRisks(
+    query: ProjectRisksQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectRisksProjection | null> {
+    return this.scenario.projectRisks(query, signal)
+  }
+
+  /** Create one research Risk with its complete first assessment. */
+  @Remote
+  createProjectRisk(
+    request: CreateProjectRiskRequest,
+    signal: AbortSignal,
+  ): Promise<CreateProjectRiskResult> {
+    return this.scenario.createProjectRisk(request, signal)
+  }
+
+  /** Append one complete immutable Risk assessment replacement. */
+  @Remote
+  reviseProjectRisk(
+    request: ReviseProjectRiskRequest,
+    signal: AbortSignal,
+  ): Promise<ReviseProjectRiskResult> {
+    return this.scenario.reviseProjectRisk(request, signal)
+  }
+
+  /** Append one explicit Risk lifecycle transition. */
+  @Remote
+  transitionProjectRisk(
+    request: TransitionProjectRiskRequest,
+    signal: AbortSignal,
+  ): Promise<TransitionProjectRiskResult> {
+    return this.scenario.transitionProjectRisk(request, signal)
   }
 
   /** Propose one complete Project Responsibility candidate against an exact Team base. */

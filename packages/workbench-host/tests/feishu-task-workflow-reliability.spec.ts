@@ -568,6 +568,7 @@ function dropV8WorkflowSchema(database: DatabaseSync): void {
     DROP TABLE workbench_project_risk_task;
     DROP TABLE workbench_project_risk_dependency;
     DROP TABLE workbench_project_risk_evidence;
+    DROP TABLE workbench_project_risk_assessment_member;
     DROP TABLE workbench_project_risk_assessment;
     DROP TABLE workbench_project_risk;
     DROP TABLE workbench_project_risk_head;

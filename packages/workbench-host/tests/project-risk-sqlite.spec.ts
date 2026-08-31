@@ -90,6 +90,10 @@ describe('Project Risk SQLite v11', () => {
         'workbench_project_risk_head',
         'workbench_project_risk',
         'workbench_project_risk_assessment',
+        'workbench_project_risk_assessment_member',
+        'workbench_project_risk_evidence',
+        'workbench_project_risk_dependency',
+        'workbench_project_risk_task',
         'workbench_project_risk_transition',
         'workbench_project_risk_activity',
       ]))
@@ -130,6 +134,7 @@ describe('Project Risk SQLite v11', () => {
       DROP TABLE workbench_project_risk_task;
       DROP TABLE workbench_project_risk_dependency;
       DROP TABLE workbench_project_risk_evidence;
+      DROP TABLE workbench_project_risk_assessment_member;
       DROP TABLE workbench_project_risk_assessment;
       DROP TABLE workbench_project_risk;
       DROP TABLE workbench_project_risk_head;
