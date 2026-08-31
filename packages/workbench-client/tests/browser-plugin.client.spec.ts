@@ -12,6 +12,7 @@ import type {
   OwnerAccessProjection,
   OwnerAuthResponse,
   ProjectDetailProjection,
+  ProjectDeliverablesProjection,
   ProjectMilestonesProjection,
   ProjectStartProjection,
   ProjectTasksProjection,
@@ -197,6 +198,22 @@ function unboundProjectMilestones(projectId: string): ProjectMilestonesProjectio
   }
 }
 
+function emptyProjectDeliverables(projectId: string): ProjectDeliverablesProjection {
+  return {
+    projectId,
+    revision: 0,
+    teamRevision: 0,
+    taskRevision: 0,
+    scheduleRevision: 0,
+    calendarBinding: null,
+    memberOptions: [],
+    taskOptions: [],
+    deliverables: [],
+    activity: [],
+    nextBeforeActivitySequence: null,
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
@@ -283,6 +300,13 @@ async function bench(options: {
     return Promise.resolve({
       ok: true as const,
       value: unboundProjectMilestones(query.projectId),
+    })
+  })
+  const projectDeliverablesGate = vi.fn((query: { projectId: string }) => {
+    requestOrder.push('deliverables')
+    return Promise.resolve({
+      ok: true as const,
+      value: emptyProjectDeliverables(query.projectId),
     })
   })
   const feishuConnectionCenterGate = vi.fn((_signal?: AbortSignal) => {
@@ -477,6 +501,19 @@ async function bench(options: {
       ok: true as const,
       value: { ok: false as const, error: { code: 'calendar-unbound' as const, message: 'unused' } },
     })),
+    projectDeliverables: projectDeliverablesGate,
+    createProjectDeliverable: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'calendar-unbound' as const, message: 'unused' } },
+    })),
+    requestDeliverableAcceptance: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'deliverable-not-found' as const, message: 'unused' } },
+    })),
+    decideDeliverableAcceptance: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'deliverable-not-found' as const, message: 'unused' } },
+    })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -524,6 +561,7 @@ async function bench(options: {
     reviewCenterGate,
     projectTasksGate,
     projectMilestonesGate,
+    projectDeliverablesGate,
     feishuConnectionCenterGate,
     authStateGate,
     auth,
@@ -644,7 +682,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     await b.fiber?.dispose()
   })
 
-  it('preserves same-Project Team/Review/Task/Milestone state across reconnect and clears it on Fiber disposal', async () => {
+  it('preserves same-Project Team/Review/Task/Milestone/Deliverable state across reconnect and clears it on Fiber disposal', async () => {
     const b = await bench()
     const entry = b.ctx.slots.entries('conversation')[0]
     const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
@@ -654,11 +692,13 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const review = controller.getSnapshot().review
     const projectTasks = controller.getSnapshot().projectTasks
     const projectMilestones = controller.getSnapshot().projectMilestones
+    const projectDeliverables = controller.getSnapshot().projectDeliverables
     expect(projects).not.toBeNull()
     expect(projectTeam).not.toBeNull()
     expect(review).not.toBeNull()
     expect(projectTasks).not.toBeNull()
     expect(projectMilestones).not.toBeNull()
+    expect(projectDeliverables).not.toBeNull()
 
     await projects?.openProject('project-1')
     await vi.waitFor(() => {
@@ -679,6 +719,11 @@ describe('Project Workbench browser plugin lifecycle', () => {
         phase: 'ready',
         selection: { projectId: 'project-1', projectName: 'Evidence Project' },
         projection: { projectId: 'project-1', binding: null },
+      })
+      expect(projectDeliverables?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+        projection: { projectId: 'project-1', deliverables: [] },
       })
     })
     projectTeam?.setMemberKind('agent')
@@ -712,6 +757,10 @@ describe('Project Workbench browser plugin lifecycle', () => {
       phase: 'stale',
       projection: { projectId: 'project-1', binding: null },
     })
+    expect(projectDeliverables?.getSnapshot()).toMatchObject({
+      phase: 'stale',
+      projection: { projectId: 'project-1', deliverables: [] },
+    })
     b.requestOrder.length = 0
     b.reconnect()
     await vi.waitFor(() => {
@@ -736,14 +785,21 @@ describe('Project Workbench browser plugin lifecycle', () => {
         selection: { projectId: 'project-1' },
         projection: { projectId: 'project-1', binding: null },
       })
+      expect(projectDeliverables?.getSnapshot()).toMatchObject({
+        phase: 'ready',
+        selection: { projectId: 'project-1' },
+        projection: { projectId: 'project-1', deliverables: [] },
+      })
     })
     expect(b.requestOrder).toEqual([
-      'auth', 'status', 'projects', 'team', 'review', 'feishu', 'tasks', 'milestones', 'activity',
+      'auth', 'status', 'projects', 'team', 'review', 'feishu', 'tasks', 'milestones',
+      'deliverables', 'activity',
     ])
     expect(b.projectTeamGate).toHaveBeenCalledTimes(2)
     expect(b.reviewCenterGate).toHaveBeenCalledTimes(2)
     expect(b.projectTasksGate).toHaveBeenCalledTimes(2)
     expect(b.projectMilestonesGate).toHaveBeenCalledTimes(2)
+    expect(b.projectDeliverablesGate).toHaveBeenCalledTimes(2)
 
     await b.fiber?.dispose()
     expect(projectTeam?.getSnapshot()).toMatchObject({
@@ -765,6 +821,9 @@ describe('Project Workbench browser plugin lifecycle', () => {
     })
     expect(projectMilestones?.getSnapshot()).toMatchObject({
       phase: 'idle', selection: null, projection: null,
+    })
+    expect(projectDeliverables?.getSnapshot()).toMatchObject({
+      phase: 'idle', selection: null, projection: null, candidateDrafts: {},
     })
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
   })
