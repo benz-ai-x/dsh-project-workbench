@@ -2890,6 +2890,9 @@ async function main() {
         assert.ok(layout.sessionHeight > 0 && layout.sessionHeight < MOBILE_VIEWPORT.height / 2)
         assert.ok(layout.statusHeight > 0, 'mobile session bar squeezed out the status surface')
         await captureVisual(firstJourney.page, '07-authenticated-mobile-375')
+        await mobileMilestones.evaluate(element => { element.scrollIntoView({ block: 'start' }) })
+        await firstJourney.page.waitForTimeout(100)
+        await captureVisual(firstJourney.page, '08-project-milestones-mobile-375')
       })
     },
   )
