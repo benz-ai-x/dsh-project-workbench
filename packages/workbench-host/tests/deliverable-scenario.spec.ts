@@ -53,6 +53,7 @@ const PROJECT_ID = 'project-deliverable-scenario'
 const CALENDAR_ID = 'calendar-deliverable-scenario'
 const TASK_LIST_GUID = 'tasklist-deliverable-scenario'
 const TASK_GUID = 'task-deliverable-scenario'
+const SECOND_TASK_GUID = 'task-deliverable-scenario-secondary'
 const APP_ID = 'cli_deliverable_scenario'
 const OPEN_ID = 'ou_deliverable_scenario'
 
@@ -71,19 +72,24 @@ const authorization: WorkbenchAuthorization = Object.freeze({
   filterProjection: async <T>(_action: string, projection: T) => projection,
 })
 
-function taskSnapshot(version = 'task-version-1'): WorkbenchFeishuTaskSnapshot {
+function taskSnapshot(
+  version = 'task-version-1',
+  taskGuid = TASK_GUID,
+): WorkbenchFeishuTaskSnapshot {
   return Object.freeze({
-    taskGuid: TASK_GUID,
+    taskGuid,
     taskId: null,
     parentTaskGuid: null,
-    summary: 'Prepare the exact Deliverable candidate',
+    summary: taskGuid === TASK_GUID
+      ? 'Prepare the exact Deliverable candidate'
+      : 'Review the secondary Deliverable evidence',
     description: 'Provider-owned execution truth',
     assignees: Object.freeze([]),
     followers: Object.freeze([]),
     comments: Object.freeze([]),
     completed: false,
     completedAt: null,
-    canonicalUrl: `https://applink.feishu.cn/client/todo/detail?guid=${TASK_GUID}`,
+    canonicalUrl: `https://applink.feishu.cn/client/todo/detail?guid=${taskGuid}`,
     remoteVersion: version,
   })
 }
@@ -134,6 +140,7 @@ WorkbenchFeishuTaskExternalAdapter, WorkbenchFeishuCalendarExternalAdapter {
   readEventCalls = 0
   calendarListReads = 0
   taskAvailable = true
+  secondTaskAvailable = false
   onReadEvent: (() => void) | null = null
   createEventGate: Promise<void> | null = null
   lastCreateEventRoute: WorkbenchFeishuCalendarRoute | null = null
@@ -213,8 +220,13 @@ WorkbenchFeishuTaskExternalAdapter, WorkbenchFeishuCalendarExternalAdapter {
     taskGuid: string,
     _signal: AbortSignal,
   ): Promise<WorkbenchFeishuReadResult<WorkbenchFeishuTaskSnapshot>> {
-    if (taskGuid !== TASK_GUID) return Object.freeze({ state: 'rejected', issue: providerIssue() })
-    return Object.freeze({ state: 'ok', value: taskSnapshot() })
+    if (taskGuid === TASK_GUID && this.taskAvailable) {
+      return Object.freeze({ state: 'ok', value: taskSnapshot() })
+    }
+    if (taskGuid === SECOND_TASK_GUID && this.secondTaskAvailable) {
+      return Object.freeze({ state: 'ok', value: taskSnapshot('task-version-secondary-1', taskGuid) })
+    }
+    return Object.freeze({ state: 'rejected', issue: providerIssue() })
   }
 
   async updateTask(
@@ -345,7 +357,12 @@ WorkbenchFeishuTaskExternalAdapter, WorkbenchFeishuCalendarExternalAdapter {
         canonicalUrl: 'https://applink.feishu.cn/client/todo/deliverable-list',
         remoteVersion: 'task-list-version-1',
       }),
-      tasks: Object.freeze(this.taskAvailable ? [taskSnapshot()] : []),
+      tasks: Object.freeze([
+        ...(this.taskAvailable ? [taskSnapshot()] : []),
+        ...(this.secondTaskAvailable
+          ? [taskSnapshot('task-version-secondary-1', SECOND_TASK_GUID)]
+          : []),
+      ]),
       observedAt: '2026-09-01T00:00:00.000Z',
     })
   }
@@ -523,11 +540,13 @@ function scenarioFor(
 async function fixture(options: Readonly<{
   readonly access?: WorkbenchAuthorization
   readonly calendarReconciliationIntervalMs?: number
+  readonly secondTaskAvailable?: boolean
 }> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'workbench-deliverable-scenario-'))
   temporaryRoots.add(root)
   const databasePath = join(root, 'workbench.sqlite')
   const adapter = new DeliverableAdapter()
+  adapter.secondTaskAvailable = options.secondTaskAvailable ?? false
   const scenario = scenarioFor(
     databasePath,
     adapter,
@@ -1149,6 +1168,35 @@ describe('T11 Deliverable Host surface', () => {
       )).resolves.toMatchObject({
         ok: false,
         error: { code: 'task-unavailable', taskGuid: TASK_GUID },
+      })
+    } finally {
+      await scenario.close()
+    }
+  })
+
+  it('opens an Acceptance Request while at least one frozen execution task remains visible', async () => {
+    const { scenario, adapter } = await fixture({ secondTaskAvailable: true })
+    try {
+      const created = await scenario.createProjectDeliverable(createRequest(undefined, {
+        taskGuids: Object.freeze([TASK_GUID, SECOND_TASK_GUID]),
+      }), signal)
+      if (!created.ok) throw new Error('Partial-task fixture Deliverable was not created')
+      adapter.secondTaskAvailable = false
+      await expect(scenario.reconcileProjectTasks({
+        projectId: PROJECT_ID,
+        expectedRevision: 1,
+      }, signal)).resolves.toMatchObject({
+        ok: true,
+        value: { revision: 2, tasks: [{ taskGuid: TASK_GUID }] },
+      })
+      const current = await scenario.projectDeliverables({ projectId: PROJECT_ID }, signal)
+      if (current === null) throw new Error('Partial-task fixture Project disappeared')
+      await expect(scenario.requestDeliverableAcceptance(
+        acceptanceRequest(current, 'one-task-visible'),
+        signal,
+      )).resolves.toMatchObject({
+        ok: true,
+        request: { taskGuids: [TASK_GUID, SECOND_TASK_GUID] },
       })
     } finally {
       await scenario.close()

@@ -23663,15 +23663,13 @@ function commitDeliverableAcceptanceRequest(
       return Object.freeze({ ok: false, error: memberError })
     }
     const plan = decodeDeliverablePlan(deliverable.plan_json, deliverable.plan_digest)
-    for (const taskGuid of plan.taskGuids) {
-      if (!tasks.tasks.some(task => task.taskGuid === taskGuid)) {
-        database.exec('ROLLBACK')
-        began = false
-        return deliverableFailure('task-unavailable', 'Deliverable task is no longer visible', {
-          current,
-          taskGuid,
-        })
-      }
+    if (!plan.taskGuids.some(taskGuid => tasks.tasks.some(task => task.taskGuid === taskGuid))) {
+      database.exec('ROLLBACK')
+      began = false
+      return deliverableFailure('task-unavailable', 'No Deliverable task remains visible', {
+        current,
+        taskGuid: plan.taskGuids[0],
+      })
     }
     if (mutation.candidateVersions.length < 1
       || mutation.candidateVersions.length > MAX_DELIVERABLE_CANDIDATES

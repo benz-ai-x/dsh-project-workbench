@@ -273,6 +273,33 @@ describe('WorkbenchProjectDeliverablesController', () => {
     await controller.dispose()
   })
 
+  it('permits acceptance while at least one linked execution task remains available', async () => {
+    const available = deliverable().tasks[0]!
+    const item = deliverable({
+      plan: {
+        ...deliverable().plan,
+        taskGuids: ['task-1', 'task-unavailable'],
+      },
+      tasks: [
+        available,
+        { taskGuid: 'task-unavailable', availability: 'unavailable', task: null },
+      ],
+    })
+    const current = projection('project-1', { deliverables: [item] })
+    const request = vi.fn(() => Promise.resolve(ok(requestSuccess(current))))
+    const controller = new WorkbenchProjectDeliverablesController(makeRemote({
+      projectDeliverables: vi.fn(() => Promise.resolve(ok(current))),
+      requestDeliverableAcceptance: request,
+    }), { nextCommandKey: keys() })
+    await controller.selectProject('project-1', 'Evidence Project')
+    controller.addCandidateVersion('deliverable-1', artifact())
+
+    expect(controller.canRequestAcceptance('deliverable-1')).toBe(true)
+    await controller.requestAcceptance('deliverable-1')
+    expect(request).toHaveBeenCalledOnce()
+    await controller.dispose()
+  })
+
   it('caps one acceptance round at 20 unique refs and rejects non-HTTPS URLs or malformed digests', async () => {
     const controller = new WorkbenchProjectDeliverablesController(makeRemote())
     await controller.selectProject('project-1', 'Evidence Project')

@@ -405,7 +405,7 @@ export class WorkbenchProjectDeliverablesController {
     const candidates = this.state.candidateDrafts[deliverableId] ?? []
     return this.canOperate() && item !== null && item.state === 'planned'
       && item.calendar.remoteStatus === 'confirmed' && item.calendar.syncState === 'healthy'
-      && item.tasks.every(task => task.availability === 'available')
+      && item.tasks.some(task => task.availability === 'available')
       && candidates.length >= 1 && candidates.length <= MAX_DELIVERABLE_CANDIDATE_VERSIONS
   }
 
