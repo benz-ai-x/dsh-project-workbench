@@ -121,6 +121,9 @@ export const MAX_DELIVERABLE_CRITERION_LENGTH = 1_000
 export const MAX_DELIVERABLE_CONTRIBUTORS = 20
 export const MAX_DELIVERABLE_TASKS = 50
 export const MAX_DELIVERABLE_CANDIDATE_VERSIONS = 20
+export const MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH = 256
+export const MAX_DELIVERABLE_ARTIFACT_DISPLAY_NAME_LENGTH = 200
+export const MAX_DELIVERABLE_ARTIFACT_URL_LENGTH = 2_048
 
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u
 const WORKBENCH_DIGEST = /^sha256:[0-9a-f]{64}$/u
@@ -713,19 +716,23 @@ function toArtifactRef(value: WorkbenchDeclaredArtifactVersionDraft): Deliverabl
 function normalizeArtifact(value: DeliverableArtifactVersionRef): DeliverableArtifactVersionRef | null {
   if (value.kind !== 'declared-file-version'
     || !['managed', 'local', 'feishu'].includes(value.source)
-    || (value.canonicalUrl !== null && !validHttpsUrl(value.canonicalUrl))
     || (value.contentDigest !== null && !WORKBENCH_DIGEST.test(value.contentDigest))) return null
-  const resourceId = safeRequiredText(value.resourceId, 2_000)
-  const versionId = safeRequiredText(value.versionId, 2_000)
-  const displayName = safeRequiredText(value.displayName, 500)
-  if (resourceId === null || versionId === null || displayName === null) return null
+  const resourceId = safeRequiredText(value.resourceId, MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH)
+  const versionId = safeRequiredText(value.versionId, MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH)
+  const displayName = safeRequiredText(
+    value.displayName,
+    MAX_DELIVERABLE_ARTIFACT_DISPLAY_NAME_LENGTH,
+  )
+  const canonicalUrl = value.canonicalUrl === null ? null : normalizeHttpsUrl(value.canonicalUrl)
+  if (resourceId === null || versionId === null || displayName === null
+    || (value.canonicalUrl !== null && canonicalUrl === null)) return null
   return Object.freeze({
     kind: value.kind,
     source: value.source,
     resourceId,
     versionId,
     displayName,
-    canonicalUrl: value.canonicalUrl,
+    canonicalUrl,
     contentDigest: value.contentDigest,
   })
 }
@@ -741,9 +748,15 @@ function sameArtifactReference(
     && left.canonicalUrl === right.canonicalUrl
     && left.contentDigest === right.contentDigest
 }
-function validHttpsUrl(value: string): boolean {
-  if (value.trim() !== value || CONTROL_CHARACTER.test(value)) return false
-  try { return new URL(value).protocol === 'https:' } catch { return false }
+function normalizeHttpsUrl(value: string): string | null {
+  if (value.length > MAX_DELIVERABLE_ARTIFACT_URL_LENGTH
+    || value.trim() !== value || CONTROL_CHARACTER.test(value)) return null
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') return null
+    const normalized = parsed.toString()
+    return normalized.length <= MAX_DELIVERABLE_ARTIFACT_URL_LENGTH ? normalized : null
+  } catch { return null }
 }
 function safeRequiredText(value: string, maximum: number): string | null {
   const normalized = value.trim()

@@ -283,6 +283,20 @@ describe('WorkbenchProjectDeliverablesController', () => {
     controller.addCandidateVersion('deliverable-1', {
       ...artifact(), resourceId: 'bad-digest', contentDigest: `sha256:${'A'.repeat(64)}`,
     })
+    controller.addCandidateVersion('deliverable-1', {
+      ...artifact(), resourceId: 'bad-credentials',
+      canonicalUrl: 'https://owner:secret@example.test/report',
+    })
+    controller.addCandidateVersion('deliverable-1', {
+      ...artifact(), resourceId: 'x'.repeat(257), versionId: 'bad-long-resource',
+    })
+    controller.addCandidateVersion('deliverable-1', {
+      ...artifact(), resourceId: 'bad-long-label', displayName: 'x'.repeat(201),
+    })
+    controller.addCandidateVersion('deliverable-1', {
+      ...artifact(), resourceId: 'boundary-reference', versionId: 'v'.repeat(256),
+      displayName: 'd'.repeat(200), canonicalUrl: 'https://example.test/report',
+    })
     for (let index = 0; index < 21; index += 1) {
       controller.addCandidateVersion('deliverable-1', {
         ...artifact(), resourceId: `report-${index}.md`, versionId: `version-${index}`,
@@ -292,6 +306,11 @@ describe('WorkbenchProjectDeliverablesController', () => {
     const candidates = controller.getSnapshot().candidateDrafts['deliverable-1']
     expect(candidates).toHaveLength(20)
     expect(candidates?.some(item => item.resourceId.startsWith('bad-'))).toBe(false)
+    expect(candidates?.some(item => item.versionId === 'bad-long-resource')).toBe(false)
+    expect(candidates).toContainEqual(expect.objectContaining({
+      resourceId: 'boundary-reference', versionId: 'v'.repeat(256),
+      displayName: 'd'.repeat(200), canonicalUrl: 'https://example.test/report',
+    }))
     await controller.dispose()
   })
 

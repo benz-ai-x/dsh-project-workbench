@@ -29,6 +29,9 @@ import {
 } from './deliverable-presentation.ts'
 import {
   MAX_DELIVERABLE_CANDIDATE_VERSIONS,
+  MAX_DELIVERABLE_ARTIFACT_DISPLAY_NAME_LENGTH,
+  MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH,
+  MAX_DELIVERABLE_ARTIFACT_URL_LENGTH,
   MAX_DELIVERABLE_CRITERIA,
   MAX_DELIVERABLE_CRITERION_LENGTH,
   MAX_DELIVERABLE_DESCRIPTION_LENGTH,
@@ -628,25 +631,25 @@ function DeliverableCard({
               </label>
               <label className={css.field}>
                 <span>{t('deliverables.artifact.resourceId')}</span>
-                <input required value={artifact.resourceId} onChange={event => {
+                <input required maxLength={MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH} value={artifact.resourceId} onChange={event => {
                   setArtifact({ ...artifact, resourceId: event.currentTarget.value })
                 }} />
               </label>
               <label className={css.field}>
                 <span>{t('deliverables.artifact.versionId')}</span>
-                <input required value={artifact.versionId} onChange={event => {
+                <input required maxLength={MAX_DELIVERABLE_ARTIFACT_REFERENCE_LENGTH} value={artifact.versionId} onChange={event => {
                   setArtifact({ ...artifact, versionId: event.currentTarget.value })
                 }} />
               </label>
               <label className={css.field}>
                 <span>{t('deliverables.artifact.displayName')}</span>
-                <input required value={artifact.displayName} onChange={event => {
+                <input required maxLength={MAX_DELIVERABLE_ARTIFACT_DISPLAY_NAME_LENGTH} value={artifact.displayName} onChange={event => {
                   setArtifact({ ...artifact, displayName: event.currentTarget.value })
                 }} />
               </label>
               <label className={css.field}>
                 <span>{t('deliverables.artifact.url')}</span>
-                <input type="url" pattern="https://.*" value={artifact.canonicalUrl} onChange={event => {
+                <input type="url" pattern="https://.*" maxLength={MAX_DELIVERABLE_ARTIFACT_URL_LENGTH} value={artifact.canonicalUrl} onChange={event => {
                   setArtifact({ ...artifact, canonicalUrl: event.currentTarget.value })
                 }} />
               </label>
@@ -773,7 +776,12 @@ function artifactRef(value: ArtifactInput): DeliverableArtifactVersionRef | null
 }
 
 function validHttpsUrl(value: string): boolean {
-  try { return new URL(value).protocol === 'https:' } catch { return false }
+  if (value.length > MAX_DELIVERABLE_ARTIFACT_URL_LENGTH) return false
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === ''
+      && parsed.toString().length <= MAX_DELIVERABLE_ARTIFACT_URL_LENGTH
+  } catch { return false }
 }
 
 function allDaySchedule(value: ProjectCalendarSchedule): ProjectCalendarSchedule {
