@@ -10,6 +10,9 @@ import {
 import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
+  DeliverableAcceptanceAllowedDecision,
+  DeliverableAcceptanceEffectiveStatus,
+  DeliverableAcceptanceReviewItemProjection,
   ProjectResponsibilityReviewField,
   ProjectResponsibilityReviewValue,
   ProjectResponsibilitySuggestedValue,
@@ -26,6 +29,7 @@ import {
   MAX_REVIEW_FEEDBACK_LENGTH,
   type WorkbenchReviewClientState,
   type WorkbenchReviewController,
+  type WorkbenchAcceptanceDecisionDraft,
   type WorkbenchReviewDecisionDraft,
   type WorkbenchReviewIssue,
 } from './review-controller.ts'
@@ -134,6 +138,17 @@ export function ReviewCenterPanel({ controller, t }: ReviewCenterPanelProps) {
     if (controller.canPropose()) void controller.propose()
   }
 
+  if (state.activeKind === 'deliverable-acceptance') {
+    return (
+      <AcceptanceReviewCenter
+        state={state}
+        controller={controller}
+        t={t}
+        presentation={presentation}
+      />
+    )
+  }
+
   return (
     <section
       className={css.panel}
@@ -162,6 +177,8 @@ export function ReviewCenterPanel({ controller, t }: ReviewCenterPanelProps) {
             <span>{t('review.project.label')}</span>
             <strong>{state.selection.projectName || state.selection.projectId}</strong>
           </div>
+
+          <ReviewKindSwitcher state={state} controller={controller} t={t} />
 
           {state.phase === 'disconnected' && (
             <p className={css.disconnected} role="status">{t('review.disconnected.body')}</p>
@@ -425,6 +442,389 @@ export function ReviewCenterPanel({ controller, t }: ReviewCenterPanelProps) {
       )}
     </section>
   )
+}
+
+function ReviewKindSwitcher({
+  state,
+  controller,
+  t,
+}: {
+  readonly state: WorkbenchReviewClientState
+  readonly controller: WorkbenchReviewController
+  readonly t: (key: WorkbenchKey) => string
+}) {
+  return (
+    <nav className={css.kindSwitcher} aria-label={t('review.kind.legend')}>
+      <Button
+        variant={state.activeKind === 'suggested-change' ? 'primary' : 'outline'}
+        size="sm"
+        type="button"
+        aria-pressed={state.activeKind === 'suggested-change'}
+        disabled={state.pendingOperation !== null}
+        onClick={() => { void controller.setReviewKind('suggested-change') }}
+      >
+        {t('review.kind.suggested')}
+      </Button>
+      <Button
+        variant={state.activeKind === 'deliverable-acceptance' ? 'primary' : 'outline'}
+        size="sm"
+        type="button"
+        aria-pressed={state.activeKind === 'deliverable-acceptance'}
+        disabled={state.pendingOperation !== null}
+        onClick={() => { void controller.setReviewKind('deliverable-acceptance') }}
+      >
+        {t('review.kind.acceptance')}
+      </Button>
+    </nav>
+  )
+}
+
+const ACCEPTANCE_STATUSES: readonly DeliverableAcceptanceEffectiveStatus[] = [
+  'pending', 'approved', 'rejected', 'needs_changes', 'stale',
+]
+
+function AcceptanceReviewCenter({
+  state,
+  controller,
+  t,
+  presentation,
+}: {
+  readonly state: WorkbenchReviewClientState
+  readonly controller: WorkbenchReviewController
+  readonly t: (key: WorkbenchKey) => string
+  readonly presentation: { readonly dot: StateDotState; readonly key: WorkbenchKey }
+}) {
+  const itemRefs = useRef(new Map<string, HTMLElement>())
+  useEffect(() => {
+    if (state.acceptanceFocusEpoch === 0 || state.focusAcceptanceRequestId === null) return
+    itemRefs.current.get(state.focusAcceptanceRequestId)?.focus({ preventScroll: true })
+  }, [state.acceptanceFocusEpoch, state.focusAcceptanceRequestId])
+  const applyFilters = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault()
+    void controller.applyAcceptanceFilters()
+  }
+  return (
+    <section
+      className={css.panel}
+      aria-labelledby="workbench-review-center-title"
+      aria-busy={state.phase === 'loading' || state.pendingOperation !== null}
+      data-review-kind="deliverable-acceptance"
+    >
+      <header className={css.header}>
+        <div>
+          <p className={css.kicker}>{t('review.kicker')}</p>
+          <h2 id="workbench-review-center-title" className={css.title}>{t('review.title')}</h2>
+          <p className={css.subtitle}>{t('review.subtitle')}</p>
+        </div>
+        <div className={css.syncState} role="status" aria-live="polite" aria-atomic="true">
+          <StateDot state={presentation.dot} size={12} />
+          <span>{t(presentation.key)}</span>
+        </div>
+      </header>
+      {state.selection === null ? (
+        <p className={css.emptyBlock}>{t('review.selection.empty')}</p>
+      ) : (
+        <>
+          <div className={css.projectContext}>
+            <span>{t('review.project.label')}</span>
+            <strong>{state.selection.projectName || state.selection.projectId}</strong>
+          </div>
+          <ReviewKindSwitcher state={state} controller={controller} t={t} />
+
+          {state.issue !== null && (
+            <div className={state.issue.kind === 'conflict' ? css.conflictNotice : css.errorNotice} role="alert">
+              <div>
+                <strong>{t(state.issue.kind === 'conflict' ? 'review.conflict.title' : 'review.error.title')}</strong>
+                <p><code>{state.issue.code}</code></p>
+              </div>
+              <div className={css.issueActions}>
+                {state.canRetryMutation && (
+                  <Button variant="outline" size="sm" type="button" onClick={() => {
+                    void controller.retryMutation()
+                  }}>{t('review.retryExact')}</Button>
+                )}
+                <Button variant="outline" size="sm" type="button" onClick={() => {
+                  void controller.refresh()
+                }}>{t('review.refresh')}</Button>
+              </div>
+            </div>
+          )}
+
+          <form className={css.filters} onSubmit={applyFilters}>
+            <fieldset disabled={state.pendingOperation !== null}>
+              <legend>{t('review.acceptance.filters.legend')}</legend>
+              <label>
+                <span>{t('review.acceptance.filters.status')}</span>
+                <select
+                  value={state.acceptanceFilters.status}
+                  onChange={event => {
+                    controller.setAcceptanceStatusFilter(
+                      event.currentTarget.value as DeliverableAcceptanceEffectiveStatus | 'all',
+                    )
+                  }}
+                >
+                  <option value="all">{t('review.acceptance.filters.all')}</option>
+                  {ACCEPTANCE_STATUSES.map(status => (
+                    <option key={status} value={status}>{status}</option>
+                  ))}
+                </select>
+              </label>
+              <Button variant="outline" size="sm" type="submit">
+                {t('review.acceptance.filters.apply')}
+              </Button>
+            </fieldset>
+          </form>
+
+          {state.acceptanceReview === null ? (
+            <p className={css.loading} role="status">
+              {state.phase === 'loading' ? t('review.loading') : t('review.unavailable')}
+            </p>
+          ) : state.acceptanceReview.items.length === 0 ? (
+            <p className={css.emptyBlock}>{t('review.acceptance.empty')}</p>
+          ) : (
+            <ol className={css.acceptanceList}>
+              {state.acceptanceReview.items.map(item => (
+                <li key={item.request.acceptanceRequestId}>
+                  <AcceptanceReviewCard
+                    item={item}
+                    state={state}
+                    controller={controller}
+                    t={t}
+                    setRef={node => {
+                      if (node === null) itemRefs.current.delete(item.request.acceptanceRequestId)
+                      else itemRefs.current.set(item.request.acceptanceRequestId, node)
+                    }}
+                  />
+                </li>
+              ))}
+            </ol>
+          )}
+          {state.acceptanceReview?.nextBeforeSequence !== null
+            && state.acceptanceReview !== null && (
+            <div className={css.loadMore}>
+              <Button
+                variant="outline"
+                type="button"
+                disabled={state.loadingMore || state.acceptanceFiltersDirty
+                  || state.pendingOperation !== null}
+                onClick={() => { void controller.loadMoreAcceptance() }}
+              >
+                {state.loadingMore
+                  ? t('review.acceptance.loadingMore')
+                  : t('review.acceptance.loadMore')}
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function AcceptanceReviewCard({
+  item,
+  state,
+  controller,
+  t,
+  setRef,
+}: {
+  readonly item: DeliverableAcceptanceReviewItemProjection
+  readonly state: WorkbenchReviewClientState
+  readonly controller: WorkbenchReviewController
+  readonly t: (key: WorkbenchKey) => string
+  readonly setRef: (node: HTMLElement | null) => void
+}) {
+  const request = item.request
+  const draft: WorkbenchAcceptanceDecisionDraft = state.acceptanceDecisionDrafts[
+    request.acceptanceRequestId
+  ] ?? Object.freeze({
+    acceptanceRequestId: request.acceptanceRequestId,
+    basedOnAcceptanceRequestRevision: request.revision,
+    mode: request.allowedDecisions[0] ?? 'reject',
+    criteria: Object.freeze({}),
+    feedback: '',
+  })
+  const decide = (mode: DeliverableAcceptanceAllowedDecision): void => {
+    controller.setAcceptanceDecisionMode(request.acceptanceRequestId, mode)
+    void controller.decideAcceptance(request.acceptanceRequestId)
+  }
+  const pending = state.pendingAcceptanceRequestId === request.acceptanceRequestId
+  return (
+    <article
+      className={css.acceptanceCard}
+      aria-label={`${item.deliverableName} — ${t('review.acceptance.frozen')}`}
+      data-review-kind="deliverable-acceptance"
+      data-acceptance-request-id={request.acceptanceRequestId}
+      tabIndex={-1}
+      ref={setRef}
+    >
+      <header className={css.cardHeader}>
+        <div>
+          <p className={css.cardKicker}>{t('review.acceptance.frozen')}</p>
+          <h3>{item.deliverableName}</h3>
+          <code>{request.acceptanceRequestId}</code>
+        </div>
+        <div className={css.badges}>
+          <span>{request.effectiveStatus}</span>
+          <span>{item.currentState}</span>
+        </div>
+      </header>
+
+      <div className={css.acceptanceTruthGrid}>
+        <section>
+          <h4>{t('review.acceptance.frozen')}</h4>
+          <dl className={css.cardMeta}>
+            <div><dt>Plan Snapshot</dt><dd><code>{request.plan.planSnapshotId}</code></dd></div>
+            <div><dt>Accountable</dt><dd>{request.plan.responsibility.accountable.displayName}</dd></div>
+            <div><dt>Acceptor</dt><dd>{request.plan.responsibility.acceptor.displayName}</dd></div>
+            <div><dt>Event observation</dt><dd><code>{request.calendar.remoteObservationVersion}</code></dd></div>
+          </dl>
+          <h5>{t('review.acceptance.candidates')}</h5>
+          <ul className={css.acceptanceVersions}>
+            {request.candidateVersions.map(version => (
+              <li key={version.referenceDigest}>
+                <strong>{version.displayName}</strong>
+                <span>{t('deliverables.artifact.declared')}</span>
+                <code>{version.source}:{version.resourceId}@{version.versionId}</code>
+              </li>
+            ))}
+          </ul>
+        </section>
+        <section>
+          <h4>{t('review.acceptance.current')}</h4>
+          <p>{scheduleLabel(item.currentCalendar.schedule)} · {item.currentCalendar.remoteStatus} · {item.currentCalendar.syncState}</p>
+          <ul>{item.currentTasks.map(task => (
+            <li key={task.taskGuid}>
+              {task.task === null ? <code>{task.taskGuid}</code> : (
+                <a href={task.task.canonicalUrl} target="_blank" rel="noreferrer">{task.task.summary}</a>
+              )} — {task.availability}
+            </li>
+          ))}</ul>
+        </section>
+      </div>
+
+      {request.decision !== null && (
+        <section className={css.recordedDecision}>
+          <h4>{request.decision.outcome}</h4>
+          <dl className={css.cardMeta}>
+            <div><dt>{t('deliverables.acceptance.designated')}</dt><dd>{request.decision.designatedAcceptor.displayName}</dd></div>
+            <div><dt>{t('deliverables.acceptance.recordedBy')}</dt><dd>Owner · <code>{request.decision.actor.id}</code></dd></div>
+          </dl>
+          <p>{request.decision.feedback}</p>
+          <ul>{request.decision.criteria.map(result => (
+            <li key={result.criterionId}>
+              {request.plan.criteria.find(criterion =>
+                criterion.criterionId === result.criterionId)?.statement ?? result.criterionId}
+              {' — '}<strong>{result.outcome}</strong>
+            </li>
+          ))}</ul>
+        </section>
+      )}
+
+      {request.allowedDecisions.length > 0 && (
+        <form
+          className={css.acceptanceDecision}
+          aria-label={t('review.acceptance.decision.legend')}
+          onSubmit={event => { event.preventDefault() }}
+        >
+          <fieldset disabled={state.pendingOperation !== null}>
+            <legend>{t('review.acceptance.decision.legend')}</legend>
+            <p className={css.sponsorHint}>{t('review.acceptance.decision.actor')}</p>
+            <p className={css.hint}>{t('review.acceptance.decision.hint')}</p>
+            {request.plan.criteria.map(criterion => (
+              <fieldset
+                className={css.acceptanceCriterion}
+                aria-label={criterion.statement}
+                key={criterion.criterionId}
+              >
+                <legend>{criterion.statement}</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name={`${request.acceptanceRequestId}-${criterion.criterionId}`}
+                    checked={draft.criteria[criterion.criterionId] === 'met'}
+                    onChange={() => {
+                      controller.setAcceptanceCriterionOutcome(
+                        request.acceptanceRequestId, criterion.criterionId, 'met',
+                      )
+                    }}
+                  />
+                  <span>{t('review.acceptance.decision.met')}</span>
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name={`${request.acceptanceRequestId}-${criterion.criterionId}`}
+                    checked={draft.criteria[criterion.criterionId] === 'not-met'}
+                    onChange={() => {
+                      controller.setAcceptanceCriterionOutcome(
+                        request.acceptanceRequestId, criterion.criterionId, 'not-met',
+                      )
+                    }}
+                  />
+                  <span>{t('review.acceptance.decision.notMet')}</span>
+                </label>
+              </fieldset>
+            ))}
+            <label className={css.field}>
+              <span>{t('review.acceptance.decision.feedback')}</span>
+              <textarea
+                rows={4}
+                maxLength={MAX_REVIEW_FEEDBACK_LENGTH}
+                required
+                value={draft.feedback}
+                onChange={event => {
+                  controller.setAcceptanceFeedback(
+                    request.acceptanceRequestId, event.currentTarget.value,
+                  )
+                }}
+              />
+            </label>
+            <div className={css.modeButtons}>
+              <Button
+                variant={draft.mode === 'approve' ? 'primary' : 'outline'}
+                type="button"
+                aria-pressed={draft.mode === 'approve'}
+                disabled={pending || !controller.canDecideAcceptanceAs(
+                  request.acceptanceRequestId, 'approve',
+                )}
+                onClick={() => { decide('approve') }}
+              >{t('review.acceptance.decision.approve')}</Button>
+              <Button
+                variant={draft.mode === 'reject' ? 'primary' : 'outline'}
+                type="button"
+                aria-pressed={draft.mode === 'reject'}
+                disabled={pending || !controller.canDecideAcceptanceAs(
+                  request.acceptanceRequestId, 'reject',
+                )}
+                onClick={() => { decide('reject') }}
+              >{t('review.acceptance.decision.reject')}</Button>
+              <Button
+                variant={draft.mode === 'request-changes' ? 'primary' : 'outline'}
+                type="button"
+                aria-pressed={draft.mode === 'request-changes'}
+                disabled={pending || !controller.canDecideAcceptanceAs(
+                  request.acceptanceRequestId, 'request-changes',
+                )}
+                onClick={() => { decide('request-changes') }}
+              >{t('review.acceptance.decision.changes')}</Button>
+              <Button variant="outline" type="button" onClick={() => {
+                controller.resetAcceptanceDecisionDraft(request.acceptanceRequestId)
+              }}>{t('review.acceptance.decision.reset')}</Button>
+            </div>
+          </fieldset>
+        </form>
+      )}
+    </article>
+  )
+}
+
+function scheduleLabel(
+  schedule: DeliverableAcceptanceReviewItemProjection['currentCalendar']['schedule'],
+): string {
+  return schedule.kind === 'all-day'
+    ? `${schedule.startDate} – ${schedule.endDate}`
+    : `${schedule.startAt} – ${schedule.endAt} (${schedule.timeZone})`
 }
 
 function ReviewIssueNotice({
@@ -1058,6 +1458,11 @@ function evidenceSummaryKey(
     'project-calendar-bound': 'activity.summary.projectCalendarBound',
     'project-milestone-created': 'activity.summary.projectMilestoneCreated',
     'project-milestone-date-update-requested': 'activity.summary.projectMilestoneDateUpdateRequested',
+    'project-deliverable-created': 'activity.summary.projectDeliverableCreated',
+    'deliverable-acceptance-requested': 'activity.summary.deliverableAcceptanceRequested',
+    'deliverable-acceptance-approved': 'activity.summary.deliverableAcceptanceApproved',
+    'deliverable-acceptance-rejected': 'activity.summary.deliverableAcceptanceRejected',
+    'deliverable-acceptance-needs-changes': 'activity.summary.deliverableAcceptanceNeedsChanges',
   } satisfies Record<SuggestedChangeEvidenceProjection['summaryCode'], WorkbenchKey>
   return keys[summary]
 }

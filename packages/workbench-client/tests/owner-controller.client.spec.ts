@@ -6,6 +6,7 @@ import type {
   OwnerAuthResponse,
   ProjectDetailProjection,
   ProjectMilestonesProjection,
+  ProjectDeliverablesProjection,
   ProjectStartProjection,
   ProjectTasksProjection,
   ReviewCenterProjection,
@@ -23,6 +24,10 @@ import type { WorkbenchReviewRemote } from '../src/client/review-controller.ts'
 import type { WorkbenchFeishuConnectionRemote } from '../src/client/feishu-connection-controller.ts'
 import type { WorkbenchProjectTasksRemote } from '../src/client/task-controller.ts'
 import type { WorkbenchProjectMilestonesRemote } from '../src/client/milestone-controller.ts'
+import {
+  INITIAL_WORKBENCH_PROJECT_DELIVERABLES_STATE,
+  type WorkbenchProjectDeliverablesRemote,
+} from '../src/client/project-deliverables-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 
 function fakeClock(initial: string) {
@@ -136,6 +141,14 @@ function unboundProjectMilestones(projectId: string): ProjectMilestonesProjectio
     },
     effects: [],
     recentChanges: [],
+  }
+}
+
+function projectDeliverables(projectId: string): ProjectDeliverablesProjection {
+  return {
+    projectId, revision: 0, teamRevision: 0, taskRevision: 0, scheduleRevision: 0,
+    calendarBinding: null, memberOptions: [], taskOptions: [], deliverables: [],
+    activity: [], nextBeforeActivitySequence: null,
   }
 }
 
@@ -353,7 +366,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
 
 type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
   & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote & WorkbenchProjectTasksRemote
-  & WorkbenchProjectMilestonesRemote
+  & WorkbenchProjectMilestonesRemote & WorkbenchProjectDeliverablesRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -411,6 +424,11 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
       ok: false as const,
       error: { code: 'idempotency-conflict' as const, message: 'unused' },
     }))),
+    decideDeliverableAcceptance: overrides.decideDeliverableAcceptance
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
     feishuConnectionCenter: overrides.feishuConnectionCenter
       ?? vi.fn(() => Promise.resolve(remoteOk(unconfiguredFeishuCenter()))),
     configureFeishuIdentityRoute: overrides.configureFeishuIdentityRoute
@@ -502,6 +520,18 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
         ok: false as const,
         error: { code: 'calendar-unbound' as const, message: 'unused' },
       }))),
+    projectDeliverables: overrides.projectDeliverables
+      ?? vi.fn(query => Promise.resolve(remoteOk(projectDeliverables(query.projectId)))),
+    createProjectDeliverable: overrides.createProjectDeliverable
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    requestDeliverableAcceptance: overrides.requestDeliverableAcceptance
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
   }
 }
 
@@ -550,6 +580,7 @@ describe('OwnerController', () => {
       feishuConnection: null,
       projectTasks: null,
       projectMilestones: null,
+      projectDeliverables: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -612,6 +643,7 @@ describe('OwnerController', () => {
       feishuConnection: null,
       projectTasks: null,
       projectMilestones: null,
+      projectDeliverables: null,
       activity: null,
       recoveryCode: 'WB1-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH',
     })
@@ -839,15 +871,18 @@ describe('OwnerController', () => {
     const controller = new OwnerController(auth({
       state: vi.fn(() => Promise.resolve(authOk(access()))),
       logout: vi.fn(() => logout.promise),
-    }), remote())
+    }), remote({ project: vi.fn(() => Promise.resolve(remoteOk(projectDetail()))) }))
     await controller.start()
     const status = controller.getSnapshot().status
     const projects = controller.getSnapshot().projects
+    await projects?.openProject('project-1')
+    const deliverables = controller.getSnapshot().projectDeliverables
     const activity = controller.getSnapshot().activity
     expect(status).not.toBeNull()
     expect(activity?.getSnapshot().phase).toBe('ready')
     status?.setDraft('sensitive unsaved draft')
     if (projects !== null) completeProjectDraft(projects)
+    deliverables?.setCreateName('Sensitive Deliverable draft')
 
     const leaving = controller.logout()
     expect(controller.getSnapshot().phase).toBe('logout-pending')
@@ -859,6 +894,9 @@ describe('OwnerController', () => {
     expect(projects?.getSnapshot()).toMatchObject({
       phase: 'stale',
       draft: { projectName: 'Sensitive Project draft' },
+    })
+    expect(deliverables?.getSnapshot()).toMatchObject({
+      phase: 'stale', createDraft: { name: 'Sensitive Deliverable draft' },
     })
     logout.resolve(authOk({ state: 'signed-out' }))
     await leaving
@@ -873,6 +911,7 @@ describe('OwnerController', () => {
       feishuConnection: null,
       projectTasks: null,
       projectMilestones: null,
+      projectDeliverables: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -883,6 +922,7 @@ describe('OwnerController', () => {
       draft: '',
       draftDirty: false,
     })
+    expect(deliverables?.getSnapshot()).toEqual(INITIAL_WORKBENCH_PROJECT_DELIVERABLES_STATE)
     expect(activity?.getSnapshot()).toMatchObject({
       phase: 'loading',
       activity: null,
@@ -920,6 +960,7 @@ describe('OwnerController', () => {
       feishuConnection: null,
       projectTasks: null,
       projectMilestones: null,
+      projectDeliverables: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1301,6 +1342,7 @@ describe('OwnerController', () => {
       feishuConnection: null,
       projectTasks: null,
       projectMilestones: null,
+      projectDeliverables: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1334,6 +1376,7 @@ describe('OwnerController', () => {
       feishuConnection: null,
       projectTasks: null,
       projectMilestones: null,
+      projectDeliverables: null,
       activity: null,
       recoveryCode: null,
       issue: null,

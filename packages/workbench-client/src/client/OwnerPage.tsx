@@ -20,6 +20,7 @@ import {
 } from './FeishuConnectionPanel.tsx'
 import { ProjectTasksPanel } from './ProjectTasksPanel.tsx'
 import { ProjectMilestonesPanel } from './ProjectMilestonesPanel.tsx'
+import { ProjectDeliverablesPanel } from './ProjectDeliverablesPanel.tsx'
 import type { WorkbenchKey } from './locales.ts'
 import css from './OwnerPage.module.css'
 
@@ -235,6 +236,7 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
     && state.feishuConnection !== null
     && state.projectTasks !== null
     && state.projectMilestones !== null
+    && state.projectDeliverables !== null
     && state.activity !== null) {
     const pending = state.phase === 'logout-pending'
     return (
@@ -271,7 +273,6 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
         <WorkbenchStatusPage controller={state.status} t={t}>
           <ProjectsPanel controller={state.projects} t={t} />
           <ProjectTeamPanel controller={state.projectTeam} t={t} />
-          <ReviewCenterPanel controller={state.review} t={t} />
           <FeishuConnectionPanel
             controller={state.feishuConnection}
             copy={feishuConnectionCopy(t)}
@@ -286,6 +287,8 @@ export function OwnerPage({ controller, t, copyText = copyToClipboard }: OwnerPa
             connectionController={state.feishuConnection}
             t={t}
           />
+          <ProjectDeliverablesPanel controller={state.projectDeliverables} t={t} />
+          <ReviewCenterPanel controller={state.review} t={t} />
           <ActivityPanel controller={state.activity} copy={activityCopy(t)} />
         </WorkbenchStatusPage>
       </div>
@@ -395,6 +398,8 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     objectFeishuTaskWorkflow: t('activity.object.feishuTaskWorkflow'),
     objectProjectCalendarBinding: t('activity.object.projectCalendarBinding'),
     objectProjectMilestone: t('activity.object.projectMilestone'),
+    objectProjectDeliverable: t('activity.object.projectDeliverable'),
+    objectDeliverableAcceptanceRequest: t('activity.object.deliverableAcceptanceRequest'),
     objectIdLabel: t('activity.object.id'),
     actionLabel: t('activity.action.label'),
     actionAll: t('activity.action.all'),
@@ -420,6 +425,13 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     actionProjectMilestoneCreated: t('activity.action.projectMilestoneCreated'),
     actionProjectMilestoneDateUpdateRequested: t(
       'activity.action.projectMilestoneDateUpdateRequested',
+    ),
+    actionProjectDeliverableCreated: t('activity.action.projectDeliverableCreated'),
+    actionDeliverableAcceptanceRequested: t('activity.action.deliverableAcceptanceRequested'),
+    actionDeliverableAcceptanceApproved: t('activity.action.deliverableAcceptanceApproved'),
+    actionDeliverableAcceptanceRejected: t('activity.action.deliverableAcceptanceRejected'),
+    actionDeliverableAcceptanceNeedsChanges: t(
+      'activity.action.deliverableAcceptanceNeedsChanges',
     ),
     applyFilters: t('activity.filters.apply'),
     loading: t('activity.loading'),
@@ -465,6 +477,19 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     summaryProjectMilestoneDateUpdateRequested: t(
       'activity.summary.projectMilestoneDateUpdateRequested',
     ),
+    summaryProjectDeliverableCreated: t('activity.summary.projectDeliverableCreated'),
+    summaryDeliverableAcceptanceRequested: t(
+      'activity.summary.deliverableAcceptanceRequested',
+    ),
+    summaryDeliverableAcceptanceApproved: t(
+      'activity.summary.deliverableAcceptanceApproved',
+    ),
+    summaryDeliverableAcceptanceRejected: t(
+      'activity.summary.deliverableAcceptanceRejected',
+    ),
+    summaryDeliverableAcceptanceNeedsChanges: t(
+      'activity.summary.deliverableAcceptanceNeedsChanges',
+    ),
     workspaceScope: t('activity.scope.workspace'),
     projectPrefix: t('activity.prefix.project'),
     actorPrefix: t('activity.prefix.actor'),
@@ -493,6 +518,19 @@ function activityCopy(t: (key: WorkbenchKey) => string): ActivityPanelCopy {
     reasonOwnerProjectMilestoneCreate: t('activity.reason.ownerProjectMilestoneCreate'),
     reasonOwnerProjectMilestoneDateUpdate: t(
       'activity.reason.ownerProjectMilestoneDateUpdate',
+    ),
+    reasonOwnerProjectDeliverableCreate: t('activity.reason.ownerProjectDeliverableCreate'),
+    reasonOwnerDeliverableAcceptanceRequest: t(
+      'activity.reason.ownerDeliverableAcceptanceRequest',
+    ),
+    reasonOwnerDeliverableAcceptanceApprove: t(
+      'activity.reason.ownerDeliverableAcceptanceApprove',
+    ),
+    reasonOwnerDeliverableAcceptanceReject: t(
+      'activity.reason.ownerDeliverableAcceptanceReject',
+    ),
+    reasonOwnerDeliverableAcceptanceNeedsChanges: t(
+      'activity.reason.ownerDeliverableAcceptanceNeedsChanges',
     ),
     causationPrefix: t('activity.prefix.causation'),
     outboxPrefix: t('activity.prefix.outbox'),

@@ -1,6 +1,13 @@
 /** React-free Client state machine for one Project-scoped Review Center. */
 
 import type {
+  DeliverableAcceptanceAllowedDecision,
+  DeliverableAcceptanceEffectiveStatus,
+  DeliverableAcceptanceReviewCenterProjection,
+  DeliverableAcceptanceReviewItemProjection,
+  DeliverableCriterionOutcome,
+  DecideDeliverableAcceptanceRequest,
+  DecideDeliverableAcceptanceResult,
   DecideSuggestedChangeRequest,
   DecideSuggestedChangeResult,
   ProjectResponsibilityReviewDiff,
@@ -8,8 +15,9 @@ import type {
   ProjectResponsibilitySuggestedValue,
   ProposeProjectResponsibilityChangeRequest,
   ProposeProjectResponsibilityChangeResult,
-  ReviewCenterFilter,
   ReviewCenterProjection,
+  ReviewCenterQuery,
+  ReviewCenterResultProjection,
   SuggestedChangeAllowedDecision,
   SuggestedChangeDecisionProjection,
   SuggestedChangeEffectiveStatus,
@@ -30,7 +38,8 @@ export type WorkbenchReviewPhase =
   | 'error'
   | 'conflict'
 
-export type WorkbenchReviewOperation = 'read-review' | 'propose' | 'decide'
+export type WorkbenchReviewOperation =
+  | 'read-review' | 'propose' | 'decide' | 'decide-acceptance'
 
 export type WorkbenchReviewTransportCode =
   | 'unavailable'
@@ -40,9 +49,13 @@ export type WorkbenchReviewTransportCode =
   | 'internal'
   | 'transport-failure'
 
-type ReviewDomainResult =
+type SuggestedReviewDomainResult =
   | ProposeProjectResponsibilityChangeResult
   | DecideSuggestedChangeResult
+
+type ReviewDomainResult =
+  | SuggestedReviewDomainResult
+  | DecideDeliverableAcceptanceResult
 
 export type WorkbenchReviewConflictCode = Extract<
   ReviewDomainResult,
@@ -64,7 +77,7 @@ export interface WorkbenchReviewInputIssue {
 export interface WorkbenchReviewConflictIssue {
   readonly kind: 'conflict'
   readonly code: WorkbenchReviewConflictCode
-  readonly operation: 'propose' | 'decide'
+  readonly operation: 'propose' | 'decide' | 'decide-acceptance'
 }
 
 export type WorkbenchReviewIssue =
@@ -108,10 +121,30 @@ export interface WorkbenchReviewDecisionRiskPreview {
   readonly appliedReasonCodes: readonly SuggestedChangeRiskReason[]
 }
 
+export type WorkbenchReviewKind = 'suggested-change' | 'deliverable-acceptance'
+
+export interface WorkbenchAcceptanceReviewFilters {
+  readonly status: DeliverableAcceptanceEffectiveStatus | 'all'
+}
+
+export interface WorkbenchAcceptanceDecisionDraft {
+  readonly acceptanceRequestId: string
+  readonly basedOnAcceptanceRequestRevision: number
+  readonly mode: DeliverableAcceptanceAllowedDecision
+  readonly criteria: Readonly<Record<string, DeliverableCriterionOutcome>>
+  readonly feedback: string
+}
+
 export interface WorkbenchReviewClientState {
   readonly phase: WorkbenchReviewPhase
   readonly selection: WorkbenchReviewSelection | null
   readonly review: ReviewCenterProjection | null
+  readonly activeKind: WorkbenchReviewKind
+  readonly acceptanceReview: DeliverableAcceptanceReviewCenterProjection | null
+  readonly acceptanceFilters: WorkbenchAcceptanceReviewFilters
+  readonly appliedAcceptanceFilters: WorkbenchAcceptanceReviewFilters
+  readonly acceptanceFiltersDirty: boolean
+  readonly acceptanceDecisionDrafts: Readonly<Record<string, WorkbenchAcceptanceDecisionDraft>>
   readonly filters: WorkbenchReviewFilters
   readonly appliedFilters: WorkbenchReviewFilters
   readonly filtersDirty: boolean
@@ -119,21 +152,24 @@ export interface WorkbenchReviewClientState {
   readonly proposalDraftDirty: boolean
   readonly retainedProposalEvidence: readonly SuggestedChangeEvidenceProjection[]
   readonly decisionDrafts: Readonly<Record<string, WorkbenchReviewDecisionDraft>>
-  readonly pendingOperation: 'propose' | 'decide' | null
+  readonly pendingOperation: 'propose' | 'decide' | 'decide-acceptance' | null
   readonly pendingSuggestedChangeId: string | null
+  readonly pendingAcceptanceRequestId: string | null
   readonly loadingMore: boolean
   readonly issue: WorkbenchReviewIssue | null
   readonly canRetryMutation: boolean
   readonly focusSuggestedChangeId: string | null
   readonly focusEpoch: number
+  readonly focusAcceptanceRequestId: string | null
+  readonly acceptanceFocusEpoch: number
 }
 
 /** Generated `remote.workbench` T06 subset used by this controller. */
 export interface WorkbenchReviewRemote {
   reviewCenter(
-    filter: ReviewCenterFilter,
+    filter: ReviewCenterQuery,
     signal?: AbortSignal,
-  ): Promise<RemoteResult<ReviewCenterProjection | null>>
+  ): Promise<RemoteResult<ReviewCenterResultProjection | null>>
   proposeProjectResponsibilityChange(
     request: ProposeProjectResponsibilityChangeRequest,
     signal?: AbortSignal,
@@ -142,6 +178,10 @@ export interface WorkbenchReviewRemote {
     request: DecideSuggestedChangeRequest,
     signal?: AbortSignal,
   ): Promise<RemoteResult<DecideSuggestedChangeResult>>
+  decideDeliverableAcceptance(
+    request: DecideDeliverableAcceptanceRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteResult<DecideDeliverableAcceptanceResult>>
 }
 
 export interface WorkbenchReviewControllerOptions {
@@ -167,6 +207,12 @@ type MutationEnvelope =
     readonly suggestedChangeId: string
     readonly fingerprint: string
     readonly request: DecideSuggestedChangeRequest
+  }
+  | {
+    readonly kind: 'decide-acceptance'
+    readonly projectId: string
+    readonly acceptanceRequestId: string
+    readonly request: DecideDeliverableAcceptanceRequest
   }
 
 const SAFE_TRANSPORT_CODES = new Set<WorkbenchReviewTransportCode>([
@@ -204,10 +250,20 @@ const INITIAL_FILTERS: WorkbenchReviewFilters = Object.freeze({
   riskLevel: 'all',
 })
 
+const INITIAL_ACCEPTANCE_FILTERS: WorkbenchAcceptanceReviewFilters = Object.freeze({
+  status: 'all',
+})
+
 export const INITIAL_WORKBENCH_REVIEW_STATE: WorkbenchReviewClientState = Object.freeze({
   phase: 'idle',
   selection: null,
   review: null,
+  activeKind: 'suggested-change',
+  acceptanceReview: null,
+  acceptanceFilters: INITIAL_ACCEPTANCE_FILTERS,
+  appliedAcceptanceFilters: INITIAL_ACCEPTANCE_FILTERS,
+  acceptanceFiltersDirty: false,
+  acceptanceDecisionDrafts: Object.freeze({}),
   filters: INITIAL_FILTERS,
   appliedFilters: INITIAL_FILTERS,
   filtersDirty: false,
@@ -217,11 +273,14 @@ export const INITIAL_WORKBENCH_REVIEW_STATE: WorkbenchReviewClientState = Object
   decisionDrafts: Object.freeze({}),
   pendingOperation: null,
   pendingSuggestedChangeId: null,
+  pendingAcceptanceRequestId: null,
   loadingMore: false,
   issue: null,
   canRetryMutation: false,
   focusSuggestedChangeId: null,
   focusEpoch: 0,
+  focusAcceptanceRequestId: null,
+  acceptanceFocusEpoch: 0,
 })
 
 /**
@@ -289,7 +348,18 @@ export class WorkbenchReviewController {
 
   refresh(): Promise<void> {
     if (!this.canRead()) return Promise.resolve()
-    return this.track(this.doRefresh(false, false))
+    return this.state.activeKind === 'deliverable-acceptance'
+      ? this.track(this.doAcceptanceRefresh(false, false))
+      : this.track(this.doRefresh(false, false))
+  }
+
+  setReviewKind(kind: WorkbenchReviewKind): Promise<void> {
+    if (!this.canRead() || kind === this.state.activeKind) return Promise.resolve()
+    this.readAbort?.abort(new Error('Workbench Review Center kind changed'))
+    this.publish({ ...this.state, activeKind: kind, phase: 'loading', issue: null })
+    return kind === 'deliverable-acceptance'
+      ? this.track(this.doAcceptanceRefresh(false, false))
+      : this.track(this.doRefresh(false, false))
   }
 
   setStatusFilter(status: SuggestedChangeEffectiveStatus | 'all'): void {
@@ -327,6 +397,38 @@ export class WorkbenchReviewController {
       || this.state.phase === 'loading' || this.state.loadingMore
       || this.state.filtersDirty) return Promise.resolve()
     return this.track(this.doRefresh(true, false))
+  }
+
+  setAcceptanceStatusFilter(status: DeliverableAcceptanceEffectiveStatus | 'all'): void {
+    if (!this.canEditLocalState()) return
+    const acceptanceFilters = Object.freeze({ status })
+    this.publish({
+      ...this.state,
+      acceptanceFilters,
+      acceptanceFiltersDirty: !sameAcceptanceFilters(
+        acceptanceFilters, this.state.appliedAcceptanceFilters,
+      ),
+      issue: this.state.issue?.operation === 'read-review' ? null : this.state.issue,
+    })
+  }
+
+  applyAcceptanceFilters(): Promise<void> {
+    if (!this.canRead() || this.state.activeKind !== 'deliverable-acceptance') {
+      return Promise.resolve()
+    }
+    return this.track(this.doAcceptanceRefresh(false, false, Object.freeze({
+      filters: this.state.acceptanceFilters,
+      commitFilters: true,
+    })))
+  }
+
+  loadMoreAcceptance(): Promise<void> {
+    if (!this.canRead() || this.state.activeKind !== 'deliverable-acceptance'
+      || this.state.acceptanceReview?.nextBeforeSequence === null
+      || this.state.acceptanceReview === null || this.state.acceptanceFiltersDirty) {
+      return Promise.resolve()
+    }
+    return this.track(this.doAcceptanceRefresh(true, false))
   }
 
   setProposalAccountable(memberId: string): void {
@@ -647,6 +749,118 @@ export class WorkbenchReviewController {
     return this.track(this.doMutation(envelope))
   }
 
+  setAcceptanceDecisionMode(
+    acceptanceRequestId: string,
+    mode: DeliverableAcceptanceAllowedDecision,
+  ): void {
+    const item = this.acceptanceCard(acceptanceRequestId)
+    if (!this.canEditLocalState() || item === null
+      || !item.request.allowedDecisions.includes(mode)) return
+    this.updateAcceptanceDecisionDraft({ ...this.acceptanceDecisionDraft(item), mode })
+  }
+
+  setAcceptanceCriterionOutcome(
+    acceptanceRequestId: string,
+    criterionId: string,
+    outcome: DeliverableCriterionOutcome,
+  ): void {
+    const item = this.acceptanceCard(acceptanceRequestId)
+    if (!this.canEditLocalState() || item === null
+      || !item.request.plan.criteria.some(criterion => criterion.criterionId === criterionId)) return
+    const draft = this.acceptanceDecisionDraft(item)
+    this.updateAcceptanceDecisionDraft({
+      ...draft,
+      criteria: Object.freeze({ ...draft.criteria, [criterionId]: outcome }),
+    })
+  }
+
+  setAcceptanceFeedback(acceptanceRequestId: string, feedback: string): void {
+    const item = this.acceptanceCard(acceptanceRequestId)
+    if (!this.canEditLocalState() || item === null) return
+    this.updateAcceptanceDecisionDraft({ ...this.acceptanceDecisionDraft(item), feedback })
+  }
+
+  resetAcceptanceDecisionDraft(acceptanceRequestId: string): void {
+    if (!this.canEditLocalState()) return
+    if (this.retryEnvelope?.kind === 'decide-acceptance'
+      && this.retryEnvelope.acceptanceRequestId === acceptanceRequestId) this.retryEnvelope = null
+    const next = { ...this.state.acceptanceDecisionDrafts }
+    delete next[acceptanceRequestId]
+    this.publish({
+      ...this.state,
+      acceptanceDecisionDrafts: Object.freeze(next),
+      issue: this.state.issue?.operation === 'decide-acceptance' ? null : this.state.issue,
+      canRetryMutation: this.retryEnvelope !== null,
+    })
+  }
+
+  canDecideAcceptance(acceptanceRequestId: string): boolean {
+    const item = this.acceptanceCard(acceptanceRequestId)
+    if (item === null) return false
+    return this.canDecideAcceptanceAs(
+      acceptanceRequestId,
+      this.acceptanceDecisionDraft(item).mode,
+    )
+  }
+
+  canDecideAcceptanceAs(
+    acceptanceRequestId: string,
+    mode: DeliverableAcceptanceAllowedDecision,
+  ): boolean {
+    const item = this.acceptanceCard(acceptanceRequestId)
+    const review = this.state.acceptanceReview
+    if (!this.canMutateAcceptance() || item === null || review === null) return false
+    const draft = this.acceptanceDecisionDraft(item)
+    const criteria = item.request.plan.criteria.map(criterion => draft.criteria[criterion.criterionId])
+    if (draft.basedOnAcceptanceRequestRevision !== item.request.revision
+      || !item.request.allowedDecisions.includes(mode)
+      || !boundedText(draft.feedback.trim(), MAX_REVIEW_FEEDBACK_LENGTH)
+      || criteria.some(outcome => outcome === undefined)) return false
+    if (mode === 'approve' && criteria.some(outcome => outcome !== 'met')) return false
+    return mode !== 'request-changes' || criteria.some(outcome => outcome === 'not-met')
+  }
+
+  decideAcceptance(acceptanceRequestId: string): Promise<void> {
+    const item = this.acceptanceCard(acceptanceRequestId)
+    const review = this.state.acceptanceReview
+    if (!this.canDecideAcceptance(acceptanceRequestId) || item === null || review === null) {
+      return Promise.resolve()
+    }
+    const draft = this.acceptanceDecisionDraft(item)
+    const common = {
+      projectId: review.projectId,
+      deliverableId: item.deliverableId,
+      acceptanceRequestId,
+      criteria: Object.freeze(item.request.plan.criteria.map(criterion => Object.freeze({
+        criterionId: criterion.criterionId,
+        outcome: draft.criteria[criterion.criterionId] ?? 'not-met',
+      }))),
+      feedback: draft.feedback.trim(),
+      expectedDeliverablesRevision: review.deliverablesRevision,
+      expectedDeliverableRevision: item.currentDeliverableRevision,
+      expectedAcceptanceRequestRevision: draft.basedOnAcceptanceRequestRevision,
+      ...this.correlation(),
+    } as const
+    const request: DecideDeliverableAcceptanceRequest = draft.mode === 'approve'
+      ? Object.freeze({
+          ...common, mode: 'approve', reason: 'owner-deliverable-acceptance-approve',
+        })
+      : draft.mode === 'reject'
+        ? Object.freeze({
+            ...common, mode: 'reject', reason: 'owner-deliverable-acceptance-reject',
+          })
+        : Object.freeze({
+            ...common, mode: 'request-changes',
+            reason: 'owner-deliverable-acceptance-needs-changes',
+          })
+    const envelope: MutationEnvelope = Object.freeze({
+      kind: 'decide-acceptance', projectId: review.projectId,
+      acceptanceRequestId, request,
+    })
+    this.retryEnvelope = envelope
+    return this.track(this.doMutation(envelope))
+  }
+
   retryMutation(): Promise<void> {
     if (!this.admitProtectedOperation() || this.state.pendingOperation !== null
       || this.retryEnvelope === null) return Promise.resolve()
@@ -661,6 +875,7 @@ export class WorkbenchReviewController {
       phase: this.state.selection === null ? 'idle' : 'disconnected',
       pendingOperation: null,
       pendingSuggestedChangeId: null,
+      pendingAcceptanceRequestId: null,
       loadingMore: false,
       issue: null,
       canRetryMutation: this.retryEnvelope !== null,
@@ -676,11 +891,14 @@ export class WorkbenchReviewController {
       phase: 'disconnected',
       pendingOperation: null,
       pendingSuggestedChangeId: null,
+      pendingAcceptanceRequestId: null,
       loadingMore: false,
       issue: null,
       canRetryMutation: this.retryEnvelope !== null,
     })
-    return this.track(this.doRefresh(false, false))
+    return this.state.activeKind === 'deliverable-acceptance'
+      ? this.track(this.doAcceptanceRefresh(false, false))
+      : this.track(this.doRefresh(false, false))
   }
 
   dispose(): Promise<void> {
@@ -749,6 +967,15 @@ export class WorkbenchReviewController {
         })
         return
       }
+      if (result.value.reviewKind === 'deliverable-acceptance') {
+        this.publish({
+          ...this.state,
+          phase: 'error',
+          loadingMore: false,
+          issue: Object.freeze({ kind: 'input', code: 'bad-request', operation: 'read-review' }),
+        })
+        return
+      }
       const incoming = detachReviewCenter(result.value)
       const review = append && this.state.review !== null
         ? mergeReviewCenter(this.state.review, incoming)
@@ -779,7 +1006,99 @@ export class WorkbenchReviewController {
     }
   }
 
+  private async doAcceptanceRefresh(
+    append: boolean,
+    keepIssue: boolean,
+    filterRequest?: {
+      readonly filters: WorkbenchAcceptanceReviewFilters
+      readonly commitFilters: boolean
+    },
+  ): Promise<void> {
+    const selection = this.state.selection
+    if (selection === null || this.disposed) return
+    const requestFilters = Object.freeze({
+      ...(filterRequest?.filters ?? this.state.appliedAcceptanceFilters),
+    })
+    const epoch = ++this.readEpoch
+    this.readAbort?.abort(new Error('Workbench acceptance Review refresh was superseded'))
+    const abort = new AbortController()
+    this.readAbort = abort
+    const retainedIssue = keepIssue ? this.state.issue : null
+    const beforeSequence = append
+      ? this.state.acceptanceReview?.nextBeforeSequence ?? undefined
+      : undefined
+    this.publish({
+      ...this.state,
+      phase: append ? this.state.phase : 'loading',
+      loadingMore: append,
+      issue: retainedIssue,
+    })
+    try {
+      const result = await this.remote.reviewCenter(Object.freeze({
+        reviewKind: 'deliverable-acceptance' as const,
+        projectId: selection.projectId,
+        ...(requestFilters.status === 'all' ? {} : { status: requestFilters.status }),
+        ...(beforeSequence === undefined ? {} : { beforeSequence }),
+        limit: 20,
+      }), abort.signal)
+      if (!this.acceptRead(epoch, abort, selection.projectId)) return
+      this.readAbort = null
+      if (!result.ok) {
+        this.publishReadFailure(result.error)
+        return
+      }
+      if (result.value === null) {
+        this.publish({
+          ...this.state,
+          phase: 'error',
+          acceptanceReview: null,
+          loadingMore: false,
+          issue: Object.freeze({
+            kind: 'input', code: 'project-not-found', operation: 'read-review',
+          }),
+        })
+        return
+      }
+      if (result.value.reviewKind !== 'deliverable-acceptance') {
+        this.publish({
+          ...this.state,
+          phase: 'error',
+          loadingMore: false,
+          issue: Object.freeze({ kind: 'input', code: 'bad-request', operation: 'read-review' }),
+        })
+        return
+      }
+      const incoming = detachAcceptanceReview(result.value)
+      const acceptanceReview = append && this.state.acceptanceReview !== null
+        ? mergeAcceptanceReview(this.state.acceptanceReview, incoming)
+        : incoming
+      const appliedAcceptanceFilters = filterRequest?.commitFilters === true
+        ? requestFilters
+        : this.state.appliedAcceptanceFilters
+      this.publish({
+        ...this.state,
+        phase: keepIssue && retainedIssue?.kind === 'conflict' ? 'conflict' : 'ready',
+        acceptanceReview,
+        appliedAcceptanceFilters,
+        acceptanceFiltersDirty: !sameAcceptanceFilters(
+          this.state.acceptanceFilters, appliedAcceptanceFilters,
+        ),
+        loadingMore: false,
+        issue: keepIssue ? retainedIssue : null,
+        canRetryMutation: this.retryEnvelope !== null,
+      })
+    } catch (error) {
+      if (!this.acceptRead(epoch, abort, selection.projectId)) return
+      this.readAbort = null
+      this.publishReadFailure(error)
+    }
+  }
+
   private async doMutation(envelope: MutationEnvelope): Promise<void> {
+    if (envelope.kind === 'decide-acceptance') {
+      await this.doAcceptanceMutation(envelope)
+      return
+    }
     if (this.disposed || this.state.selection?.projectId !== envelope.projectId) return
     const epoch = ++this.mutationEpoch
     this.mutationAbort?.abort(new Error('Workbench Review Center mutation was superseded'))
@@ -796,7 +1115,7 @@ export class WorkbenchReviewController {
       canRetryMutation: false,
       focusSuggestedChangeId: null,
     })
-    let result: RemoteResult<ReviewDomainResult>
+    let result: RemoteResult<SuggestedReviewDomainResult>
     try {
       result = await this.invokeMutation(envelope, abort.signal)
     } catch (error) {
@@ -868,10 +1187,85 @@ export class WorkbenchReviewController {
     }
   }
 
+  private async doAcceptanceMutation(
+    envelope: Extract<MutationEnvelope, { readonly kind: 'decide-acceptance' }>,
+  ): Promise<void> {
+    if (this.disposed || this.state.selection?.projectId !== envelope.projectId
+      || this.state.pendingOperation !== null) return
+    const epoch = ++this.mutationEpoch
+    this.mutationAbort?.abort(new Error('Workbench acceptance decision was superseded'))
+    const abort = new AbortController()
+    this.mutationAbort = abort
+    this.publish({
+      ...this.state,
+      phase: 'pending',
+      pendingOperation: 'decide-acceptance',
+      pendingSuggestedChangeId: null,
+      pendingAcceptanceRequestId: envelope.acceptanceRequestId,
+      issue: null,
+      canRetryMutation: false,
+      focusAcceptanceRequestId: null,
+    })
+    let result: RemoteResult<DecideDeliverableAcceptanceResult>
+    try {
+      result = await this.remote.decideDeliverableAcceptance(envelope.request, abort.signal)
+    } catch (error) {
+      if (!this.acceptMutation(epoch, abort, envelope.projectId)) return
+      this.mutationAbort = null
+      this.publishMutationTransportFailure('decide-acceptance', error)
+      return
+    }
+    if (!this.acceptMutation(epoch, abort, envelope.projectId)) return
+    this.mutationAbort = null
+    if (!result.ok) {
+      this.publishMutationTransportFailure('decide-acceptance', result.error)
+      return
+    }
+    if (!result.value.ok) {
+      this.retryEnvelope = null
+      this.publish({
+        ...this.state,
+        phase: 'conflict',
+        pendingOperation: null,
+        pendingAcceptanceRequestId: null,
+        issue: Object.freeze({
+          kind: 'conflict', code: result.value.error.code,
+          operation: 'decide-acceptance',
+        }),
+        canRetryMutation: false,
+      })
+      await this.doAcceptanceRefresh(false, true)
+      return
+    }
+    this.retryEnvelope = null
+    const decisionDrafts = { ...this.state.acceptanceDecisionDrafts }
+    delete decisionDrafts[envelope.acceptanceRequestId]
+    this.publish({
+      ...this.state,
+      phase: 'loading',
+      acceptanceDecisionDrafts: Object.freeze(decisionDrafts),
+      pendingOperation: null,
+      pendingAcceptanceRequestId: null,
+      issue: null,
+      canRetryMutation: false,
+      focusAcceptanceRequestId: envelope.acceptanceRequestId,
+    })
+    this.notifyCommitted(result.value.receipt, false)
+    await this.doAcceptanceRefresh(false, false)
+    if (this.state.acceptanceReview?.items.some(item =>
+      item.request.acceptanceRequestId === envelope.acceptanceRequestId) === true) {
+      this.publish({
+        ...this.state,
+        focusAcceptanceRequestId: envelope.acceptanceRequestId,
+        acceptanceFocusEpoch: this.state.acceptanceFocusEpoch + 1,
+      })
+    }
+  }
+
   private invokeMutation(
-    envelope: MutationEnvelope,
+    envelope: Exclude<MutationEnvelope, { readonly kind: 'decide-acceptance' }>,
     signal: AbortSignal,
-  ): Promise<RemoteResult<ReviewDomainResult>> {
+  ): Promise<RemoteResult<SuggestedReviewDomainResult>> {
     if (envelope.kind === 'propose') {
       return this.remote.proposeProjectResponsibilityChange(envelope.request, signal)
     }
@@ -927,6 +1321,24 @@ export class WorkbenchReviewController {
     })
   }
 
+  private updateAcceptanceDecisionDraft(next: WorkbenchAcceptanceDecisionDraft): void {
+    if (!this.canEditLocalState()) return
+    if (this.retryEnvelope?.kind === 'decide-acceptance'
+      && this.retryEnvelope.acceptanceRequestId === next.acceptanceRequestId) {
+      this.retryEnvelope = null
+    }
+    this.publish({
+      ...this.state,
+      phase: this.state.phase === 'conflict' ? 'ready' : this.state.phase,
+      acceptanceDecisionDrafts: Object.freeze({
+        ...this.state.acceptanceDecisionDrafts,
+        [next.acceptanceRequestId]: freezeAcceptanceDecisionDraft(next),
+      }),
+      issue: this.state.issue?.operation === 'decide-acceptance' ? null : this.state.issue,
+      canRetryMutation: this.retryEnvelope !== null,
+    })
+  }
+
   private decisionDraft(card: SuggestedChangeProjection): WorkbenchReviewDecisionDraft {
     return this.state.decisionDrafts[card.suggestedChangeId]
       ?? decisionDraftFrom(card)
@@ -935,6 +1347,20 @@ export class WorkbenchReviewController {
   private card(suggestedChangeId: string): SuggestedChangeProjection | null {
     return this.state.review?.items.find(item => item.suggestedChangeId === suggestedChangeId)
       ?? null
+  }
+
+  private acceptanceCard(
+    acceptanceRequestId: string,
+  ): DeliverableAcceptanceReviewItemProjection | null {
+    return this.state.acceptanceReview?.items.find(item =>
+      item.request.acceptanceRequestId === acceptanceRequestId) ?? null
+  }
+
+  private acceptanceDecisionDraft(
+    item: DeliverableAcceptanceReviewItemProjection,
+  ): WorkbenchAcceptanceDecisionDraft {
+    return this.state.acceptanceDecisionDrafts[item.request.acceptanceRequestId]
+      ?? acceptanceDecisionDraftFrom(item)
   }
 
   private proposalCandidate(): ProjectResponsibilitySuggestedValue {
@@ -1015,6 +1441,15 @@ export class WorkbenchReviewController {
       && this.state.phase !== 'disconnected'
   }
 
+  private canMutateAcceptance(): boolean {
+    return this.canEditLocalState()
+      && this.state.activeKind === 'deliverable-acceptance'
+      && this.state.selection !== null
+      && this.state.acceptanceReview !== null
+      && this.state.phase !== 'loading'
+      && this.state.phase !== 'disconnected'
+  }
+
   private acceptRead(epoch: number, abort: AbortController, projectId: string): boolean {
     return !this.disposed
       && this.state.selection?.projectId === projectId
@@ -1039,6 +1474,7 @@ export class WorkbenchReviewController {
       loadingMore: false,
       pendingOperation: null,
       pendingSuggestedChangeId: null,
+      pendingAcceptanceRequestId: null,
       issue,
       canRetryMutation: this.retryEnvelope !== null,
     })
@@ -1046,7 +1482,7 @@ export class WorkbenchReviewController {
   }
 
   private publishMutationTransportFailure(
-    operation: 'propose' | 'decide',
+    operation: 'propose' | 'decide' | 'decide-acceptance',
     error: unknown,
   ): void {
     const issue = classifyTransportOrInput(error, operation)
@@ -1059,6 +1495,7 @@ export class WorkbenchReviewController {
       phase: 'error',
       pendingOperation: null,
       pendingSuggestedChangeId: null,
+      pendingAcceptanceRequestId: null,
       issue,
       canRetryMutation: this.retryEnvelope !== null,
     })
@@ -1132,6 +1569,24 @@ function proposalDraftFrom(review: ReviewCenterProjection | null): WorkbenchRevi
     humanSponsorMemberId: builder.base.humanSponsorMemberId ?? '',
     evidenceAuditEventIds: Object.freeze([]),
   })
+}
+
+function acceptanceDecisionDraftFrom(
+  item: DeliverableAcceptanceReviewItemProjection,
+): WorkbenchAcceptanceDecisionDraft {
+  return Object.freeze({
+    acceptanceRequestId: item.request.acceptanceRequestId,
+    basedOnAcceptanceRequestRevision: item.request.revision,
+    mode: item.request.allowedDecisions[0] ?? 'reject',
+    criteria: Object.freeze({}),
+    feedback: '',
+  })
+}
+
+function freezeAcceptanceDecisionDraft(
+  value: WorkbenchAcceptanceDecisionDraft,
+): WorkbenchAcceptanceDecisionDraft {
+  return Object.freeze({ ...value, criteria: Object.freeze({ ...value.criteria }) })
 }
 
 function decisionDraftFrom(card: SuggestedChangeProjection): WorkbenchReviewDecisionDraft {
@@ -1327,6 +1782,33 @@ function sameReviewFilters(
   right: WorkbenchReviewFilters,
 ): boolean {
   return left.status === right.status && left.riskLevel === right.riskLevel
+}
+
+function sameAcceptanceFilters(
+  left: WorkbenchAcceptanceReviewFilters,
+  right: WorkbenchAcceptanceReviewFilters,
+): boolean {
+  return left.status === right.status
+}
+
+function detachAcceptanceReview(
+  value: DeliverableAcceptanceReviewCenterProjection,
+): DeliverableAcceptanceReviewCenterProjection {
+  return structuredClone(value)
+}
+
+function mergeAcceptanceReview(
+  current: DeliverableAcceptanceReviewCenterProjection,
+  incoming: DeliverableAcceptanceReviewCenterProjection,
+): DeliverableAcceptanceReviewCenterProjection {
+  const seen = new Set(current.items.map(item => item.request.acceptanceRequestId))
+  return Object.freeze({
+    ...incoming,
+    items: Object.freeze([
+      ...current.items,
+      ...incoming.items.filter(item => !seen.has(item.request.acceptanceRequestId)),
+    ]),
+  })
 }
 
 function detachSuggestedChange(value: SuggestedChangeProjection): SuggestedChangeProjection {

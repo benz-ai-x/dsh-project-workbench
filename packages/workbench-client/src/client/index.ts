@@ -119,8 +119,34 @@ export type {
   WorkbenchProjectMilestonesTransportCode,
   WorkbenchProjectMilestonesTransportIssue,
 } from './milestone-controller.ts'
+export {
+  INITIAL_WORKBENCH_PROJECT_DELIVERABLES_STATE,
+  MAX_DELIVERABLE_CANDIDATE_VERSIONS,
+  MAX_DELIVERABLE_CONTRIBUTORS,
+  MAX_DELIVERABLE_CRITERIA,
+  MAX_DELIVERABLE_CRITERION_LENGTH,
+  MAX_DELIVERABLE_DESCRIPTION_LENGTH,
+  MAX_DELIVERABLE_NAME_LENGTH,
+  MAX_DELIVERABLE_TASKS,
+  WorkbenchProjectDeliverablesController,
+} from './project-deliverables-controller.ts'
+export type {
+  WorkbenchDeclaredArtifactVersionDraft,
+  WorkbenchProjectDeliverableCreateDraft,
+  WorkbenchProjectDeliverablesClientState,
+  WorkbenchProjectDeliverablesConflictCode,
+  WorkbenchProjectDeliverablesControllerOptions,
+  WorkbenchProjectDeliverablesIssue,
+  WorkbenchProjectDeliverablesOperation,
+  WorkbenchProjectDeliverablesPhase,
+  WorkbenchProjectDeliverablesRemote,
+  WorkbenchProjectDeliverablesSelection,
+  WorkbenchProjectDeliverablesTransportCode,
+} from './project-deliverables-controller.ts'
 export type {
   WorkbenchReviewClientState,
+  WorkbenchAcceptanceDecisionDraft,
+  WorkbenchAcceptanceReviewFilters,
   WorkbenchReviewConflictCode,
   WorkbenchReviewConflictIssue,
   WorkbenchReviewControllerOptions,
@@ -128,6 +154,7 @@ export type {
   WorkbenchReviewFilters,
   WorkbenchReviewInputIssue,
   WorkbenchReviewIssue,
+  WorkbenchReviewKind,
   WorkbenchReviewOperation,
   WorkbenchReviewPhase,
   WorkbenchReviewProposalDraft,

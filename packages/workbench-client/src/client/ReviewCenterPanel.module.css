@@ -568,6 +568,86 @@
   justify-content: center;
 }
 
+.kindSwitcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.acceptanceList {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.acceptanceCard {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 14px;
+}
+
+.acceptanceTruthGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  min-width: 0;
+  margin-top: 14px;
+}
+
+.acceptanceTruthGrid > section,
+.recordedDecision,
+.acceptanceDecision > fieldset {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+}
+
+.acceptanceVersions {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.acceptanceVersions li {
+  min-width: 0;
+  padding: 8px;
+  background: var(--dsw-alias-bg-l1);
+}
+
+.acceptanceVersions span,
+.acceptanceVersions code {
+  display: block;
+  margin-top: 3px;
+}
+
+.acceptanceVersions span {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+}
+
+.recordedDecision,
+.acceptanceDecision { min-width: 0; margin-top: 14px; }
+.acceptanceDecision > fieldset { display: grid; gap: 12px; }
+.acceptanceCriterion { display: flex; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.acceptanceCriterion legend { width: 100%; overflow-wrap: anywhere; }
+.acceptanceCriterion label { display: flex; align-items: center; gap: 6px; }
+
+.acceptanceCard code,
+.acceptanceCard a,
+.acceptanceCard dd,
+.acceptanceCard li,
+.acceptanceCard p,
+.acceptanceCard strong,
+.acceptanceCard span {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 @keyframes workbench-review-reveal {
   from {
     opacity: 0;
@@ -670,9 +750,14 @@
   }
 
   .formActions,
-  .modeButtons {
+  .modeButtons,
+  .kindSwitcher {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .acceptanceTruthGrid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

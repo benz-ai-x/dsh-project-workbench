@@ -37,6 +37,8 @@ export interface ActivityPanelCopy {
   readonly objectFeishuTaskWorkflow: string
   readonly objectProjectCalendarBinding: string
   readonly objectProjectMilestone: string
+  readonly objectProjectDeliverable: string
+  readonly objectDeliverableAcceptanceRequest: string
   readonly objectIdLabel: string
   readonly actionLabel: string
   readonly actionAll: string
@@ -61,6 +63,11 @@ export interface ActivityPanelCopy {
   readonly actionProjectCalendarBound: string
   readonly actionProjectMilestoneCreated: string
   readonly actionProjectMilestoneDateUpdateRequested: string
+  readonly actionProjectDeliverableCreated: string
+  readonly actionDeliverableAcceptanceRequested: string
+  readonly actionDeliverableAcceptanceApproved: string
+  readonly actionDeliverableAcceptanceRejected: string
+  readonly actionDeliverableAcceptanceNeedsChanges: string
   readonly applyFilters: string
   readonly loading: string
   readonly stale: string
@@ -103,6 +110,11 @@ export interface ActivityPanelCopy {
   readonly summaryProjectCalendarBound: string
   readonly summaryProjectMilestoneCreated: string
   readonly summaryProjectMilestoneDateUpdateRequested: string
+  readonly summaryProjectDeliverableCreated: string
+  readonly summaryDeliverableAcceptanceRequested: string
+  readonly summaryDeliverableAcceptanceApproved: string
+  readonly summaryDeliverableAcceptanceRejected: string
+  readonly summaryDeliverableAcceptanceNeedsChanges: string
   readonly workspaceScope: string
   readonly projectPrefix: string
   readonly actorPrefix: string
@@ -130,6 +142,11 @@ export interface ActivityPanelCopy {
   readonly reasonOwnerProjectCalendarBind: string
   readonly reasonOwnerProjectMilestoneCreate: string
   readonly reasonOwnerProjectMilestoneDateUpdate: string
+  readonly reasonOwnerProjectDeliverableCreate: string
+  readonly reasonOwnerDeliverableAcceptanceRequest: string
+  readonly reasonOwnerDeliverableAcceptanceApprove: string
+  readonly reasonOwnerDeliverableAcceptanceReject: string
+  readonly reasonOwnerDeliverableAcceptanceNeedsChanges: string
   readonly causationPrefix: string
   readonly outboxPrefix: string
   readonly attemptsPrefix: string
@@ -162,6 +179,8 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   objectFeishuTaskWorkflow: 'Feishu task workflow',
   objectProjectCalendarBinding: 'Project calendar binding',
   objectProjectMilestone: 'Project Milestone',
+  objectProjectDeliverable: 'Project Deliverable',
+  objectDeliverableAcceptanceRequest: 'Deliverable Acceptance Request',
   objectIdLabel: 'Object ID',
   actionLabel: 'Action',
   actionAll: 'All actions',
@@ -186,6 +205,11 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   actionProjectCalendarBound: 'Project calendar bound',
   actionProjectMilestoneCreated: 'Project Milestone created',
   actionProjectMilestoneDateUpdateRequested: 'Project Milestone date update requested',
+  actionProjectDeliverableCreated: 'Project Deliverable created',
+  actionDeliverableAcceptanceRequested: 'Deliverable acceptance requested',
+  actionDeliverableAcceptanceApproved: 'Deliverable acceptance approved',
+  actionDeliverableAcceptanceRejected: 'Deliverable acceptance rejected',
+  actionDeliverableAcceptanceNeedsChanges: 'Deliverable acceptance needs changes',
   applyFilters: 'Apply filters',
   loading: 'Loading activity…',
   stale: 'Activity may be out of date. Reconnect to refresh it.',
@@ -228,6 +252,11 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   summaryProjectCalendarBound: 'Project calendar bound',
   summaryProjectMilestoneCreated: 'Project Milestone created',
   summaryProjectMilestoneDateUpdateRequested: 'Project Milestone date update requested',
+  summaryProjectDeliverableCreated: 'Project Deliverable created',
+  summaryDeliverableAcceptanceRequested: 'Deliverable acceptance requested',
+  summaryDeliverableAcceptanceApproved: 'Deliverable acceptance approved',
+  summaryDeliverableAcceptanceRejected: 'Deliverable acceptance rejected',
+  summaryDeliverableAcceptanceNeedsChanges: 'Deliverable acceptance needs changes',
   workspaceScope: 'Workspace',
   projectPrefix: 'Project',
   actorPrefix: 'Actor',
@@ -255,6 +284,11 @@ export const DEFAULT_ACTIVITY_PANEL_COPY: ActivityPanelCopy = Object.freeze({
   reasonOwnerProjectCalendarBind: 'Owner Project calendar binding',
   reasonOwnerProjectMilestoneCreate: 'Owner Project Milestone creation',
   reasonOwnerProjectMilestoneDateUpdate: 'Owner Project Milestone date update',
+  reasonOwnerProjectDeliverableCreate: 'Owner Project Deliverable creation',
+  reasonOwnerDeliverableAcceptanceRequest: 'Owner Deliverable acceptance request',
+  reasonOwnerDeliverableAcceptanceApprove: 'Owner Deliverable acceptance approval',
+  reasonOwnerDeliverableAcceptanceReject: 'Owner Deliverable acceptance rejection',
+  reasonOwnerDeliverableAcceptanceNeedsChanges: 'Owner Deliverable acceptance needs changes',
   causationPrefix: 'Causation',
   outboxPrefix: 'Outbox',
   attemptsPrefix: 'Attempts',
@@ -285,6 +319,8 @@ function isActivityObjectType(
     || value === 'feishu-task-workflow'
     || value === 'project-calendar-binding'
     || value === 'project-milestone'
+    || value === 'project-deliverable'
+    || value === 'deliverable-acceptance-request'
 }
 
 function isActivityAction(
@@ -311,6 +347,11 @@ function isActivityAction(
     || value === 'workbench.project-calendar.bound'
     || value === 'workbench.project-milestone.created'
     || value === 'workbench.project-milestone.date-update-requested'
+    || value === 'workbench.project-deliverable.created'
+    || value === 'workbench.deliverable-acceptance.requested'
+    || value === 'workbench.deliverable-acceptance.approved'
+    || value === 'workbench.deliverable-acceptance.rejected'
+    || value === 'workbench.deliverable-acceptance.needs-changes'
 }
 
 /** Render only allowlisted projection fields; no payload or raw error surface exists here. */
@@ -460,6 +501,10 @@ export function ActivityPanel({
                   {copy.objectProjectCalendarBinding}
                 </option>
                 <option value="project-milestone">{copy.objectProjectMilestone}</option>
+                <option value="project-deliverable">{copy.objectProjectDeliverable}</option>
+                <option value="deliverable-acceptance-request">
+                  {copy.objectDeliverableAcceptanceRequest}
+                </option>
               </select>
             </label>
             <label className={css.field}>
@@ -536,6 +581,21 @@ export function ActivityPanel({
                 </option>
                 <option value="workbench.project-milestone.date-update-requested">
                   {copy.actionProjectMilestoneDateUpdateRequested}
+                </option>
+                <option value="workbench.project-deliverable.created">
+                  {copy.actionProjectDeliverableCreated}
+                </option>
+                <option value="workbench.deliverable-acceptance.requested">
+                  {copy.actionDeliverableAcceptanceRequested}
+                </option>
+                <option value="workbench.deliverable-acceptance.approved">
+                  {copy.actionDeliverableAcceptanceApproved}
+                </option>
+                <option value="workbench.deliverable-acceptance.rejected">
+                  {copy.actionDeliverableAcceptanceRejected}
+                </option>
+                <option value="workbench.deliverable-acceptance.needs-changes">
+                  {copy.actionDeliverableAcceptanceNeedsChanges}
                 </option>
               </select>
             </label>
@@ -727,6 +787,13 @@ function summary(item: WorkbenchActivityItem, copy: ActivityPanelCopy): string {
     case 'project-milestone-date-update-requested': {
       return copy.summaryProjectMilestoneDateUpdateRequested
     }
+    case 'project-deliverable-created': return copy.summaryProjectDeliverableCreated
+    case 'deliverable-acceptance-requested': return copy.summaryDeliverableAcceptanceRequested
+    case 'deliverable-acceptance-approved': return copy.summaryDeliverableAcceptanceApproved
+    case 'deliverable-acceptance-rejected': return copy.summaryDeliverableAcceptanceRejected
+    case 'deliverable-acceptance-needs-changes': {
+      return copy.summaryDeliverableAcceptanceNeedsChanges
+    }
   }
 }
 
@@ -755,6 +822,19 @@ function reasonLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'owner-project-milestone-date-update': {
       return copy.reasonOwnerProjectMilestoneDateUpdate
     }
+    case 'owner-project-deliverable-create': return copy.reasonOwnerProjectDeliverableCreate
+    case 'owner-deliverable-acceptance-request': {
+      return copy.reasonOwnerDeliverableAcceptanceRequest
+    }
+    case 'owner-deliverable-acceptance-approve': {
+      return copy.reasonOwnerDeliverableAcceptanceApprove
+    }
+    case 'owner-deliverable-acceptance-reject': {
+      return copy.reasonOwnerDeliverableAcceptanceReject
+    }
+    case 'owner-deliverable-acceptance-needs-changes': {
+      return copy.reasonOwnerDeliverableAcceptanceNeedsChanges
+    }
   }
 }
 
@@ -771,6 +851,8 @@ function objectLabel(item: WorkbenchActivityItem, copy: ActivityPanelCopy): stri
     case 'feishu-task-workflow': return copy.objectFeishuTaskWorkflow
     case 'project-calendar-binding': return copy.objectProjectCalendarBinding
     case 'project-milestone': return copy.objectProjectMilestone
+    case 'project-deliverable': return copy.objectProjectDeliverable
+    case 'deliverable-acceptance-request': return copy.objectDeliverableAcceptanceRequest
   }
 }
 
