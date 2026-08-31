@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import type {
   CreateProjectRequest,
   FeishuCredentialProjection,
@@ -614,6 +615,53 @@ describe('T10 Feishu calendar scenario', () => {
     await scenario.close()
   })
 
+  it('rejects a Calendar-create provider intent that no longer matches its accepted receipt', async () => {
+    const { scenario, adapter, databasePath } = await fixture()
+    const claim = vi.spyOn(
+      SqliteWorkbenchRepository.prototype,
+      'claimFeishuCalendarEffect',
+    ).mockResolvedValueOnce(false)
+    const request = Object.freeze({
+      projectId: PROJECT_ID,
+      kind: 'bot' as const,
+      mode: 'create' as const,
+      summary: 'Immutable Project calendar',
+      description: 'Original provider intent',
+      expectedConnectionRevision: 2,
+      expectedRouteGeneration: 1,
+      expectedBindingRevision: null,
+      idempotencyKey: 'feishu-calendar-bind-intent-integrity-0001',
+      causationId: 'feishu-calendar-bind-intent-integrity-cause-0001',
+      reason: 'owner-project-calendar-bind' as const,
+    })
+    await expect(scenario.bindProjectCalendar(request, signal)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'remote-outcome-unknown' },
+    })
+    claim.mockRestore()
+    await scenario.close()
+
+    const database = new DatabaseSync(databasePath)
+    database.exec(`
+      DROP TRIGGER workbench_feishu_calendar_effect_intent_no_update;
+      UPDATE workbench_feishu_calendar_effect
+      SET intent_json = '{"description":"Original provider intent","mode":"create","summary":"FORGED"}'
+      WHERE operation = 'calendar-create';
+      CREATE TRIGGER workbench_feishu_calendar_effect_intent_no_update BEFORE UPDATE OF
+        id, project_id, organization_id, team_id, actor_id, operation, milestone_id,
+        expected_project_revision, expected_milestone_revision,
+        expected_remote_observation_version, intent_json, request_hash,
+        idempotency_key_hash, provider_idempotency_key, route_kind, route_generation,
+        app_id, open_id, tenant_key, command_id, audit_event_id, outbox_id, created_at
+        ON workbench_feishu_calendar_effect
+      BEGIN SELECT RAISE(ABORT, 'workbench Calendar effect intent is immutable'); END;
+    `)
+    database.close()
+
+    const reopened = scenarioFor(databasePath, adapter)
+    await expect(reopened.open()).rejects.toThrow(/Calendar receipt has invalid request/u)
+  })
+
   it('claims and settles the original prepared event-create effect on same-key replay', async () => {
     const { scenario, adapter } = await fixture()
     await scenario.bindProjectCalendar({
@@ -1104,6 +1152,14 @@ describe('T10 Feishu calendar scenario', () => {
       error: { code: 'remote-outcome-unknown' },
     })
     projectRevision += 1
+    const projectedWithOldUnknown = await repository.readProjectMilestones({
+      organizationId: actor.organizationId,
+      teamId: actor.teamId,
+      projectId: PROJECT_ID,
+    }, signal)
+    expect(projectedWithOldUnknown?.effects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ effectId: unknownEffectId, state: 'unknown' }),
+    ]))
 
     const unmatchedSchedule = allDay('2026-11-12', '2026-11-13')
     await expect(repository.commitFeishuCalendarReconciliation(Object.freeze({
