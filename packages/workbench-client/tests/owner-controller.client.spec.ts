@@ -7,6 +7,7 @@ import type {
   ProjectDetailProjection,
   ProjectMilestonesProjection,
   ProjectDeliverablesProjection,
+  ProjectRisksProjection,
   ProjectStartProjection,
   ProjectTasksProjection,
   ReviewCenterProjection,
@@ -28,6 +29,10 @@ import {
   INITIAL_WORKBENCH_PROJECT_DELIVERABLES_STATE,
   type WorkbenchProjectDeliverablesRemote,
 } from '../src/client/project-deliverables-controller.ts'
+import {
+  INITIAL_WORKBENCH_PROJECT_RISKS_STATE,
+  type WorkbenchProjectRisksRemote,
+} from '../src/client/project-risk-controller.ts'
 import { OwnerController } from '../src/client/owner-controller.ts'
 
 function fakeClock(initial: string) {
@@ -149,6 +154,15 @@ function projectDeliverables(projectId: string): ProjectDeliverablesProjection {
     projectId, revision: 0, teamRevision: 0, taskRevision: 0, scheduleRevision: 0,
     calendarBinding: null, memberOptions: [], taskOptions: [], deliverables: [],
     activity: [], nextBeforeActivitySequence: null,
+  }
+}
+
+function projectRisks(projectId: string): ProjectRisksProjection {
+  return {
+    projectId, revision: 0, teamRevision: 0, taskRevision: 0,
+    risks: [], nextBeforeRiskSequence: null, selectedRisk: null,
+    activity: [], nextBeforeActivitySequence: null,
+    memberOptions: [], evidenceOptions: [], dependencyOptions: [], taskOptions: [],
   }
 }
 
@@ -367,6 +381,7 @@ function auth(overrides: Partial<OwnerAuthHttp> = {}): OwnerAuthHttp {
 type OwnerRemote = WorkbenchRemote & WorkbenchProjectRemote & WorkbenchProjectTeamRemote
   & WorkbenchReviewRemote & WorkbenchFeishuConnectionRemote & WorkbenchProjectTasksRemote
   & WorkbenchProjectMilestonesRemote & WorkbenchProjectDeliverablesRemote
+  & WorkbenchProjectRisksRemote
 
 function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
   return {
@@ -532,6 +547,23 @@ function remote(overrides: Partial<OwnerRemote> = {}): OwnerRemote {
         ok: false as const,
         error: { code: 'idempotency-conflict' as const, message: 'unused' },
       }))),
+    projectRisks: overrides.projectRisks
+      ?? vi.fn(query => Promise.resolve(remoteOk(projectRisks(query.projectId)))),
+    createProjectRisk: overrides.createProjectRisk
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    reviseProjectRisk: overrides.reviseProjectRisk
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
+    transitionProjectRisk: overrides.transitionProjectRisk
+      ?? vi.fn(() => Promise.resolve(remoteOk({
+        ok: false as const,
+        error: { code: 'idempotency-conflict' as const, message: 'unused' },
+      }))),
   }
 }
 
@@ -581,6 +613,7 @@ describe('OwnerController', () => {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -644,6 +677,7 @@ describe('OwnerController', () => {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: 'WB1-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH',
     })
@@ -877,12 +911,20 @@ describe('OwnerController', () => {
     const projects = controller.getSnapshot().projects
     await projects?.openProject('project-1')
     const deliverables = controller.getSnapshot().projectDeliverables
+    const risks = controller.getSnapshot().projectRisks
     const activity = controller.getSnapshot().activity
     expect(status).not.toBeNull()
     expect(activity?.getSnapshot().phase).toBe('ready')
     status?.setDraft('sensitive unsaved draft')
     if (projects !== null) completeProjectDraft(projects)
     deliverables?.setCreateName('Sensitive Deliverable draft')
+    if (risks !== null) {
+      risks.setCreateDraft({
+        ...risks.getSnapshot().createDraft,
+        event: 'Sensitive Risk draft',
+        consequence: 'Sensitive consequence',
+      })
+    }
 
     const leaving = controller.logout()
     expect(controller.getSnapshot().phase).toBe('logout-pending')
@@ -898,6 +940,9 @@ describe('OwnerController', () => {
     expect(deliverables?.getSnapshot()).toMatchObject({
       phase: 'stale', createDraft: { name: 'Sensitive Deliverable draft' },
     })
+    expect(risks?.getSnapshot()).toMatchObject({
+      phase: 'stale', createDraft: { event: 'Sensitive Risk draft' },
+    })
     logout.resolve(authOk({ state: 'signed-out' }))
     await leaving
 
@@ -912,6 +957,7 @@ describe('OwnerController', () => {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -923,6 +969,7 @@ describe('OwnerController', () => {
       draftDirty: false,
     })
     expect(deliverables?.getSnapshot()).toEqual(INITIAL_WORKBENCH_PROJECT_DELIVERABLES_STATE)
+    expect(risks?.getSnapshot()).toEqual(INITIAL_WORKBENCH_PROJECT_RISKS_STATE)
     expect(activity?.getSnapshot()).toMatchObject({
       phase: 'loading',
       activity: null,
@@ -961,6 +1008,7 @@ describe('OwnerController', () => {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1055,10 +1103,12 @@ describe('OwnerController', () => {
     const status = controller.getSnapshot().status
     const projects = controller.getSnapshot().projects
     const feishuConnection = controller.getSnapshot().feishuConnection
+    const risks = controller.getSnapshot().projectRisks
     expect(feishuConnection?.getSnapshot()).toMatchObject({
       phase: 'ready',
       center: { revision: 0, bot: { state: 'unconfigured' }, user: { state: 'unconfigured' } },
     })
+    expect(risks).not.toBeNull()
     status?.setDraft('recoverable draft')
     if (projects !== null) completeProjectDraft(projects)
     order.length = 0
@@ -1343,6 +1393,7 @@ describe('OwnerController', () => {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1358,6 +1409,7 @@ describe('OwnerController', () => {
     const projects = controller.getSnapshot().projects
     const activity = controller.getSnapshot().activity
     const feishuConnection = controller.getSnapshot().feishuConnection
+    const risks = controller.getSnapshot().projectRisks
     if (projects !== null) completeProjectDraft(projects)
     expect(activity?.getSnapshot().phase).toBe('ready')
     expect(feishuConnection?.getSnapshot()).toMatchObject({
@@ -1377,6 +1429,7 @@ describe('OwnerController', () => {
       projectTasks: null,
       projectMilestones: null,
       projectDeliverables: null,
+      projectRisks: null,
       activity: null,
       recoveryCode: null,
       issue: null,
@@ -1397,6 +1450,7 @@ describe('OwnerController', () => {
       center: null,
       pendingOperation: null,
     })
+    expect(risks?.getSnapshot()).toEqual(INITIAL_WORKBENCH_PROJECT_RISKS_STATE)
     await disposal
   })
 })

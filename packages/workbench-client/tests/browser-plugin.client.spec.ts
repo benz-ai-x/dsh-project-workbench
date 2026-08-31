@@ -14,6 +14,7 @@ import type {
   ProjectDetailProjection,
   ProjectDeliverablesProjection,
   ProjectMilestonesProjection,
+  ProjectRisksProjection,
   ProjectStartProjection,
   ProjectTasksProjection,
   ReviewCenterProjection,
@@ -214,6 +215,15 @@ function emptyProjectDeliverables(projectId: string): ProjectDeliverablesProject
   }
 }
 
+function emptyProjectRisks(projectId: string): ProjectRisksProjection {
+  return {
+    projectId, revision: 0, teamRevision: 0, taskRevision: 0,
+    risks: [], nextBeforeRiskSequence: null, selectedRisk: null,
+    activity: [], nextBeforeActivitySequence: null,
+    memberOptions: [], evidenceOptions: [], dependencyOptions: [], taskOptions: [],
+  }
+}
+
 type WorkbenchRemoteSnapshot = (
   signal?: AbortSignal,
 ) => Promise<{ readonly ok: true; readonly value: WorkbenchStatusSnapshot }>
@@ -308,6 +318,10 @@ async function bench(options: {
       ok: true as const,
       value: emptyProjectDeliverables(query.projectId),
     })
+  })
+  const projectRisksGate = vi.fn((query: { projectId: string }) => {
+    requestOrder.push('risks')
+    return Promise.resolve({ ok: true as const, value: emptyProjectRisks(query.projectId) })
   })
   const feishuConnectionCenterGate = vi.fn((_signal?: AbortSignal) => {
     requestOrder.push('feishu')
@@ -514,6 +528,19 @@ async function bench(options: {
       ok: true as const,
       value: { ok: false as const, error: { code: 'deliverable-not-found' as const, message: 'unused' } },
     })),
+    projectRisks: projectRisksGate,
+    createProjectRisk: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'risk-limit-reached' as const, message: 'unused' } },
+    })),
+    reviseProjectRisk: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'risk-not-found' as const, message: 'unused' } },
+    })),
+    transitionProjectRisk: vi.fn(() => Promise.resolve({
+      ok: true as const,
+      value: { ok: false as const, error: { code: 'risk-not-found' as const, message: 'unused' } },
+    })),
   })
   ctx.provide('connection', {
     isLoopback: true,
@@ -562,6 +589,7 @@ async function bench(options: {
     projectTasksGate,
     projectMilestonesGate,
     projectDeliverablesGate,
+    projectRisksGate,
     feishuConnectionCenterGate,
     authStateGate,
     auth,
@@ -682,7 +710,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     await b.fiber?.dispose()
   })
 
-  it('preserves same-Project Team/Review/Task/Milestone/Deliverable state across reconnect and clears it on Fiber disposal', async () => {
+  it('preserves same-Project Team/Review/Task/Milestone/Deliverable/Risk state across reconnect and clears it on Fiber disposal', async () => {
     const b = await bench()
     const entry = b.ctx.slots.entries('conversation')[0]
     const controller = (entry?.inject as (() => { controller: OwnerController }))().controller
@@ -693,12 +721,14 @@ describe('Project Workbench browser plugin lifecycle', () => {
     const projectTasks = controller.getSnapshot().projectTasks
     const projectMilestones = controller.getSnapshot().projectMilestones
     const projectDeliverables = controller.getSnapshot().projectDeliverables
+    const projectRisks = controller.getSnapshot().projectRisks
     expect(projects).not.toBeNull()
     expect(projectTeam).not.toBeNull()
     expect(review).not.toBeNull()
     expect(projectTasks).not.toBeNull()
     expect(projectMilestones).not.toBeNull()
     expect(projectDeliverables).not.toBeNull()
+    expect(projectRisks).not.toBeNull()
 
     await projects?.openProject('project-1')
     await vi.waitFor(() => {
@@ -725,6 +755,10 @@ describe('Project Workbench browser plugin lifecycle', () => {
         selection: { projectId: 'project-1', projectName: 'Evidence Project' },
         projection: { projectId: 'project-1', deliverables: [] },
       })
+      expect(projectRisks?.getSnapshot()).toMatchObject({
+        phase: 'ready', selection: { projectId: 'project-1', projectName: 'Evidence Project' },
+        projection: { projectId: 'project-1', risks: [] },
+      })
     })
     projectTeam?.setMemberKind('agent')
     projectTeam?.setMemberDisplayName('Reconnect-safe Agent')
@@ -737,6 +771,12 @@ describe('Project Workbench browser plugin lifecycle', () => {
       proposalDraft: { accountableMemberId: 'protected-member' },
       proposalDraftDirty: true,
     })
+    if (projectRisks !== null) {
+      projectRisks.setCreateDraft({
+        ...projectRisks.getSnapshot().createDraft,
+        event: 'Reconnect-safe Risk', consequence: 'Reconnect-safe consequence',
+      })
+    }
 
     b.disconnect()
     expect(projectTeam?.getSnapshot()).toMatchObject({
@@ -760,6 +800,10 @@ describe('Project Workbench browser plugin lifecycle', () => {
     expect(projectDeliverables?.getSnapshot()).toMatchObject({
       phase: 'stale',
       projection: { projectId: 'project-1', deliverables: [] },
+    })
+    expect(projectRisks?.getSnapshot()).toMatchObject({
+      phase: 'stale', projection: { projectId: 'project-1', risks: [] },
+      createDraft: { event: 'Reconnect-safe Risk' },
     })
     b.requestOrder.length = 0
     b.reconnect()
@@ -790,16 +834,22 @@ describe('Project Workbench browser plugin lifecycle', () => {
         selection: { projectId: 'project-1' },
         projection: { projectId: 'project-1', deliverables: [] },
       })
+      expect(projectRisks?.getSnapshot()).toMatchObject({
+        phase: 'ready', selection: { projectId: 'project-1' },
+        projection: { projectId: 'project-1', risks: [] },
+        createDraft: { event: 'Reconnect-safe Risk' },
+      })
     })
     expect(b.requestOrder).toEqual([
       'auth', 'status', 'projects', 'team', 'review', 'feishu', 'tasks', 'milestones',
-      'deliverables', 'activity',
+      'deliverables', 'risks', 'activity',
     ])
     expect(b.projectTeamGate).toHaveBeenCalledTimes(2)
     expect(b.reviewCenterGate).toHaveBeenCalledTimes(2)
     expect(b.projectTasksGate).toHaveBeenCalledTimes(2)
     expect(b.projectMilestonesGate).toHaveBeenCalledTimes(2)
     expect(b.projectDeliverablesGate).toHaveBeenCalledTimes(2)
+    expect(b.projectRisksGate).toHaveBeenCalledTimes(2)
 
     await b.fiber?.dispose()
     expect(projectTeam?.getSnapshot()).toMatchObject({
@@ -824,6 +874,10 @@ describe('Project Workbench browser plugin lifecycle', () => {
     })
     expect(projectDeliverables?.getSnapshot()).toMatchObject({
       phase: 'idle', selection: null, projection: null, candidateDrafts: {},
+    })
+    expect(projectRisks?.getSnapshot()).toMatchObject({
+      phase: 'idle', selection: null, projection: null,
+      createDraft: { event: '' }, revisionDraft: null, transitionDrafts: {},
     })
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
   })
