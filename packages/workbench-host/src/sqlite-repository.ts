@@ -25363,7 +25363,7 @@ function readProjectRisksProjection(
         status: risk.status,
         statement: risk.currentAssessment.statement,
         exposure: risk.currentAssessment.exposure,
-        selectable: risk.status !== 'closed' && row.id !== query.selectedRiskId,
+        selectable: true,
       })
     })),
     taskOptions: taskProjection.tasks,

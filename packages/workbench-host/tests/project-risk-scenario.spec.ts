@@ -302,6 +302,141 @@ function createRequest(): CreateProjectRiskRequest {
 }
 
 describe('Project Risk Scenario with real SQLite', () => {
+  it('keeps stable same-Project Risks selectable while transactionally rejecting self and cycles', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-risk-dependency-options-'))
+    roots.add(root)
+    const repository = new SqliteWorkbenchRepository({
+      databasePath: join(root, 'workbench.sqlite'),
+      journalMode: 'wal',
+      busyTimeoutMs: 1_000,
+    })
+    await repository.open()
+    expect((await repository.commitProject(projectMutation(), signal)).ok).toBe(true)
+    expect((await repository.commitProjectMember(memberMutation(), signal)).ok).toBe(true)
+    const authorization: WorkbenchAuthorization = {
+      require: async () => ({
+        ownerId: 'owner-risk-scenario',
+        organizationId: 'organization-risk-scenario',
+        teamId: 'team-risk-scenario',
+      }),
+      filterProjection: async (_action, projection) => projection,
+    }
+    const scenario = new WorkbenchScenario({
+      repository,
+      authorization,
+      adapters: noWorkbenchExternalAdapters,
+      clock: { now: () => new Date('2026-09-01T08:00:00.000Z') },
+      ids: randomWorkbenchIds,
+      maxStatusLength: 280,
+      taskReconciliationIntervalMs: 0,
+      calendarReconciliationIntervalMs: 0,
+    })
+    await scenario.open()
+    try {
+      const target = await scenario.createProjectRisk({
+        ...createRequest(),
+        idempotencyKey: 'create-risk-dependency-target',
+        causationId: 'create-risk-dependency-target-causation',
+      }, signal)
+      if (!target.ok) throw new Error('Dependency target fixture creation failed')
+      const targetRiskId = target.risk.riskId
+      await expect(scenario.projectRisks({
+        projectId: 'project-risk-scenario',
+        selectedRiskId: targetRiskId,
+      }, signal)).resolves.toMatchObject({
+        dependencyOptions: [{ riskId: targetRiskId, status: 'research', selectable: true }],
+      })
+
+      const source = await scenario.createProjectRisk({
+        ...createRequest(),
+        assessment: {
+          ...createRequest().assessment,
+          statement: {
+            condition: 'The dependency target remains unresolved',
+            event: 'the dependent work may miss its review window',
+            consequence: 'the launch decision may be delayed',
+          },
+          dependencies: [{ kind: 'depends-on', riskId: targetRiskId }],
+        },
+        expectedRisksRevision: 1,
+        idempotencyKey: 'create-risk-dependency-source',
+        causationId: 'create-risk-dependency-source-causation',
+      }, signal)
+      if (!source.ok) throw new Error('Dependency source fixture creation failed')
+      const sourceRiskId = source.risk.riskId
+
+      const cycle = await scenario.reviseProjectRisk({
+        ...createRequest(),
+        riskId: targetRiskId,
+        assessment: {
+          ...createRequest().assessment,
+          dependencies: [{ kind: 'depends-on', riskId: sourceRiskId }],
+        },
+        expectedRisksRevision: 2,
+        expectedRiskRevision: 1,
+        idempotencyKey: 'revise-risk-dependency-cycle',
+        causationId: 'revise-risk-dependency-cycle-causation',
+        reason: 'owner-project-risk-revise',
+      }, signal)
+      expect(cycle).toMatchObject({ ok: false, error: { code: 'dependency-cycle' } })
+
+      const selfReference = await scenario.reviseProjectRisk({
+        ...createRequest(),
+        riskId: sourceRiskId,
+        assessment: {
+          ...createRequest().assessment,
+          dependencies: [{ kind: 'depends-on', riskId: sourceRiskId }],
+        },
+        expectedRisksRevision: 2,
+        expectedRiskRevision: 1,
+        idempotencyKey: 'revise-risk-dependency-self',
+        causationId: 'revise-risk-dependency-self-causation',
+        reason: 'owner-project-risk-revise',
+      }, signal)
+      expect(selfReference).toMatchObject({
+        ok: false,
+        error: { code: 'dependency-self-reference' },
+      })
+
+      await expect(scenario.transitionProjectRisk({
+        projectId: 'project-risk-scenario',
+        riskId: targetRiskId,
+        status: 'closed',
+        closureReason: 'no-longer-exists',
+        rationale: 'The target uncertainty no longer exists.',
+        expectedRisksRevision: 2,
+        expectedRiskRevision: 1,
+        expectedTaskRevision: 0,
+        idempotencyKey: 'close-risk-dependency-target',
+        causationId: 'close-risk-dependency-target-causation',
+        reason: 'owner-project-risk-transition',
+      }, signal)).resolves.toMatchObject({ ok: true, risk: { status: 'closed' } })
+
+      await expect(scenario.projectRisks({
+        projectId: 'project-risk-scenario',
+        selectedRiskId: sourceRiskId,
+      }, signal)).resolves.toMatchObject({
+        selectedRisk: {
+          risk: {
+            riskId: sourceRiskId,
+            currentAssessment: {
+              dependencies: [{ kind: 'depends-on', riskId: targetRiskId }],
+            },
+          },
+        },
+        dependencyOptions: expect.arrayContaining([
+          expect.objectContaining({
+            riskId: targetRiskId,
+            status: 'closed',
+            selectable: true,
+          }),
+        ]),
+      })
+    } finally {
+      await scenario.close()
+    }
+  })
+
   it('uses real T10 schedule changes as same-Project evidence and rejects cross-Project reuse', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-risk-schedule-evidence-'))
     roots.add(root)
