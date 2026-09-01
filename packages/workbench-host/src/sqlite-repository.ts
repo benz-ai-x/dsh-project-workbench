@@ -18490,9 +18490,17 @@ function outboxState(value: unknown): WorkbenchOutboxState {
 }
 
 const CALENDAR_OBSERVATION_VERSION_PATTERN = /^sha256:[0-9a-f]{64}$/u
-const CALENDAR_CHANGED_FIELDS = new Set([
-  'schedule', 'remote-status', 'event-link', 'remote-eligibility',
-])
+type ProjectScheduleChangedField = ProjectScheduleChangeProjection['changedFields'][number]
+const CALENDAR_CHANGED_FIELDS: Readonly<Record<ProjectScheduleChangedField, true>> = Object.freeze({
+  schedule: true,
+  'remote-status': true,
+  'event-link': true,
+  'remote-eligibility': true,
+})
+
+function isProjectScheduleChangedField(value: unknown): value is ProjectScheduleChangedField {
+  return typeof value === 'string' && Object.hasOwn(CALENDAR_CHANGED_FIELDS, value)
+}
 
 function validateProjectMilestonesReadQuery(query: WorkbenchProjectMilestonesReadQuery): void {
   validateBoundedReference(query.organizationId, 'Calendar organization id')
@@ -18911,7 +18919,7 @@ function scheduleChangeFromRow(row: ProjectScheduleChangeRow): ProjectScheduleCh
   }
   const parsed = parseCanonicalJson(row.changed_fields_json, 'Stored schedule changed fields')
   if (!Array.isArray(parsed) || parsed.length < 1 || parsed.some(value =>
-    typeof value !== 'string' || !CALENDAR_CHANGED_FIELDS.has(value))) {
+    !isProjectScheduleChangedField(value))) {
     throw new Error('Stored schedule changed fields are invalid')
   }
   return Object.freeze({
@@ -25243,7 +25251,8 @@ function readProjectRiskEvidenceOptions(
     ...scheduleRows.map((row) => {
       const changedFields = JSON.parse(row.changed_fields_json) as unknown
       if (!Array.isArray(changedFields)
-        || changedFields.some(value => value !== 'start' && value !== 'end')) {
+        || changedFields.length < 1
+        || changedFields.some(value => !isProjectScheduleChangedField(value))) {
         throw new Error('Workbench schedule evidence has invalid changed fields')
       }
       return Object.freeze({

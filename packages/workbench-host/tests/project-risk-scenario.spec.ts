@@ -6,7 +6,15 @@ import { DatabaseSync } from 'node:sqlite'
 import type { WorkbenchAuthorization, WorkbenchAction } from '../src/authorization.ts'
 import type {
   CreateProjectRiskRequest,
+  WorkbenchCommandMetadata,
+  WorkbenchFeishuCalendarBindingMutation,
+  WorkbenchFeishuCalendarEventSnapshot,
+  WorkbenchFeishuCalendarRoute,
+  WorkbenchFeishuCalendarSnapshot,
+  WorkbenchFeishuRouteMutation,
+  WorkbenchFeishuVerificationMutation,
   WorkbenchProjectMemberMutation,
+  WorkbenchProjectMilestoneMutation,
   WorkbenchProjectMutation,
 } from '../src/index.ts'
 import {
@@ -19,6 +27,11 @@ import {
 
 const roots = new Set<string>()
 const signal = new AbortController().signal
+const CROSS_PROJECT_ID = 'project-risk-schedule-cross'
+const CALENDAR_ID = 'calendar-risk-schedule'
+const EVENT_ID = 'event-risk-schedule'
+const APP_ID = 'cli_risk_schedule'
+const OPEN_ID = 'ou_risk_schedule'
 
 afterEach(async () => {
   await Promise.all([...roots].map(root => rm(root, { recursive: true, force: true })))
@@ -69,12 +82,11 @@ function memberMutation(): WorkbenchProjectMemberMutation {
   }
 }
 
-function command(
+function command<Reason extends WorkbenchCommandMetadata['reason']>(
   suffix: string,
-  reason: WorkbenchProjectMutation['command']['reason']
-    | WorkbenchProjectMemberMutation['command']['reason'],
+  reason: Reason,
   occurredAt = '2026-09-01T00:00:00.000Z',
-) {
+): WorkbenchCommandMetadata & { readonly reason: Reason } {
   return {
     commandId: `command-risk-${suffix}`,
     auditEventId: `audit-risk-${suffix}`,
@@ -90,6 +102,167 @@ function command(
     },
     occurredAt,
   }
+}
+
+function crossProjectMutation(): WorkbenchProjectMutation {
+  return {
+    ...projectMutation(),
+    projectId: CROSS_PROJECT_ID,
+    primaryGoalId: 'goal-risk-schedule-cross',
+    projectName: 'Cross-project Risk Schedule Evidence',
+    expectedCatalogRevision: 1,
+    primaryGoal: {
+      ...projectMutation().primaryGoal,
+      outcomes: [{
+        ...projectMutation().primaryGoal.outcomes[0],
+        outcomeId: 'outcome-risk-schedule-cross',
+      }],
+    },
+    createdAt: '2026-09-01T00:06:00.000Z',
+    command: command(
+      'project-schedule-cross',
+      'owner-project-create',
+      '2026-09-01T00:06:00.000Z',
+    ),
+  }
+}
+
+function crossMemberMutation(): WorkbenchProjectMemberMutation {
+  return {
+    ...memberMutation(),
+    projectId: CROSS_PROJECT_ID,
+    memberId: 'member-risk-schedule-cross',
+    member: {
+      kind: 'human',
+      displayName: 'Cross-project Risk Owner',
+      identity: { type: 'feishu', appId: APP_ID, openId: 'ou_risk_schedule_cross' },
+    },
+    createdAt: '2026-09-01T00:07:00.000Z',
+    command: command(
+      'member-schedule-cross',
+      'owner-project-member-add',
+      '2026-09-01T00:07:00.000Z',
+    ),
+  }
+}
+
+async function commitRealProjectScheduleChange(
+  repository: SqliteWorkbenchRepository,
+): Promise<string> {
+  const routeMutation: WorkbenchFeishuRouteMutation = {
+    kind: 'bot',
+    mode: 'set',
+    appId: APP_ID,
+    credentialRef: 'FEISHU_RISK_SCHEDULE_SECRET',
+    expectedConnectionRevision: 0,
+    expectedRouteGeneration: null,
+    updatedAt: '2026-09-01T00:02:00.000Z',
+    command: command(
+      'schedule-route',
+      'owner-feishu-route-configure',
+      '2026-09-01T00:02:00.000Z',
+    ),
+  }
+  await repository.commitFeishuRoute(routeMutation, signal)
+  const verificationMutation: WorkbenchFeishuVerificationMutation = {
+    verificationId: 'verification-risk-schedule',
+    kind: 'bot',
+    expectedConnectionRevision: 1,
+    expectedRouteGeneration: 1,
+    resourceProbe: null,
+    observation: {
+      result: 'healthy',
+      identity: { state: 'verified', issue: null },
+      actor: {
+        realm: 'feishu-cn',
+        appId: APP_ID,
+        kind: 'bot',
+        openId: OPEN_ID,
+        tenantKey: null,
+      },
+      displayLabel: 'Risk Schedule Bot',
+      scopeInspection: { state: 'observed', scopes: [], issue: null },
+      resourceProbe: { state: 'not-tested' },
+    },
+    checkedAt: '2026-09-01T00:03:00.000Z',
+    command: command(
+      'schedule-verification',
+      'owner-feishu-route-verify',
+      '2026-09-01T00:03:00.000Z',
+    ),
+  }
+  await repository.commitFeishuVerification(verificationMutation, signal)
+  const connection = await repository.readFeishuConnection({
+    organizationId: 'organization-risk-scenario',
+    teamId: 'team-risk-scenario',
+  }, signal)
+  if (connection.bot.actor === null) throw new Error('Schedule evidence route was not verified')
+  const route: WorkbenchFeishuCalendarRoute = {
+    kind: 'bot',
+    routeGeneration: 1,
+    appId: APP_ID,
+    credentialRef: 'FEISHU_RISK_SCHEDULE_SECRET',
+    actor: connection.bot.actor,
+  }
+  const snapshot: WorkbenchFeishuCalendarSnapshot = {
+    calendarId: CALENDAR_ID,
+    summary: 'Risk schedule evidence',
+    description: null,
+    calendarType: 'shared',
+    role: 'writer',
+    deleted: false,
+    thirdParty: false,
+  }
+  const bindingMutation: WorkbenchFeishuCalendarBindingMutation = {
+    projectId: 'project-risk-scenario',
+    intent: { mode: 'existing', calendarId: CALENDAR_ID },
+    expectedConnectionRevision: 2,
+    expectedRouteGeneration: 1,
+    expectedBindingRevision: null,
+    route,
+    snapshot,
+    boundAt: '2026-09-01T00:04:00.000Z',
+    command: command(
+      'schedule-binding',
+      'owner-project-calendar-bind',
+      '2026-09-01T00:04:00.000Z',
+    ),
+  }
+  await repository.commitFeishuCalendarBinding(bindingMutation, signal)
+  const scheduleChangeId = 'schedule-change-risk-evidence'
+  const event: WorkbenchFeishuCalendarEventSnapshot = {
+    calendarId: CALENDAR_ID,
+    eventId: EVENT_ID,
+    organizerCalendarId: CALENDAR_ID,
+    summary: 'Risk review checkpoint',
+    description: null,
+    schedule: { kind: 'all-day', startDate: '2026-09-10', endDate: '2026-09-11' },
+    status: 'confirmed',
+    recurring: false,
+    exception: false,
+    appLink: `https://applink.feishu.cn/client/calendar/event/detail?eventId=${EVENT_ID}`,
+    remoteObservationVersion: `sha256:${'1'.repeat(64)}`,
+    observedAt: '2026-09-01T00:04:30.000Z',
+  }
+  const milestoneMutation: WorkbenchProjectMilestoneMutation = {
+    milestoneId: 'milestone-risk-schedule',
+    changeId: scheduleChangeId,
+    projectId: 'project-risk-scenario',
+    expectedRevision: 1,
+    expectedMilestoneRevision: null,
+    name: 'Risk review checkpoint',
+    description: null,
+    intent: { mode: 'existing-event', eventId: EVENT_ID },
+    event,
+    createdAt: '2026-09-01T00:05:00.000Z',
+    command: command(
+      'schedule-milestone',
+      'owner-project-milestone-create',
+      '2026-09-01T00:05:00.000Z',
+    ),
+  }
+  await repository.commitProjectMilestone(milestoneMutation, signal)
+  return scheduleChangeId
 }
 
 function createRequest(): CreateProjectRiskRequest {
@@ -129,6 +302,91 @@ function createRequest(): CreateProjectRiskRequest {
 }
 
 describe('Project Risk Scenario with real SQLite', () => {
+  it('uses real T10 schedule changes as same-Project evidence and rejects cross-Project reuse', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-risk-schedule-evidence-'))
+    roots.add(root)
+    const repository = new SqliteWorkbenchRepository({
+      databasePath: join(root, 'workbench.sqlite'),
+      journalMode: 'wal',
+      busyTimeoutMs: 1_000,
+    })
+    await repository.open()
+    expect((await repository.commitProject(projectMutation(), signal)).ok).toBe(true)
+    expect((await repository.commitProjectMember(memberMutation(), signal)).ok).toBe(true)
+    const scheduleChangeId = await commitRealProjectScheduleChange(repository)
+    expect(await repository.commitProject(crossProjectMutation(), signal)).toMatchObject({ ok: true })
+    expect((await repository.commitProjectMember(crossMemberMutation(), signal)).ok).toBe(true)
+    const authorization: WorkbenchAuthorization = {
+      require: async () => ({
+        ownerId: 'owner-risk-scenario',
+        organizationId: 'organization-risk-scenario',
+        teamId: 'team-risk-scenario',
+      }),
+      filterProjection: async (_action, projection) => projection,
+    }
+    const scenario = new WorkbenchScenario({
+      repository,
+      authorization,
+      adapters: noWorkbenchExternalAdapters,
+      clock: { now: () => new Date('2026-09-01T08:00:00.000Z') },
+      ids: randomWorkbenchIds,
+      maxStatusLength: 280,
+      taskReconciliationIntervalMs: 0,
+      calendarReconciliationIntervalMs: 0,
+    })
+    await scenario.open()
+    try {
+      const projection = await scenario.projectRisks({ projectId: 'project-risk-scenario' }, signal)
+      expect(projection?.evidenceOptions).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'project-schedule-change',
+          scheduleChangeId,
+          source: 'workbench',
+          changedFields: ['schedule'],
+        }),
+      ]))
+      const sameProject = await scenario.createProjectRisk({
+        ...createRequest(),
+        assessment: {
+          ...createRequest().assessment,
+          evidence: [{ kind: 'project-schedule-change', scheduleChangeId }],
+        },
+        idempotencyKey: 'create-risk-schedule-evidence',
+        causationId: 'create-risk-schedule-evidence-causation',
+      }, signal)
+      expect(sameProject).toMatchObject({
+        ok: true,
+        risk: {
+          currentAssessment: {
+            evidence: [{ kind: 'project-schedule-change', scheduleChangeId }],
+          },
+        },
+      })
+
+      const crossProject = await scenario.createProjectRisk({
+        ...createRequest(),
+        projectId: CROSS_PROJECT_ID,
+        assessment: {
+          ...createRequest().assessment,
+          accountableMemberId: 'member-risk-schedule-cross',
+          evidence: [{ kind: 'project-schedule-change', scheduleChangeId }],
+        },
+        idempotencyKey: 'create-risk-cross-schedule-evidence',
+        causationId: 'create-risk-cross-schedule-evidence-causation',
+      }, signal)
+      expect(crossProject).toMatchObject({
+        ok: false,
+        error: { code: 'evidence-project-mismatch' },
+      })
+      await expect(scenario.projectRisks({ projectId: CROSS_PROJECT_ID }, signal)).resolves.toMatchObject({
+        revision: 0,
+        risks: [],
+      })
+    } finally {
+      await scenario.close()
+    }
+  })
+
   it('double-authorizes the read and creates one detached research Risk', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-risk-scenario-'))
     roots.add(root)
