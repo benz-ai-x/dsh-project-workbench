@@ -283,6 +283,7 @@ function treatmentTask(
   taskGuid: string,
   remoteVersion: string,
   summary: string,
+  completed = false,
 ): WorkbenchFeishuTaskSnapshot {
   return {
     taskGuid,
@@ -293,8 +294,8 @@ function treatmentTask(
     assignees: [],
     followers: [],
     comments: [],
-    completed: false,
-    completedAt: null,
+    completed,
+    completedAt: completed ? '2026-09-01T00:03:30.000Z' : null,
     canonicalUrl: `https://applink.feishu.cn/client/todo/detail?guid=${taskGuid}`,
     remoteVersion,
   }
@@ -311,7 +312,7 @@ async function commitRealProjectTasks(repository: SqliteWorkbenchRepository): Pr
     },
     tasks: [
       treatmentTask(PRIMARY_TASK_GUID, '100', 'Primary mitigation'),
-      treatmentTask(REPLACEMENT_TASK_GUID, '100', 'Replacement mitigation'),
+      treatmentTask(REPLACEMENT_TASK_GUID, '100', 'Replacement mitigation', true),
     ],
     observedAt: '2026-09-01T00:04:00.000Z',
   }
@@ -375,11 +376,12 @@ function treatmentRequest(
   suffix: string,
   expectedRisksRevision: number,
   mitigationTaskGuids: readonly string[],
+  contingencyTaskGuids: readonly string[] = [],
 ): CreateProjectRiskRequest {
   const request = createRequest()
   return {
     ...request,
-    assessment: { ...request.assessment, mitigationTaskGuids },
+    assessment: { ...request.assessment, mitigationTaskGuids, contingencyTaskGuids },
     expectedRisksRevision,
     expectedTaskRevision: 1,
     idempotencyKey: `risk-treatment-${suffix}`,
@@ -850,9 +852,21 @@ describe('Project Risk Scenario with real SQLite', () => {
       const research = await scenario.createProjectRisk(treatmentRequest(
         'research-create',
         0,
+        [],
         [PRIMARY_TASK_GUID],
       ), signal)
       if (!research.ok) throw new Error('Research Risk fixture creation failed')
+      expect(research.risk).toMatchObject({
+        currentAssessment: {
+          mitigationTaskGuids: [],
+          contingencyTaskGuids: [PRIMARY_TASK_GUID],
+        },
+        treatmentTasks: [{
+          role: 'contingency',
+          taskGuid: PRIMARY_TASK_GUID,
+          availability: 'available',
+        }],
+      })
       const mitigating = await scenario.createProjectRisk(treatmentRequest(
         'mitigate-create',
         1,
@@ -882,20 +896,71 @@ describe('Project Risk Scenario with real SQLite', () => {
       const tasksAfterDisappearance = await scenario.projectTasks({
         projectId: 'project-risk-scenario',
       }, signal)
+      expect(tasksAfterDisappearance).toMatchObject({
+        revision: 2,
+        tasks: [{
+          taskGuid: REPLACEMENT_TASK_GUID,
+          completed: true,
+          completedAt: '2026-09-01T00:03:30.000Z',
+        }],
+      })
       const taskWritesAfterDisappearance = taskWriteState(repository)
       expect(taskWritesAfterDisappearance).toEqual({
         task_effects: 0,
         task_update_receipts: 0,
         task_update_outbox: 0,
       })
+      const unavailableResearch = await scenario.projectRisks({
+        projectId: 'project-risk-scenario',
+        selectedRiskId: research.risk.riskId,
+      }, signal)
+      expect(unavailableResearch).toMatchObject({
+        revision: 3,
+        taskRevision: 2,
+        selectedRisk: { risk: {
+          revision: 1,
+          status: 'research',
+          currentAssessment: { contingencyTaskGuids: [PRIMARY_TASK_GUID] },
+          treatmentTasks: [{
+            role: 'contingency',
+            taskGuid: PRIMARY_TASK_GUID,
+            availability: 'unavailable',
+            task: null,
+          }],
+        } },
+      })
+      const durableBeforeRejectedCreates = riskDurableState(repository)
+      await expect(scenario.createProjectRisk({
+        ...treatmentRequest('stale-task-create', 3, [], [PRIMARY_TASK_GUID]),
+        expectedTaskRevision: 1,
+      }, signal)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'task-projection-revision-conflict' },
+      })
+      await expect(scenario.createProjectRisk({
+        ...treatmentRequest('unavailable-task-create', 3, [], [PRIMARY_TASK_GUID]),
+        expectedTaskRevision: 2,
+      }, signal)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'task-not-in-project' },
+      })
+      const afterRejectedCreates = await scenario.projectRisks({
+        projectId: 'project-risk-scenario',
+      }, signal)
+      expect(afterRejectedCreates).toMatchObject({ revision: 3, risks: expect.any(Array) })
+      expect(afterRejectedCreates?.risks).toHaveLength(2)
+      expect(afterRejectedCreates?.activity).toEqual(unavailableResearch?.activity)
+      expect(riskDurableState(repository)).toEqual(durableBeforeRejectedCreates)
+
       const retainedAssessment = treatmentRequest(
         'retained-revise',
         3,
+        [],
         [PRIMARY_TASK_GUID],
       ).assessment
 
       await expect(scenario.reviseProjectRisk({
-        ...treatmentRequest('stale-task-revise', 3, [PRIMARY_TASK_GUID]),
+        ...treatmentRequest('stale-task-revise', 3, [], [PRIMARY_TASK_GUID]),
         riskId: research.risk.riskId,
         assessment: retainedAssessment,
         expectedRiskRevision: 1,
@@ -906,7 +971,7 @@ describe('Project Risk Scenario with real SQLite', () => {
         error: { code: 'task-projection-revision-conflict' },
       })
       await expect(scenario.reviseProjectRisk({
-        ...treatmentRequest('unavailable-task-revise', 3, [PRIMARY_TASK_GUID]),
+        ...treatmentRequest('unavailable-task-revise', 3, [], [PRIMARY_TASK_GUID]),
         riskId: research.risk.riskId,
         assessment: retainedAssessment,
         expectedRiskRevision: 1,
@@ -915,6 +980,21 @@ describe('Project Risk Scenario with real SQLite', () => {
       }, signal)).resolves.toMatchObject({
         ok: false,
         error: { code: 'task-not-in-project' },
+      })
+      await expect(scenario.transitionProjectRisk({
+        projectId: 'project-risk-scenario',
+        riskId: research.risk.riskId,
+        status: 'mitigate',
+        rationale: 'The stale Task projection must fail before availability is considered.',
+        expectedRisksRevision: 3,
+        expectedRiskRevision: 1,
+        expectedTaskRevision: 1,
+        idempotencyKey: 'risk-treatment-matrix-enter-with-stale-tasks',
+        causationId: 'risk-treatment-matrix-enter-with-stale-tasks-causation',
+        reason: 'owner-project-risk-transition',
+      }, signal)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'task-projection-revision-conflict' },
       })
       await expect(scenario.transitionProjectRisk({
         projectId: 'project-risk-scenario',
@@ -944,7 +1024,11 @@ describe('Project Risk Scenario with real SQLite', () => {
         risk: {
           revision: 2,
           status: 'research',
-          currentAssessment: { sequence: 2, mitigationTaskGuids: [] },
+          currentAssessment: {
+            sequence: 2,
+            mitigationTaskGuids: [],
+            contingencyTaskGuids: [],
+          },
           treatmentTasks: [],
         },
       })
@@ -978,8 +1062,39 @@ describe('Project Risk Scenario with real SQLite', () => {
           }],
         },
       })
+      const tasksBeforeClose = await scenario.projectTasks({
+        projectId: 'project-risk-scenario',
+      }, signal)
+      expect(tasksBeforeClose).toEqual(tasksAfterDisappearance)
+      await expect(scenario.transitionProjectRisk({
+        projectId: 'project-risk-scenario',
+        riskId: mitigating.risk.riskId,
+        status: 'closed',
+        closureReason: 'below-threshold',
+        rationale: 'The completed mitigation reduced the uncertainty below threshold.',
+        expectedRisksRevision: 5,
+        expectedRiskRevision: 3,
+        expectedTaskRevision: 2,
+        idempotencyKey: 'risk-treatment-close-with-completed-task',
+        causationId: 'risk-treatment-close-with-completed-task-causation',
+        reason: 'owner-project-risk-transition',
+      }, signal)).resolves.toMatchObject({
+        ok: true,
+        value: { revision: 6 },
+        risk: {
+          revision: 4,
+          status: 'closed',
+          currentAssessment: { mitigationTaskGuids: [REPLACEMENT_TASK_GUID] },
+          treatmentTasks: [{
+            role: 'mitigation',
+            taskGuid: REPLACEMENT_TASK_GUID,
+            availability: 'available',
+            task: { completed: true, completedAt: '2026-09-01T00:03:30.000Z' },
+          }],
+        },
+      })
       expect(await scenario.projectTasks({ projectId: 'project-risk-scenario' }, signal))
-        .toEqual(tasksAfterDisappearance)
+        .toEqual(tasksBeforeClose)
       expect(taskWriteState(repository)).toEqual(taskWritesAfterDisappearance)
     } finally {
       await scenario.close()
