@@ -985,6 +985,36 @@ describe('Project Risk Scenario with real SQLite', () => {
         projectId: 'project-risk-scenario',
         riskId: research.risk.riskId,
         status: 'mitigate',
+        rationale: 'The stale Risk aggregate must fail before availability is considered.',
+        expectedRisksRevision: 2,
+        expectedRiskRevision: 1,
+        expectedTaskRevision: 2,
+        idempotencyKey: 'risk-treatment-matrix-enter-with-stale-register',
+        causationId: 'risk-treatment-matrix-enter-with-stale-register-causation',
+        reason: 'owner-project-risk-transition',
+      }, signal)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'risks-revision-conflict' },
+      })
+      await expect(scenario.transitionProjectRisk({
+        projectId: 'project-risk-scenario',
+        riskId: research.risk.riskId,
+        status: 'mitigate',
+        rationale: 'The mismatched Risk revision must fail before availability is considered.',
+        expectedRisksRevision: 3,
+        expectedRiskRevision: 2,
+        expectedTaskRevision: 2,
+        idempotencyKey: 'risk-treatment-matrix-enter-with-mismatched-risk',
+        causationId: 'risk-treatment-matrix-enter-with-mismatched-risk-causation',
+        reason: 'owner-project-risk-transition',
+      }, signal)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'risk-revision-conflict' },
+      })
+      await expect(scenario.transitionProjectRisk({
+        projectId: 'project-risk-scenario',
+        riskId: research.risk.riskId,
+        status: 'mitigate',
         rationale: 'The stale Task projection must fail before availability is considered.',
         expectedRisksRevision: 3,
         expectedRiskRevision: 1,

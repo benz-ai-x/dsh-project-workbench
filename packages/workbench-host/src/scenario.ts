@@ -2076,9 +2076,35 @@ export class WorkbenchScenario {
       }), operationSignal)
       throwIfCancelled(operationSignal)
       if (current === null) return projectRiskProjectMissing(normalized.projectId)
+      if (current.revision !== normalized.expectedRisksRevision) {
+        return projectRiskFailure(
+          'risks-revision-conflict',
+          'Project Risk aggregate revision changed',
+          {
+            expectedRevision: normalized.expectedRisksRevision,
+            currentRevision: current.revision,
+          },
+        )
+      }
       const risk = current.selectedRisk?.risk
       if (risk === undefined) return projectRiskFailure('risk-not-found', 'Project Risk was not found')
       if (risk.status === 'closed') return projectRiskFailure('risk-closed', 'Closed Project Risks are terminal')
+      if (risk.revision !== normalized.expectedRiskRevision) {
+        return projectRiskFailure(
+          'risk-revision-conflict',
+          'Project Risk revision changed',
+          {
+            expectedRevision: normalized.expectedRiskRevision,
+            currentRevision: risk.revision,
+          },
+        )
+      }
+      if (current.taskRevision !== normalized.expectedTaskRevision) {
+        return projectRiskFailure(
+          'task-projection-revision-conflict',
+          'Project Task projection revision changed',
+        )
+      }
       const occurredAt = commandInstant(this.options.clock)
       const availableMitigationTaskCount = risk.treatmentTasks.filter(
         link => link.role === 'mitigation' && link.availability === 'available',
@@ -6097,8 +6123,15 @@ function projectRiskCommand<R extends
   })
 }
 
-function projectRiskFailure<T>(code: ProjectRiskConflict['code'], message: string): T {
-  return Object.freeze({ ok: false, error: Object.freeze({ code, message }) }) as T
+function projectRiskFailure<T>(
+  code: ProjectRiskConflict['code'],
+  message: string,
+  revisions: Pick<ProjectRiskConflict, 'expectedRevision' | 'currentRevision'> = {},
+): T {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code, message, ...revisions }),
+  }) as T
 }
 
 function projectRiskProjectMissing<T>(projectId: string): T {
