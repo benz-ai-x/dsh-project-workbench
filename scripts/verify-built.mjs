@@ -535,6 +535,7 @@ function verifyTypertFace(face, packageName, label) {
       'beforeActivitySequence',
       'beforeHistorySequence',
       'beforeRiskSequence',
+      'disposition',
       'exposure',
       'historyLimit',
       'organizationId',
@@ -549,7 +550,7 @@ function verifyTypertFace(face, packageName, label) {
       'triggerContains',
       'triggerState',
     ])
-      && ['actor', 'organizationId', 'teamId']
+      && ['actor', 'disposition', 'organizationId', 'teamId']
         .every(key => isOptionalNever(risksQueryShape?.[key])),
     `${packageName}: ${label} Project Risks query exposes five closed filters and three independent cursors without caller authority`,
   )

@@ -102,8 +102,11 @@ const packageSpecs = [
       'lib/client.js',
       'lib/types/client/ProjectDeliverablesPanel.d.ts',
       'lib/types/client/ProjectMilestonesPanel.d.ts',
+      'lib/types/client/ProjectRisksPanel.d.ts',
       'lib/types/client/project-deliverables-controller.d.ts',
+      'lib/types/client/project-risk-controller.d.ts',
       'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
+      'lib/types/client/risk-presentation.d.ts',
       'lib/types/index.d.ts',
     ],
     expectedDeclarations: [
@@ -112,6 +115,7 @@ const packageSpecs = [
       'lib/types/client/OwnerPage.d.ts',
       'lib/types/client/ProjectDeliverablesPanel.d.ts',
       'lib/types/client/ProjectMilestonesPanel.d.ts',
+      'lib/types/client/ProjectRisksPanel.d.ts',
       'lib/types/client/ProjectTeamPanel.d.ts',
       'lib/types/client/ProjectTaskWorkflowPanel.d.ts',
       'lib/types/client/ProjectTasksPanel.d.ts',
@@ -130,8 +134,10 @@ const packageSpecs = [
       'lib/types/client/owner-controller.d.ts',
       'lib/types/client/project-controller.d.ts',
       'lib/types/client/project-deliverables-controller.d.ts',
+      'lib/types/client/project-risk-controller.d.ts',
       'lib/types/client/project-team-controller.d.ts',
       'lib/types/client/review-controller.d.ts',
+      'lib/types/client/risk-presentation.d.ts',
       'lib/types/client/style-lifecycle.d.ts',
       'lib/types/client/task-controller.d.ts',
       'lib/types/index.d.ts',
@@ -862,8 +868,8 @@ const remoteMethods = [
   'reconcileProjectTasks',
   'referenceFeishuTask',
   'requestDeliverableAcceptance',
-  'reviseProjectRisk',
   'reviewCenter',
+  'reviseProjectRisk',
   'setProjectMemberStatus',
   'setProjectResponsibility',
   'setStatus',
@@ -1712,6 +1718,12 @@ try {
   ))
   assert.deepEqual(finalIntegrity, feishuActivity.integrity)
   assert.equal(finalIntegrity.eventCount, 16)
+  acceptedReview = await firstAuth.run(() => firstService.reviewCenter({
+    projectId,
+    status: 'accepted',
+    riskLevel: 'low',
+    limit: 10,
+  }, new AbortController().signal))
 } finally {
   await firstContext?.fiber.dispose()
 }

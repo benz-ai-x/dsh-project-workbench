@@ -102,6 +102,7 @@ const WORKBENCH_CLIENT_STYLE_IDS = Object.freeze([
   'OwnerPage.module.css',
   'ProjectDeliverablesPanel.module.css',
   'ProjectMilestonesPanel.module.css',
+  'ProjectRisksPanel.module.css',
   'ProjectTasksPanel.module.css',
   'ProjectTeamPanel.module.css',
   'ProjectsPanel.module.css',
@@ -803,6 +804,10 @@ function projectMilestonesPanel(page) {
 
 function projectDeliverablesPanel(page) {
   return page.locator('section[aria-labelledby="workbench-project-deliverables-title"]')
+}
+
+function projectRisksPanel(page) {
+  return page.locator('section[aria-labelledby="workbench-project-risks-title"]')
 }
 
 async function assertProjectMilestonesUnbound(page, projectName) {
@@ -2169,7 +2174,7 @@ function realRiskAssessment(accountableMemberId, variant) {
       confidenceRationale: '以当前接口稳定性记录作为初始判断。',
       assessmentHorizonEnd: '2099-12-31',
       nextReviewOn: '2099-01-15',
-      assumptions: ['供应商保持现有发布节奏'],
+      assumptions: [],
       accountableMemberId,
       contributorMemberIds: [],
       humanSponsorMemberId: null,
@@ -2196,7 +2201,7 @@ function realRiskAssessment(accountableMemberId, variant) {
     confidenceRationale: '最新回归证据已经满足人工确认的升级触发条件。',
     assessmentHorizonEnd: '2099-12-31',
     nextReviewOn: '2099-02-15',
-    assumptions: ['修复仍需要供应商参与', '验收环境保持可用'],
+    assumptions: [],
     accountableMemberId,
     contributorMemberIds: [],
     humanSponsorMemberId: null,
@@ -2368,43 +2373,163 @@ async function prepareRealRiskBrowserProject(page, names) {
     true,
     'Risk workspace omitted the current T08 mitigation choice',
   )
+  return {
+    ...names,
+    projectId,
+    riskOwnerMemberId,
+    otherOwnerMemberId,
+    taskProjection: tasksBefore,
+  }
+}
 
-  const created = await callAuthenticatedWorkbench(
+async function waitForWorkbenchUiRequest(page, path, action) {
+  const response = page.waitForResponse(candidate => {
+    try {
+      return new URL(candidate.url()).pathname === path
+        && candidate.request().method() === 'POST'
+    } catch {
+      return false
+    }
+  })
+  await action()
+  const outcome = await response
+  assert.equal(outcome.status(), 200, `${path}: UI carrier returned HTTP ${String(outcome.status())}`)
+}
+
+async function waitForProjectRisksReady(panel, label) {
+  await waitForCondition(async () => (
+    await panel.getAttribute('data-project-risks-phase') === 'ready'
+      && await panel.getAttribute('aria-busy') === 'false'
+  ), PAGE_TIMEOUT_MS, label)
+}
+
+async function fillRealRiskAssessmentForm(form, assessment, ownerName, keyboardDisclosure = false) {
+  const textareas = form.locator('textarea')
+  await textareas.nth(0).fill(assessment.statement.condition ?? '')
+  await textareas.nth(1).fill(assessment.statement.event)
+  await textareas.nth(2).fill(assessment.statement.consequence)
+  const assessmentSelects = form.getByRole('combobox')
+  await assessmentSelects.nth(0).selectOption(assessment.category)
+  await assessmentSelects.nth(1).selectOption(assessment.confidence)
+  await assessmentSelects.nth(2).selectOption(assessment.trigger.state)
+  await textareas.nth(3).fill(assessment.trigger.statement)
+  const numericInputs = form.locator('input[inputmode="numeric"]')
+  await numericInputs.nth(0).fill(String(assessment.probability.lowerBasisPoints))
+  await numericInputs.nth(1).fill(String(assessment.probability.upperBasisPoints))
+  await numericInputs.nth(2).fill(String(assessment.impact.lowerBand))
+  await numericInputs.nth(3).fill(String(assessment.impact.upperBand))
+  await textareas.nth(4).fill(assessment.confidenceRationale)
+  const dateInputs = form.locator('input[type="date"]')
+  await dateInputs.nth(0).fill(assessment.assessmentHorizonEnd)
+  await dateInputs.nth(1).fill(assessment.nextReviewOn)
+
+  const advancedSummary = form.locator('summary').filter({
+    hasText: '责任、证据、依赖与处置任务',
+  })
+  const advanced = advancedSummary.locator('..')
+  if (await advanced.getAttribute('open') === null) {
+    if (keyboardDisclosure) {
+      await assertVisibleKeyboardFocus(advancedSummary, 'Project Risk advanced disclosure')
+      await advancedSummary.press('Enter')
+    } else {
+      await advancedSummary.click()
+    }
+  }
+  await advanced.evaluate(element => {
+    if (!element.open) throw new Error('Project Risk advanced disclosure did not open')
+  })
+  const owner = form.getByRole('combobox').nth(3)
+  await owner.selectOption({ label: ownerName })
+  const mitigation = form.getByRole('group', { name: 'Mitigation tasks', exact: true })
+    .getByRole('checkbox', { name: DELIVERABLE_BROWSER_ADAPTER.taskSummary, exact: true })
+  if (!await mitigation.isChecked()) await mitigation.check()
+}
+
+async function assertFocusedRiskCard(card, label) {
+  await waitForCondition(
+    () => card.evaluate(element => document.activeElement === element),
+    PAGE_TIMEOUT_MS,
+    `${label} card focus`,
+  )
+}
+
+async function exerciseRealRiskBrowserJourney(page, expected) {
+  const panel = projectRisksPanel(page)
+  await panel.getByRole('heading', { name: 'Project Risks', exact: true })
+    .waitFor({ state: 'visible' })
+  await panel.getByText('Risk 台账已同步', { exact: true }).waitFor({ state: 'visible' })
+  await panel.getByText(expected.projectName, { exact: true }).waitFor({ state: 'visible' })
+
+  const createDetails = panel.locator('details').filter({ hasText: '创建 Project Risk' }).first()
+  const createSummary = createDetails.locator(':scope > summary')
+  await assertVisibleKeyboardFocus(createSummary, 'Project Risk create disclosure')
+  await createSummary.press('Enter')
+  const createForm = createDetails.getByRole('form', { name: '新 Risk 评估', exact: true })
+  await createForm.waitFor({ state: 'visible' })
+  const initialAssessment = realRiskAssessment(expected.riskOwnerMemberId, 'initial')
+  await fillRealRiskAssessmentForm(createForm, initialAssessment, expected.riskOwnerName, true)
+  const createButton = createForm.getByRole('button', { name: '创建 Risk', exact: true })
+  await waitForCondition(() => createButton.isEnabled(), PAGE_TIMEOUT_MS, 'valid Risk create form')
+  await waitForWorkbenchUiRequest(
     page,
     WORKBENCH_CREATE_PROJECT_RISK_PATH,
-    {
-      request: {
-        projectId,
-        assessment: realRiskAssessment(riskOwnerMemberId, 'initial'),
-        expectedRisksRevision: initialWorkspace.revision,
-        expectedRiskRevision: null,
-        expectedTeamRevision: team.teamRevision,
-        expectedTaskRevision: tasksBefore.revision,
-        ...browserCommandKeys('risk-browser-create'),
-        reason: 'owner-project-risk-create',
-      },
-    },
+    () => createButton.click(),
   )
-  assert.equal(created.ok, true, `real Risk creation failed: ${created.error?.code ?? 'unknown'}`)
-  const riskId = created.risk.riskId
-  assert.equal(created.risk.status, 'research')
-  assert.equal(created.risk.closureReason, null)
-  assert.deepEqual(created.risk.currentAssessment.exposure, {
+  const initialCard = panel.getByRole('article', {
+    name: initialAssessment.statement.event,
+    exact: true,
+  })
+  await initialCard.waitFor({ state: 'visible' })
+  await assertFocusedRiskCard(initialCard, 'created Risk')
+  await initialCard.getByText('Research', { exact: true }).waitFor({ state: 'visible' })
+  await initialCard.getByText('中', { exact: true }).waitFor({ state: 'visible' })
+  await initialCard.getByText(expected.riskOwnerName, { exact: true }).waitFor({ state: 'visible' })
+  await initialCard.getByRole('link', {
+    name: DELIVERABLE_BROWSER_ADAPTER.taskSummary,
+    exact: true,
+  }).waitFor({ state: 'visible' })
+
+  const createdProjection = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    { query: { projectId: expected.projectId, riskLimit: 20, activityLimit: 50 } },
+  )
+  const createdRisk = createdProjection.risks[0]
+  assert.notEqual(createdRisk, undefined, 'UI Risk create did not reach the real Host')
+  const riskId = createdRisk.riskId
+  assert.equal(createdRisk.status, 'research')
+  assert.equal(createdRisk.closureReason, null)
+  assert.deepEqual(createdRisk.currentAssessment.exposure, {
     policyVersion: 'project-risk-exposure-v1',
     likelihoodBand: 'P2',
     impactBand: 'I3',
     level: 'medium',
   })
 
+  const filters = panel.getByRole('form', { name: 'Risk 筛选', exact: true })
+  const filterSelects = filters.getByRole('combobox')
+  await filterSelects.nth(0).selectOption('medium')
+  await filterSelects.nth(1).selectOption('research')
+  await filterSelects.nth(2).selectOption({ label: expected.riskOwnerName })
+  await filterSelects.nth(3).selectOption('not-met')
+  await filters.getByLabel('Trigger 包含文本', { exact: true }).fill('连续两次错过')
+  await filters.getByLabel('Review 起始日', { exact: true }).fill('2099-01-15')
+  await filters.getByLabel('Review 截止日', { exact: true }).fill('2099-01-15')
+  const applyFilters = filters.getByRole('button', { name: '应用筛选', exact: true })
+  await assertVisibleKeyboardFocus(applyFilters, 'Project Risk filter submit')
+  await waitForWorkbenchUiRequest(page, WORKBENCH_PROJECT_RISKS_PATH, () => applyFilters.click())
+  await waitForProjectRisksReady(panel, 'Project Risk combined filters')
+  await initialCard.waitFor({ state: 'visible' })
+
   const filtered = await callAuthenticatedWorkbench(
     page,
     WORKBENCH_PROJECT_RISKS_PATH,
     {
       query: {
-        projectId,
+        projectId: expected.projectId,
         exposure: 'medium',
         status: 'research',
-        riskOwnerMemberId,
+        riskOwnerMemberId: expected.riskOwnerMemberId,
         triggerState: 'not-met',
         triggerContains: '连续两次错过',
         reviewFrom: '2099-01-15',
@@ -2421,7 +2546,7 @@ async function prepareRealRiskBrowserProject(page, names) {
   const excludingFilters = [
     ['exposure', { exposure: 'high' }],
     ['status', { status: 'watch' }],
-    ['Risk Owner', { riskOwnerMemberId: otherOwnerMemberId }],
+    ['Risk Owner', { riskOwnerMemberId: expected.otherOwnerMemberId }],
     ['trigger state', { triggerState: 'met' }],
     ['trigger text', { triggerContains: '不存在的触发器' }],
     ['review date', { reviewFrom: '2099-01-16' }],
@@ -2430,86 +2555,101 @@ async function prepareRealRiskBrowserProject(page, names) {
     const excluded = await callAuthenticatedWorkbench(
       page,
       WORKBENCH_PROJECT_RISKS_PATH,
-      { query: { projectId, ...filter, riskLimit: 20, activityLimit: 50 } },
+      { query: { projectId: expected.projectId, ...filter, riskLimit: 20, activityLimit: 50 } },
     )
     assert.deepEqual(excluded.risks, [], `${label} filter did not exclude the real Risk`)
   }
 
-  const revised = await callAuthenticatedWorkbench(
+  await filters.getByRole('button', { name: '重置筛选', exact: true }).click()
+  await waitForWorkbenchUiRequest(page, WORKBENCH_PROJECT_RISKS_PATH, () => applyFilters.click())
+  await waitForProjectRisksReady(panel, 'Project Risk filter reset')
+  await initialCard.waitFor({ state: 'visible' })
+  await initialCard.getByRole('button', { name: '修订评估', exact: true }).click()
+  const reviseForm = panel.locator('form[aria-label="修订 Risk 评估"]')
+  await reviseForm.waitFor({ state: 'visible' })
+  const revisedAssessment = realRiskAssessment(expected.riskOwnerMemberId, 'revised')
+  await fillRealRiskAssessmentForm(reviseForm, revisedAssessment, expected.riskOwnerName)
+  const reviseButton = reviseForm.getByRole('button', { name: '提交修订', exact: true })
+  await waitForCondition(() => reviseButton.isEnabled(), PAGE_TIMEOUT_MS, 'valid Risk revision form')
+  await waitForWorkbenchUiRequest(
     page,
     WORKBENCH_REVISE_PROJECT_RISK_PATH,
-    {
-      request: {
-        projectId,
-        riskId,
-        assessment: realRiskAssessment(riskOwnerMemberId, 'revised'),
-        expectedRisksRevision: created.value.revision,
-        expectedRiskRevision: created.risk.revision,
-        expectedTeamRevision: created.value.teamRevision,
-        expectedTaskRevision: created.value.taskRevision,
-        ...browserCommandKeys('risk-browser-revise'),
-        reason: 'owner-project-risk-revise',
-      },
-    },
+    () => reviseButton.click(),
   )
-  assert.equal(revised.ok, true, `real Risk revision failed: ${revised.error?.code ?? 'unknown'}`)
-  assert.equal(revised.risk.currentAssessment.sequence, 2)
-  assert.equal(revised.risk.currentAssessment.trigger.state, 'met')
-  assert.match(revised.risk.currentAssessment.trigger.observedAt ?? '', /Z$/u)
-  assert.deepEqual(revised.risk.currentAssessment.exposure, {
+  const revisedCard = panel.getByRole('article', {
+    name: revisedAssessment.statement.event,
+    exact: true,
+  })
+  await revisedCard.waitFor({ state: 'visible' })
+  await assertFocusedRiskCard(revisedCard, 'revised Risk')
+  await revisedCard.getByText('高', { exact: true }).waitFor({ state: 'visible' })
+  await revisedCard.getByText('Met', { exact: true }).waitFor({ state: 'visible' })
+
+  const revisedProjection = await callAuthenticatedWorkbench(
+    page,
+    WORKBENCH_PROJECT_RISKS_PATH,
+    { query: { projectId: expected.projectId, selectedRiskId: riskId, historyLimit: 50 } },
+  )
+  const revisedRisk = revisedProjection.risks[0]
+  assert.equal(revisedRisk.currentAssessment.sequence, 2)
+  assert.equal(revisedRisk.currentAssessment.trigger.state, 'met')
+  assert.match(revisedRisk.currentAssessment.trigger.observedAt ?? '', /Z$/u)
+  assert.deepEqual(revisedRisk.currentAssessment.exposure, {
     policyVersion: 'project-risk-exposure-v1',
     likelihoodBand: 'P3',
     impactBand: 'I4',
     level: 'high',
   })
 
-  const mitigating = await callAuthenticatedWorkbench(
+  let transition = revisedCard.getByRole('form', { name: 'Risk 状态迁移', exact: true })
+  await transition.getByRole('combobox').first().selectOption('mitigate')
+  await transition.getByLabel('迁移理由', { exact: true })
+    .fill('触发条件已满足，Owner 明确进入缓解处置。')
+  await waitForWorkbenchUiRequest(
     page,
     WORKBENCH_TRANSITION_PROJECT_RISK_PATH,
-    {
-      request: {
-        projectId,
-        riskId,
-        status: 'mitigate',
-        rationale: '触发条件已满足，Owner 明确进入缓解处置。',
-        expectedRisksRevision: revised.value.revision,
-        expectedRiskRevision: revised.risk.revision,
-        expectedTaskRevision: revised.value.taskRevision,
-        ...browserCommandKeys('risk-browser-mitigate'),
-        reason: 'owner-project-risk-transition',
-      },
-    },
+    () => transition.getByRole('button', { name: '提交状态迁移', exact: true }).click(),
   )
-  assert.equal(mitigating.ok, true, `real Risk mitigation failed: ${mitigating.error?.code ?? 'unknown'}`)
-  assert.equal(mitigating.risk.status, 'mitigate')
-  const closed = await callAuthenticatedWorkbench(
+  await revisedCard.getByText('Mitigate', { exact: true }).waitFor({ state: 'visible' })
+  await assertFocusedRiskCard(revisedCard, 'mitigating Risk')
+
+  transition = revisedCard.getByRole('form', { name: 'Risk 状态迁移', exact: true })
+  await transition.getByRole('combobox').first().selectOption('closed')
+  await transition.getByLabel('迁移理由', { exact: true })
+    .fill('缓解措施已将暴露降至 Owner 接受阈值以下。')
+  await transition.getByRole('combobox').nth(1).selectOption('below-threshold')
+  await waitForWorkbenchUiRequest(
     page,
     WORKBENCH_TRANSITION_PROJECT_RISK_PATH,
-    {
-      request: {
-        projectId,
-        riskId,
-        status: 'closed',
-        closureReason: 'below-threshold',
-        rationale: '缓解措施已将暴露降至 Owner 接受阈值以下。',
-        expectedRisksRevision: mitigating.value.revision,
-        expectedRiskRevision: mitigating.risk.revision,
-        expectedTaskRevision: mitigating.value.taskRevision,
-        ...browserCommandKeys('risk-browser-close'),
-        reason: 'owner-project-risk-transition',
-      },
-    },
+    () => transition.getByRole('button', { name: '提交状态迁移', exact: true }).click(),
   )
-  assert.equal(closed.ok, true, `real Risk close failed: ${closed.error?.code ?? 'unknown'}`)
-  assert.equal(closed.risk.status, 'closed')
-  assert.equal(closed.risk.closureReason, 'below-threshold')
+  await revisedCard.getByText('Closed', { exact: true }).waitFor({ state: 'visible' })
+  await revisedCard.getByText('已低于阈值', { exact: true }).waitFor({ state: 'visible' })
+  await assertFocusedRiskCard(revisedCard, 'closed Risk')
+  assert.equal(
+    await revisedCard.getByRole('button', { name: '修订评估', exact: true }).count(),
+    0,
+    'closed Risk still exposes revision',
+  )
+  assert.equal(
+    await revisedCard.getByRole('form', { name: 'Risk 状态迁移', exact: true }).count(),
+    0,
+    'closed Risk still exposes a transition form',
+  )
+
+  await revisedCard.getByRole('button', { name: '查看完整历史', exact: true }).click()
+  const history = panel.getByRole('region', { name: 'Risk 完整历史', exact: true })
+  await history.waitFor({ state: 'visible' })
+  assert.equal(await history.locator('ol > li').count(), 4, 'UI omitted complete Risk history')
+  const activity = panel.locator('section[aria-labelledby="workbench-project-risk-activity-title"]')
+  assert.equal(await activity.locator('ol > li').count(), 4, 'UI omitted Risk activity')
 
   const finalProjection = await callAuthenticatedWorkbench(
     page,
     WORKBENCH_PROJECT_RISKS_PATH,
     {
       query: {
-        projectId,
+        projectId: expected.projectId,
         selectedRiskId: riskId,
         riskLimit: 20,
         activityLimit: 50,
@@ -2533,16 +2673,10 @@ async function prepareRealRiskBrowserProject(page, names) {
   const tasksAfter = await callAuthenticatedWorkbench(
     page,
     WORKBENCH_PROJECT_TASKS_PATH,
-    { query: { projectId } },
+    { query: { projectId: expected.projectId } },
   )
-  assert.deepEqual(tasksAfter, tasksBefore, 'Risk lifecycle changed the T08 task projection')
-  return {
-    ...names,
-    projectId,
-    riskId,
-    finalProjection,
-    taskProjection: tasksAfter,
-  }
+  assert.deepEqual(tasksAfter, expected.taskProjection, 'Risk lifecycle changed the T08 task projection')
+  return { ...expected, riskId, finalProjection, taskProjection: tasksAfter }
 }
 
 function assertNoPersistedRiskTaskWrites(databasePath, projectId) {
@@ -2576,7 +2710,36 @@ async function runRealRiskRestartJourney(options) {
   const firstJourney = await openCheckedPage(first.readyUrl, 'real Risk Host boot')
   await dismissHarnessOnboarding(firstJourney.page)
   await loginExistingOwner(firstJourney.page, options.password)
-  const expected = await prepareRealRiskBrowserProject(firstJourney.page, options.expected)
+  const prepared = await prepareRealRiskBrowserProject(firstJourney.page, options.expected)
+  await firstJourney.page.reload({ waitUntil: 'load' })
+  await dismissHarnessOnboarding(firstJourney.page)
+  await firstJourney.page.locator('#workbench-projects-title').waitFor({ state: 'visible' })
+  await reopenProject(firstJourney.page, prepared, { skipTasks: true, skipMilestones: true })
+  const expected = await exerciseRealRiskBrowserJourney(firstJourney.page, prepared)
+  await useViewport(firstJourney.page, MOBILE_VIEWPORT, async () => {
+    await reopenProject(firstJourney.page, expected, { skipTasks: true, skipMilestones: true })
+    const panel = projectRisksPanel(firstJourney.page)
+    await panel.getByText('Risk 台账已同步', { exact: true }).waitFor({ state: 'visible' })
+    const card = panel.getByRole('article', {
+      name: realRiskAssessment(expected.riskOwnerMemberId, 'revised').statement.event,
+      exact: true,
+    })
+    await card.waitFor({ state: 'visible' })
+    await card.getByText('Closed', { exact: true }).waitFor({ state: 'visible' })
+    const filterSubmit = panel.getByRole('form', { name: 'Risk 筛选', exact: true })
+      .getByRole('button', { name: '应用筛选', exact: true })
+    const historyButton = card.getByRole('button', { name: '查看完整历史', exact: true })
+    await assertVisibleKeyboardFocus(filterSubmit, 'mobile Project Risk filter submit')
+    await assertVisibleKeyboardFocus(historyButton, 'mobile Project Risk history action')
+    await historyButton.click()
+    const history = panel.getByRole('region', { name: 'Risk 完整历史', exact: true })
+    await history.waitFor({ state: 'visible' })
+    assert.equal(await history.locator('ol > li').count(), 4, 'mobile UI omitted Risk history')
+    await assertNoInternalHorizontalOverflow(panel, 'mobile Project Risks panel')
+    await assertNoInternalHorizontalOverflow(card, 'mobile closed Risk card')
+    await assertNoInternalHorizontalOverflow(history, 'mobile Risk history')
+    await assertNoHorizontalOverflow(firstJourney.page, 'mobile Project Risks lifecycle')
+  })
   await assertNoBrowserErrors(firstJourney)
   await firstJourney.context.close()
   await stopDsh(first.host)
@@ -2595,6 +2758,26 @@ async function runRealRiskRestartJourney(options) {
   await dismissHarnessOnboarding(restartedJourney.page)
   await loginExistingOwner(restartedJourney.page, options.password)
   await reopenProject(restartedJourney.page, expected, { skipTasks: true, skipMilestones: true })
+  const restartedPanel = projectRisksPanel(restartedJourney.page)
+  await restartedPanel.getByText('Risk 台账已同步', { exact: true }).waitFor({ state: 'visible' })
+  const restartedCard = restartedPanel.getByRole('article', {
+    name: realRiskAssessment(expected.riskOwnerMemberId, 'revised').statement.event,
+    exact: true,
+  })
+  await restartedCard.waitFor({ state: 'visible' })
+  await restartedCard.getByText('Closed', { exact: true }).waitFor({ state: 'visible' })
+  await restartedCard.getByText('已低于阈值', { exact: true }).waitFor({ state: 'visible' })
+  await restartedCard.getByRole('button', { name: '查看完整历史', exact: true }).click()
+  const restartedHistory = restartedPanel.getByRole('region', {
+    name: 'Risk 完整历史',
+    exact: true,
+  })
+  await restartedHistory.waitFor({ state: 'visible' })
+  assert.equal(
+    await restartedHistory.locator('ol > li').count(),
+    4,
+    'same-database restart UI omitted Risk history',
+  )
   const afterRestart = await callAuthenticatedWorkbench(
     restartedJourney.page,
     WORKBENCH_PROJECT_RISKS_PATH,
