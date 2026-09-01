@@ -342,6 +342,13 @@ describe('ProjectRisksPanel', () => {
     await act(async () => { await controller.revise() })
     const exactRequest = revise.mock.calls[0]?.[0]
 
+    const filters = screen.getByRole('form', { name: zh['risks.filters.legend'] })
+    expect(within(filters).getByRole('group', {
+      name: zh['risks.filters.legend'],
+    })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', {
+      name: zh['risks.retryExact'],
+    })).toHaveProperty('disabled', false)
     const createForm = screen.getByRole('form', { name: zh['risks.create.legend'] })
     expect(within(createForm).getByRole('group', {
       name: zh['risks.create.legend'],

@@ -1145,7 +1145,7 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
           {projection !== null && (
             <>
               <form className={css.filters} aria-label={t('risks.filters.legend')} onSubmit={submitFilters}>
-                <fieldset className={css.fieldset} disabled={pending}>
+                <fieldset className={css.fieldset} disabled={mutationLocked}>
                   <legend>{t('risks.filters.legend')}</legend>
                   <div className={css.threeColumn}>
                     <label className={css.field}>
