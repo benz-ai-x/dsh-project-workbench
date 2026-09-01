@@ -119,17 +119,27 @@
 ## T12 — Independent Risk register and mitigation tasks (#13)
 
 - [x] Freeze the T12 domain, authority, lifecycle, privacy, migration, Remote, Client, packaging, and testing contract against Issue #13 and the parent V1 spec before implementation.
-- [ ] Model Risk as a first-class Workbench-owned uncertain event with category, trigger, probability interval, impact interval, confidence, Owner, and review date.
-- [ ] Derive exposure deterministically from bounded Risk inputs; never accept an arbitrary exposure label from a caller or model.
-- [ ] Link evidence, dependencies, mitigation tasks, and contingency tasks without copying Feishu task authority or coupling Risk closure to task completion.
-- [ ] Enforce audited Risk status transitions and optimistic concurrency through the existing authorization, replay, Outbox, audit, and Activity seams.
-- [ ] Build a localized accessible Project Risks surface with exposure, status, Owner, trigger, and review-date filters plus lifecycle-safe drafts and retries.
-- [ ] Prove migration/restart, lifecycle rules, deterministic exposure, task/evidence authority, privacy, Scenario/Remote/Loader/Profile/browser behavior, and built/packed artifacts.
+- [x] Model Risk as a first-class Workbench-owned uncertain event with category, trigger, probability interval, impact interval, confidence, Owner, and review date.
+- [x] Derive exposure deterministically from bounded Risk inputs; never accept an arbitrary exposure label from a caller or model.
+- [x] Link evidence, dependencies, mitigation tasks, and contingency tasks without copying Feishu task authority or coupling Risk closure to task completion.
+- [x] Enforce audited Risk status transitions and optimistic concurrency through the existing authorization, replay, Outbox, audit, and Activity seams.
+- [x] Build a localized accessible Project Risks surface with exposure, status, Owner, trigger, and review-date filters plus lifecycle-safe drafts and retries.
+- [x] Prove migration/restart, lifecycle rules, deterministic exposure, task/evidence authority, privacy, Scenario/Remote/Loader/Profile/browser behavior, and built/packed artifacts.
+
+## T13 — Topic workspace (#14)
+
+- [ ] Freeze the T13 domain, authority, lifecycle, conversion, privacy, migration, Remote, Client, packaging, and testing contract against Issue #14 and the parent V1 spec before implementation.
+- [ ] Model one Workbench-owned Topic workspace with explicit research and already-occurred execution-issue variants and distinct status flows.
+- [ ] Organize facts, evidence, hypotheses, counter-evidence, open questions, conclusions, and next steps without conflating recorded claims with confirmed conclusions.
+- [ ] Link same-Project Goal, Project, Risk, Decision, Deliverable, and authoritative Feishu task references under closed scope and availability rules.
+- [ ] Reject silent Topic type conversion whenever variant-specific status or other incompatible data would be lost.
+- [ ] Build localized accessible Topic list/detail projections that expose evidence completeness and pending confirmations with lifecycle-safe drafts and exact retries.
+- [ ] Prove migration/restart, variant lifecycle and conversion rules, evidence/link authority, privacy, Scenario/Remote/Loader/Profile/browser behavior, and built/packed artifacts.
 
 ## Deferred and later work
 
 - [ ] UI-MANUAL-01 — Non-blocking follow-up issue: after all development is complete, the user will manually repeat the zh-CN desktop and 375px visual pass for every new surface in an environment with CJK fonts. Automated Chromium functional, accessibility, keyboard, overflow, and responsive-layout coverage remains required now; this container cannot reliably judge Chinese glyph rendering because it has no CJK font.
-- [ ] T13+ File-source integration, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T12 preparation.
+- [ ] T14+ File-source integration, AI-native analysis, automation, backup, integration hardening, and 14-day acceptance remain intentionally outside T13 preparation.
 
 ## Definition of done
 

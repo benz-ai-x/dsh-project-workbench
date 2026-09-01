@@ -2,7 +2,7 @@
 
 ## Product outcome
 
-Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity, T04 added immutable Template-driven Project creation, T05 added the Project-scoped roster and responsibility tuple, T06 added evidence-backed review, T07 added explicit Feishu Bot/User identity continuity, T08 federated one primary Feishu Task List, T09 mapped a Project workflow to one Feishu custom field, T10 bound an authoritative Feishu calendar with Milestones, and T11 carried immutable Deliverable plans through typed acceptance to an immutable Final Release. The active delivery ticket is GitHub Issue #13 (T12): manage first-class Risks and link mitigation/contingency actions to authoritative Feishu tasks. Its implementation contract is frozen in `docs/research/t12-risk-register.md`; runtime work must stay inside that boundary.
+Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide a project-centered workspace for durable project state, documents, collaboration, and AI-native progress/risk/topic workflows. T01 established the durable Host-to-browser walking skeleton, T02 added the local Owner boundary, T03 completed the traceable transaction/Outbox/audit seam plus Owner Activity, T04 added immutable Template-driven Project creation, T05 added the Project-scoped roster and responsibility tuple, T06 added evidence-backed review, T07 added explicit Feishu Bot/User identity continuity, T08 federated one primary Feishu Task List, T09 mapped a Project workflow to one Feishu custom field, T10 bound an authoritative Feishu calendar with Milestones, T11 carried immutable Deliverable plans through typed acceptance to an immutable Final Release, and T12 added the independent versioned Risk register with read-only Feishu treatment-task links. The active delivery ticket is GitHub Issue #14 (T13): add the unified Topic workspace for research topics and already-occurred execution issues. Its exact implementation contract must be frozen before runtime work begins.
 
 ## Runtime shape
 
@@ -10,7 +10,7 @@ Project Workbench is an external DeepSeek Harness Cordis plugin. It will provide
 - `@benz-ai-x/dsh-project-workbench-client` owns the browser projection and UI. It mounts the generated Remote artifact before registering into the `conversation` Slot and tears down in reverse order.
 - `@benz-ai-x/dsh-project-workbench-bundle` inserts the Host and Client rows. The tracked `workbench-test` profile composes `dsh-base`, `dsh-web-app`, and this bundle.
 - Host state never crosses through a custom Session event. Client code never imports Node, repository, credentials, or external adapter implementations.
-- The neutral status remains the first formal command target; T04–T11 extend the same ledger rather than creating parallel authority paths.
+- The neutral status remains the first formal command target; T04–T12 extend the same ledger rather than creating parallel authority paths.
 
 ## Pinned baseline
 
@@ -173,9 +173,15 @@ T11 adds only immutable Deliverable plans, responsibility assignments, one autho
 - Statement/trigger text, intervals, confidence/rationale, dates, assumptions, transition rationale, member IDs, evidence/dependency IDs, task GUIDs, and raw request/error values stay out of generic audit, Activity, Outbox payloads, receipts, logs, diagnostics, and domain-conflict messages. Full values appear only in the authorized detached Risk projection.
 - The localized Client renders exposure/status text rather than color alone, separates mitigation from contingency, uses labeled native forms and progressive disclosure, explains the matrix policy, supports the five filters, exact retry and stale projection, and clears protected drafts/work on Project switch, logout, expiry, Owner change, connection loss, HMR, and Fiber disposal.
 
-## Active T12 ticket boundary
+## Completed T12 ticket boundary
 
 T12 adds only the versioned Project Risk register, deterministic exposure, Owner-confirmed trigger state, append-only assessment/status history, same-Project immutable evidence and Risk dependency links, read-only Feishu task treatment links, required filters, and the Project Risks Client surface. It does not add RiskCandidate/Risk Radar/automatic trigger evaluation, model-selected exposure, task writes or task-driven status, Topic conversion, File/document evidence, Milestone/Deliverable/plan dependency edges, comments, recurring review automation, Risk delete/reopen/merge, a custom policy editor, or a generic entity/patch registry.
+
+## Active T13 preparation boundary
+
+Issue #14 requires one unified Topic workspace with two explicit variants: research Topics and already-occurred execution issues. The shared workspace organizes facts, evidence, hypotheses, counter-evidence, open questions, conclusions, and next steps; links Goal, Project, Risk, Decision, Deliverable, and Feishu task references; preserves variant-specific status semantics; prevents silent type conversion when incompatible status data exists; and shows evidence completeness plus pending confirmations in list and detail projections.
+
+This is a preparation boundary, not yet a frozen implementation contract. Before T13 runtime changes, record the exact domain vocabulary, ownership, status machines, conversion policy, evidence/link authority, privacy, migration, Remote, Client, packaging, and testing contract in a T13 research note and update `CONTEXT.md`. Do not infer AI-generated conclusions, File-source verification, automatic cross-object mutation, or new Feishu task authority from the public acceptance text.
 
 ## Required evidence
 
