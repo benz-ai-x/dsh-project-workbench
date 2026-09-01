@@ -1536,12 +1536,12 @@ describe('built Workbench Host through the real DSH Loader', () => {
       expect.objectContaining({
         riskId: firstRisk.risk.riskId,
         status: 'closed',
-        selectable: false,
+        selectable: true,
       }),
       expect.objectContaining({
         riskId: secondRisk.risk.riskId,
         status: 'research',
-        selectable: false,
+        selectable: true,
       }),
     ]))
     expect(firstRiskPage.dependencyOptions.map(option => option.riskId))
