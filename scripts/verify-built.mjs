@@ -347,7 +347,6 @@ function verifyTypertFace(face, packageName, label) {
     'requestDeliverableAcceptance',
     'reviseProjectRisk',
     'reviewCenter',
-    'reviseProjectRisk',
     'setProjectMemberStatus',
     'setProjectResponsibility',
     'setStatus',
@@ -355,7 +354,6 @@ function verifyTypertFace(face, packageName, label) {
     'transitionProjectRisk',
     'updateFeishuTask',
     'updateProjectMilestoneDate',
-    'transitionProjectRisk',
     'verifyFeishuIdentityRoute',
   ]
   check(
