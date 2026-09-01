@@ -96,8 +96,12 @@ ProjectRisksProjection {
         {
           kind: 'transition', sequence: 2,
           transition: {
-            transitionId: 'transition-1', sequence: 1, fromStatus: 'research', toStatus: 'watch',
-            rationale: 'Monitor the review checkpoint.', closureReason: null,
+            transitionId: 'transition-with-an-extremely-long-stable-identifier-1234567890',
+            sequence: 1,
+            fromStatus: status === 'closed' ? 'mitigate' : 'research',
+            toStatus: status === 'closed' ? 'closed' : 'watch',
+            rationale: 'Monitor the review checkpoint.',
+            closureReason: status === 'closed' ? 'no-longer-exists' : null,
             occurredAt: '2026-09-01T01:30:00.000Z',
           },
           source: { kind: 'audit-event', auditEventId: 'audit-transition-1' },
@@ -204,6 +208,7 @@ describe('ProjectRisksPanel', () => {
     expect(within(card).getByText('project-risk-exposure-v1')).toBeTruthy()
     expect(within(card).getByText(zh['risks.confidence.medium'])).toBeTruthy()
     expect(within(card).getByText('Risk Owner')).toBeTruthy()
+    expect(within(card).getByText('Review has not started by the checkpoint')).toBeTruthy()
     expect(within(card).getByText(zh['risks.trigger.state.met'])).toBeTruthy()
     expect(within(card).getByText('2026-09-08')).toBeTruthy()
     expect(within(card).getByRole('group', { name: zh['risks.tasks.mitigation'] })).toBeTruthy()
@@ -229,9 +234,11 @@ describe('ProjectRisksPanel', () => {
     expect(within(createForm).getByLabelText(zh['risks.field.impactUpper'])).toBeTruthy()
     expect(within(createForm).getByLabelText(zh['risks.field.horizon'])).toHaveProperty('type', 'date')
     expect(within(createForm).getByLabelText(zh['risks.field.nextReview'])).toHaveProperty('type', 'date')
+    const owner = within(createForm).getByLabelText(zh['risks.field.owner'])
     const advanced = within(createForm).getByText(zh['risks.form.advanced']).closest('details')
     expect(advanced?.tagName).toBe('DETAILS')
     expect(advanced?.hasAttribute('open')).toBe(false)
+    expect(advanced?.contains(owner)).toBe(false)
     expect(within(advanced as HTMLElement).getByRole('group', {
       name: zh['risks.tasks.mitigation'],
     })).toBeTruthy()
@@ -249,10 +256,39 @@ describe('ProjectRisksPanel', () => {
     await act(async () => {
       fireEvent.click(within(card).getByRole('button', { name: zh['risks.history.open'] }))
     })
-    const history = await screen.findByRole('region', { name: zh['risks.history.title'] })
-    expect(within(history).getByText('Monitor the review checkpoint.')).toBeTruthy()
-    expect(within(history).getByText('audit-transition-1')).toBeTruthy()
-    expect(within(history).getByText(assessment().assessmentId)).toBeTruthy()
+    const historySummary = await screen.findByText(zh['risks.history.title'])
+    expect(historySummary.tagName).toBe('SPAN')
+    const history = historySummary.closest('details')
+    expect(history?.tagName).toBe('DETAILS')
+    const summary = history?.querySelector(':scope > summary')
+    expect(summary?.contains(historySummary)).toBe(true)
+    fireEvent.click(summary as HTMLElement)
+    const assessmentEntry = history?.querySelector('details[data-history-kind="assessment"]')
+    expect(assessmentEntry?.tagName).toBe('DETAILS')
+    fireEvent.click(assessmentEntry!.querySelector(':scope > summary') as HTMLElement)
+    const assessmentHistory = within(assessmentEntry as HTMLElement)
+    expect(assessmentHistory.getByText(assessment().assessmentId)).toBeTruthy()
+    expect(assessmentHistory.getByText('Review has not started by the checkpoint')).toBeTruthy()
+    expect(assessmentHistory.getByText('Risk Owner')).toBeTruthy()
+    expect(assessmentHistory.getByText('Risk Analyst')).toBeTruthy()
+    expect(assessmentHistory.getByText('audit-evidence-1')).toBeTruthy()
+    expect(assessmentHistory.getByText('risk-dependency')).toBeTruthy()
+    expect(assessmentHistory.getByText('task-mitigation')).toBeTruthy()
+    expect(assessmentHistory.getByText('task-contingency')).toBeTruthy()
+    expect(assessmentHistory.getByText(assessment().digest)).toBeTruthy()
+    expect(assessmentHistory.getAllByText('2026-09-01T02:00:00.000Z').length).toBeGreaterThan(0)
+    expect(assessmentHistory.getByText('audit-assessment-1')).toBeTruthy()
+    expect(assessmentHistory.getByText(zh['risks.actor.owner'])).toBeTruthy()
+    expect(assessmentHistory.getByText('owner-1')).toBeTruthy()
+    expect(assessmentHistory.getByText('cause-assessment-1')).toBeTruthy()
+
+    const transitionEntry = history?.querySelector('details[data-history-kind="transition"]')
+    expect(transitionEntry?.tagName).toBe('DETAILS')
+    fireEvent.click(transitionEntry!.querySelector(':scope > summary') as HTMLElement)
+    const transitionHistory = within(transitionEntry as HTMLElement)
+    expect(transitionHistory.getByText('Monitor the review checkpoint.')).toBeTruthy()
+    expect(transitionHistory.getByText('2026-09-01T01:30:00.000Z')).toBeTruthy()
+    expect(transitionHistory.getByText('audit-transition-1')).toBeTruthy()
 
     const packageRoot = process.cwd().endsWith('packages/workbench-client')
       ? process.cwd() : resolve(process.cwd(), 'packages/workbench-client')
@@ -275,6 +311,64 @@ describe('ProjectRisksPanel', () => {
     expect(within(card).queryByRole('button', { name: zh['risks.action.revise'] })).toBeNull()
     expect(within(card).queryByRole('form', { name: zh['risks.transition.legend'] })).toBeNull()
     expect(within(card).getByText(zh['risks.closed.terminal'])).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(within(card).getByRole('button', { name: zh['risks.history.open'] }))
+    })
+    const historySummary = await screen.findByText(zh['risks.history.title'])
+    const history = historySummary.closest('details')
+    fireEvent.click(history!.querySelector(':scope > summary') as HTMLElement)
+    const transitionEntry = history!.querySelector('details[data-history-kind="transition"]')
+    fireEvent.click(transitionEntry!.querySelector(':scope > summary') as HTMLElement)
+    expect(within(transitionEntry as HTMLElement).getByText(zh['risks.closure.noLongerExists']))
+      .toBeTruthy()
+    expect(within(transitionEntry as HTMLElement).getByText('2026-09-01T01:30:00.000Z'))
+      .toBeTruthy()
+    await controller.dispose()
+  })
+
+  it('keeps exact retry visible after a same-Owner reconnect clears the transport issue', async () => {
+    const workbenchRemote = remote()
+    const revise = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: { code: 'unavailable' } })
+      .mockResolvedValueOnce(ok({
+        ok: true as const, value: projection(), risk: risk(), receipt,
+      }))
+    workbenchRemote.reviseProjectRisk = revise
+    const controller = new WorkbenchProjectRisksController(workbenchRemote)
+    render(<ProjectRisksPanel controller={controller} t={t} />)
+    await act(async () => { await controller.selectProject('project-1', 'Evidence Project') })
+    controller.beginRevision(risk().riskId)
+    await act(async () => { await controller.revise() })
+    const exactRequest = revise.mock.calls[0]?.[0]
+
+    const createForm = screen.getByRole('form', { name: zh['risks.create.legend'] })
+    expect(within(createForm).getByRole('group', {
+      name: zh['risks.create.legend'],
+    })).toHaveProperty('disabled', true)
+    const card = screen.getByRole('article', { name: 'Review may start late' })
+    expect(within(card).getByRole('button', {
+      name: zh['risks.action.revise'],
+    })).toHaveProperty('disabled', true)
+    const reviseForm = within(card).getByRole('form', { name: zh['risks.revise.legend'] })
+    expect(within(reviseForm).getByRole('group', {
+      name: zh['risks.revise.legend'],
+    })).toHaveProperty('disabled', true)
+    const transitionForm = within(card).getByRole('form', { name: zh['risks.transition.legend'] })
+    expect(within(transitionForm).getByRole('group', {
+      name: zh['risks.transition.legend'],
+    })).toHaveProperty('disabled', true)
+
+    act(() => { controller.markDisconnected() })
+    await act(async () => { await controller.connectionReset() })
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'ready', issue: null, canRetryMutation: true,
+    })
+    const retry = screen.getByRole('button', { name: zh['risks.retryExact'] })
+    await act(async () => { fireEvent.click(retry) })
+
+    expect(revise).toHaveBeenCalledTimes(2)
+    expect(revise.mock.calls[1]?.[0]).toBe(exactRequest)
     await controller.dispose()
   })
 })

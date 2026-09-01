@@ -523,6 +523,9 @@ export class WorkbenchProjectRisksController {
       pendingRiskId: null,
       loadingMore: null,
       issue: null,
+      createDraft: emptyAssessmentDraft(),
+      revisionDraft: null,
+      transitionDrafts: Object.freeze({}),
       canRetryMutation: this.retryEnvelope !== null,
     })
   }
@@ -533,6 +536,8 @@ export class WorkbenchProjectRisksController {
     this.publish({
       ...this.state, phase: 'stale', pendingOperation: null, pendingRiskId: null,
       loadingMore: null,
+      createDraft: emptyAssessmentDraft(), revisionDraft: null,
+      transitionDrafts: Object.freeze({}),
     })
     return this.track(this.doRead('replace'))
   }
@@ -718,6 +723,7 @@ export class WorkbenchProjectRisksController {
   ): ProjectRiskAssessmentDraft | null {
     const projection = this.state.projection
     if (projection === null) return null
+    const retainedAssessment = riskId === null ? null : this.risk(riskId)?.currentAssessment ?? null
     const condition = safeOptionalText(draft.condition, MAX_PROJECT_RISK_STATEMENT_LENGTH)
     const event = safeRequiredText(draft.event, MAX_PROJECT_RISK_STATEMENT_LENGTH)
     const consequence = safeRequiredText(draft.consequence, MAX_PROJECT_RISK_STATEMENT_LENGTH)
@@ -760,15 +766,24 @@ export class WorkbenchProjectRisksController {
       }
     } else if (sponsor !== '') return null
     const evidence = canonicalEvidence(draft.evidence)
+    const retainedEvidence = new Set(
+      retainedAssessment?.evidence.map(value => evidenceIdentity(value)) ?? [],
+    )
     if (evidence === null || evidence.length > MAX_PROJECT_RISK_EVIDENCE
-      || evidence.some(ref => !projection.evidenceOptions.some(option => sameEvidence(option, ref)))) {
+      || evidence.some(ref => !projection.evidenceOptions.some(option => sameEvidence(option, ref))
+        && !retainedEvidence.has(evidenceIdentity(ref)))) {
       return null
     }
     const dependencyRiskIds = canonicalSet(draft.dependencyRiskIds)
+    const retainedDependencyIds = new Set(
+      retainedAssessment?.dependencies.map(value => value.riskId) ?? [],
+    )
     if (dependencyRiskIds === null || dependencyRiskIds.length > MAX_PROJECT_RISK_DEPENDENCIES
       || (riskId !== null && dependencyRiskIds.includes(riskId))
-      || dependencyRiskIds.some(id => !projection.dependencyOptions.some(option =>
-        option.riskId === id && option.selectable))) return null
+      || dependencyRiskIds.some(id => !retainedDependencyIds.has(id)
+        && !projection.dependencyOptions.some(option => option.riskId === id && option.selectable))) {
+      return null
+    }
     const mitigationTaskGuids = canonicalSet(draft.mitigationTaskGuids)
     const contingencyTaskGuids = canonicalSet(draft.contingencyTaskGuids)
     if (mitigationTaskGuids === null || contingencyTaskGuids === null
@@ -847,6 +862,7 @@ export class WorkbenchProjectRisksController {
   }
   private canEdit(): boolean {
     return this.admitProtectedOperation() && this.state.pendingOperation === null
+      && this.retryEnvelope === null
   }
   private canOperate(): boolean {
     return this.canEdit() && this.state.selection !== null && this.state.projection !== null

@@ -5,6 +5,7 @@ import {
   useRef,
   useSyncExternalStore,
   type FormEvent,
+  type ReactNode,
 } from 'react'
 import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -15,7 +16,10 @@ import type {
   ProjectRiskConfidence,
   ProjectRiskEvidenceOption,
   ProjectRiskEvidenceRef,
+  ProjectRiskHistoryEntry,
+  ProjectRiskMemberSnapshot,
   ProjectRiskProjection,
+  ProjectRiskSelectedProjection,
   ProjectRisksProjection,
   ProjectRiskStatus,
   ProjectRiskTriggerState,
@@ -320,35 +324,35 @@ function AssessmentForm({
         </div>
         <p id={`${hintPrefix}-date-hint`} className={css.hint}>{t('risks.form.dateHint')}</p>
 
+        <label className={css.field}>
+          <span>{t('risks.field.owner')}</span>
+          <select
+            required
+            value={draft.accountableMemberId}
+            onChange={event => {
+              const memberId = event.currentTarget.value
+              onChange({
+                ...draft,
+                accountableMemberId: memberId,
+                contributorMemberIds: draft.contributorMemberIds.filter(id => id !== memberId),
+                humanSponsorMemberId: '',
+              })
+            }}
+          >
+            <option value="">{t('risks.form.chooseMember')}</option>
+            {projection.memberOptions.map(member => (
+              <option
+                key={member.memberId}
+                value={member.memberId}
+                disabled={member.status !== 'active'}
+              >{member.displayName}</option>
+            ))}
+          </select>
+        </label>
+
         <details className={css.advanced}>
           <summary>{t('risks.form.advanced')}</summary>
           <div className={css.advancedBody}>
-            <label className={css.field}>
-              <span>{t('risks.field.owner')}</span>
-              <select
-                required
-                value={draft.accountableMemberId}
-                onChange={event => {
-                  const memberId = event.currentTarget.value
-                  onChange({
-                    ...draft,
-                    accountableMemberId: memberId,
-                    contributorMemberIds: draft.contributorMemberIds.filter(id => id !== memberId),
-                    humanSponsorMemberId: '',
-                  })
-                }}
-              >
-                <option value="">{t('risks.form.chooseMember')}</option>
-                {projection.memberOptions.map(member => (
-                  <option
-                    key={member.memberId}
-                    value={member.memberId}
-                    disabled={member.status !== 'active'}
-                  >{member.displayName}</option>
-                ))}
-              </select>
-            </label>
-
             <fieldset className={css.nestedFieldset}>
               <legend>{t('risks.field.contributors')}</legend>
               <div className={css.choices}>
@@ -646,7 +650,14 @@ function AssessmentSummary({
         <div><dt>{t('risks.card.condition')}</dt><dd>{assessment.statement.condition ?? '—'}</dd></div>
         <div><dt>{t('risks.card.category')}</dt><dd>{t(projectRiskCategoryKey(assessment.category))}</dd></div>
         <div><dt>{t('risks.card.owner')}</dt><dd>{assessment.responsibility.accountable.displayName}</dd></div>
-        <div><dt>{t('risks.card.trigger')}</dt><dd>{t(projectRiskTriggerStateKey(assessment.trigger.state))}</dd></div>
+        <div>
+          <dt>{t('risks.card.trigger')}</dt>
+          <dd>
+            <span>{assessment.trigger.statement}</span>
+            {' · '}
+            <span>{t(projectRiskTriggerStateKey(assessment.trigger.state))}</span>
+          </dd>
+        </div>
         <div><dt>{t('risks.card.review')}</dt><dd><time dateTime={assessment.nextReviewOn}>{assessment.nextReviewOn}</time></dd></div>
         <div><dt>{t('risks.card.confidence')}</dt><dd>{t(projectRiskConfidenceKey(assessment.confidence))}</dd></div>
         <div><dt>{t('risks.card.assessedAt')}</dt><dd><time dateTime={assessment.assessedAt}>{assessment.assessedAt}</time></dd></div>
@@ -666,6 +677,314 @@ function AssessmentSummary({
         <p className={css.hint}>{t('risks.exposure.matrixHint')}</p>
       </section>
     </>
+  )
+}
+
+function HistoryFact({
+  name,
+  label,
+  children,
+}: {
+  readonly name: string
+  readonly label: string
+  readonly children: ReactNode
+}) {
+  return <div data-history-fact={name}><dt>{label}</dt><dd>{children}</dd></div>
+}
+
+function HistoryStringValues({
+  values,
+  t,
+}: {
+  readonly values: readonly string[]
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  if (values.length === 0) return <>{t('risks.history.none')}</>
+  return <ul className={css.historyValues}>{values.map(value => <li key={value}>{value}</li>)}</ul>
+}
+
+function HistoryMember({
+  member,
+  t,
+}: {
+  readonly member: ProjectRiskMemberSnapshot | null
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  if (member === null) return <>{t('risks.history.none')}</>
+  return (
+    <>
+      <span>{member.displayName}</span>
+      {' · '}
+      <span>{t(member.kind === 'human' ? 'risks.member.human' : 'risks.member.agent')}</span>
+      {' · '}
+      <code>{member.memberId}</code>
+    </>
+  )
+}
+
+function HistoryMembers({
+  members,
+  t,
+}: {
+  readonly members: readonly ProjectRiskMemberSnapshot[]
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  if (members.length === 0) return <>{t('risks.history.none')}</>
+  return (
+    <ul className={css.historyValues}>
+      {members.map(member => (
+        <li key={member.memberId}><HistoryMember member={member} t={t} /></li>
+      ))}
+    </ul>
+  )
+}
+
+function HistoryEvidence({
+  values,
+  t,
+}: {
+  readonly values: readonly ProjectRiskEvidenceRef[]
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  if (values.length === 0) return <>{t('risks.history.none')}</>
+  return (
+    <ul className={css.historyValues}>
+      {values.map(value => (
+        <li key={evidenceId(value)}>
+          <span>{t(projectRiskEvidenceKindKey(value.kind))}</span>
+          {': '}
+          <code>{evidenceLabel(value)}</code>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function HistoryEntrySource({
+  entry,
+  t,
+}: {
+  readonly entry: ProjectRiskHistoryEntry
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  return (
+    <>
+      <HistoryFact name="source" label={t('risks.history.source')}>
+        <span>{t('risks.history.source.auditEvent')}</span>
+        {' ('}<code>{entry.source.kind}</code>{'): '}
+        <code>{entry.source.auditEventId}</code>
+      </HistoryFact>
+      <HistoryFact name="actor" label={t('risks.history.actor')}>
+        <span>{t('risks.actor.owner')}</span>{': '}<code>{entry.actor.id}</code>
+      </HistoryFact>
+      <HistoryFact name="causation" label={t('risks.history.causation')}>
+        <code>{entry.causationId}</code>
+      </HistoryFact>
+    </>
+  )
+}
+
+function AssessmentHistoryEntry({
+  entry,
+  t,
+}: {
+  readonly entry: Extract<ProjectRiskHistoryEntry, { readonly kind: 'assessment' }>
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  const value = entry.assessment
+  return (
+    <details className={css.historyEntry} data-history-kind="assessment">
+      <summary>
+        <span>{t('risks.history.assessment')}</span>
+        {' · '}{entry.sequence}
+      </summary>
+      <dl className={css.historyFacts}>
+        <HistoryFact name="entry-sequence" label={t('risks.history.entrySequence')}>
+          {entry.sequence}
+        </HistoryFact>
+        <HistoryFact name="assessment-id" label={t('risks.history.assessmentId')}>
+          <code>{value.assessmentId}</code>
+        </HistoryFact>
+        <HistoryFact name="version-sequence" label={t('risks.history.versionSequence')}>
+          {value.sequence}
+        </HistoryFact>
+        <HistoryFact name="condition" label={t('risks.field.condition')}>
+          {value.statement.condition ?? t('risks.history.none')}
+        </HistoryFact>
+        <HistoryFact name="event" label={t('risks.field.event')}>{value.statement.event}</HistoryFact>
+        <HistoryFact name="consequence" label={t('risks.field.consequence')}>
+          {value.statement.consequence}
+        </HistoryFact>
+        <HistoryFact name="category" label={t('risks.field.category')}>
+          {t(projectRiskCategoryKey(value.category))}
+        </HistoryFact>
+        <HistoryFact name="trigger-statement" label={t('risks.field.triggerStatement')}>
+          {value.trigger.statement}
+        </HistoryFact>
+        <HistoryFact name="trigger-state" label={t('risks.field.triggerState')}>
+          {t(projectRiskTriggerStateKey(value.trigger.state))}
+        </HistoryFact>
+        <HistoryFact name="trigger-observed-at" label={t('risks.trigger.observedAt')}>
+          {value.trigger.observedAt === null ? t('risks.history.none') : (
+            <time dateTime={value.trigger.observedAt}>{value.trigger.observedAt}</time>
+          )}
+        </HistoryFact>
+        <HistoryFact name="probability" label={t('risks.history.probability')}>
+          {value.probability.lowerBasisPoints}–{value.probability.upperBasisPoints} bp
+        </HistoryFact>
+        <HistoryFact name="impact" label={t('risks.history.impact')}>
+          I{value.impact.lowerBand}–I{value.impact.upperBand}
+        </HistoryFact>
+        <HistoryFact name="confidence" label={t('risks.field.confidence')}>
+          {t(projectRiskConfidenceKey(value.confidence))}
+        </HistoryFact>
+        <HistoryFact name="confidence-rationale" label={t('risks.field.confidenceRationale')}>
+          {value.confidenceRationale}
+        </HistoryFact>
+        <HistoryFact name="horizon" label={t('risks.field.horizon')}>
+          <time dateTime={value.assessmentHorizonEnd}>{value.assessmentHorizonEnd}</time>
+        </HistoryFact>
+        <HistoryFact name="next-review" label={t('risks.field.nextReview')}>
+          <time dateTime={value.nextReviewOn}>{value.nextReviewOn}</time>
+        </HistoryFact>
+        <HistoryFact name="assumptions" label={t('risks.field.assumptions')}>
+          <HistoryStringValues values={value.assumptions} t={t} />
+        </HistoryFact>
+        <HistoryFact name="accountable" label={t('risks.field.owner')}>
+          <HistoryMember member={value.responsibility.accountable} t={t} />
+        </HistoryFact>
+        <HistoryFact name="contributors" label={t('risks.field.contributors')}>
+          <HistoryMembers members={value.responsibility.contributors} t={t} />
+        </HistoryFact>
+        <HistoryFact name="human-sponsor" label={t('risks.field.sponsor')}>
+          <HistoryMember member={value.responsibility.humanSponsor} t={t} />
+        </HistoryFact>
+        <HistoryFact name="evidence" label={t('risks.field.evidence')}>
+          <HistoryEvidence values={value.evidence} t={t} />
+        </HistoryFact>
+        <HistoryFact name="dependencies" label={t('risks.field.dependencies')}>
+          {value.dependencies.length === 0 ? t('risks.history.none') : (
+            <ul className={css.historyValues}>
+              {value.dependencies.map(dependency => (
+                <li key={dependency.riskId}>
+                  <span>{t('risks.history.dependency.dependsOn')}</span>
+                  {' ('}<code>{dependency.kind}</code>{'): '}
+                  <code>{dependency.riskId}</code>
+                </li>
+              ))}
+            </ul>
+          )}
+        </HistoryFact>
+        <HistoryFact name="mitigation-tasks" label={t('risks.tasks.mitigation')}>
+          <HistoryStringValues values={value.mitigationTaskGuids} t={t} />
+        </HistoryFact>
+        <HistoryFact name="contingency-tasks" label={t('risks.tasks.contingency')}>
+          <HistoryStringValues values={value.contingencyTaskGuids} t={t} />
+        </HistoryFact>
+        <HistoryFact name="exposure" label={t('risks.exposure.title')}>
+          <span>{t(projectRiskExposureLevelKey(value.exposure.level))}</span>
+          {' · '}
+          <span>{t(projectRiskLikelihoodBandKey(value.exposure.likelihoodBand))}</span>
+          {' · '}
+          <span>{t(projectRiskImpactBandKey(value.exposure.impactBand))}</span>
+          {' · '}
+          <code>{value.exposure.policyVersion}</code>
+        </HistoryFact>
+        <HistoryFact name="digest" label={t('risks.history.digest')}>
+          <code>{value.digest}</code>
+        </HistoryFact>
+        <HistoryFact name="assessed-at" label={t('risks.history.assessedAt')}>
+          <time dateTime={value.assessedAt}>{value.assessedAt}</time>
+        </HistoryFact>
+        <HistoryEntrySource entry={entry} t={t} />
+      </dl>
+    </details>
+  )
+}
+
+function TransitionHistoryEntry({
+  entry,
+  t,
+}: {
+  readonly entry: Extract<ProjectRiskHistoryEntry, { readonly kind: 'transition' }>
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  const value = entry.transition
+  return (
+    <details className={css.historyEntry} data-history-kind="transition">
+      <summary>
+        <span>{t('risks.history.transition')}</span>
+        {' · '}{entry.sequence}
+      </summary>
+      <dl className={css.historyFacts}>
+        <HistoryFact name="entry-sequence" label={t('risks.history.entrySequence')}>
+          {entry.sequence}
+        </HistoryFact>
+        <HistoryFact name="transition-id" label={t('risks.history.transitionId')}>
+          <code>{value.transitionId}</code>
+        </HistoryFact>
+        <HistoryFact name="version-sequence" label={t('risks.history.versionSequence')}>
+          {value.sequence}
+        </HistoryFact>
+        <HistoryFact name="from-status" label={t('risks.history.fromStatus')}>
+          {t(projectRiskStatusKey(value.fromStatus))}
+        </HistoryFact>
+        <HistoryFact name="to-status" label={t('risks.history.toStatus')}>
+          {t(projectRiskStatusKey(value.toStatus))}
+        </HistoryFact>
+        <HistoryFact name="rationale" label={t('risks.transition.rationale')}>
+          {value.rationale}
+        </HistoryFact>
+        <HistoryFact name="closure-reason" label={t('risks.transition.closureReason')}>
+          {value.closureReason === null
+            ? t('risks.history.none') : t(projectRiskClosureReasonKey(value.closureReason))}
+        </HistoryFact>
+        <HistoryFact name="occurred-at" label={t('risks.history.occurredAt')}>
+          <time dateTime={value.occurredAt}>{value.occurredAt}</time>
+        </HistoryFact>
+        <HistoryEntrySource entry={entry} t={t} />
+      </dl>
+    </details>
+  )
+}
+
+function RiskHistory({
+  selected,
+  loading,
+  controller,
+  t,
+}: {
+  readonly selected: ProjectRiskSelectedProjection
+  readonly loading: boolean
+  readonly controller: WorkbenchProjectRisksController
+  readonly t: ProjectRisksPanelProps['t']
+}) {
+  return (
+    <details className={css.history} data-project-risk-history={selected.risk.riskId}>
+      <summary className={css.historySummary}>
+        <span>{t('risks.history.title')}</span>
+        {' · '}
+        <code>{selected.risk.riskId}</code>
+      </summary>
+      <div className={css.historyBody}>
+        {selected.history.length === 0 ? <p>{t('risks.history.empty')}</p> : (
+          <ol>
+            {selected.history.map(entry => (
+              <li key={`${entry.kind}:${entry.sequence}`}>
+                {entry.kind === 'assessment'
+                  ? <AssessmentHistoryEntry entry={entry} t={t} />
+                  : <TransitionHistoryEntry entry={entry} t={t} />}
+              </li>
+            ))}
+          </ol>
+        )}
+        {selected.nextBeforeHistorySequence !== null && (
+          <Button variant="outline" size="sm" type="button" onClick={() => {
+            void controller.loadMoreHistory()
+          }}>{t(loading ? 'risks.history.loadingMore' : 'risks.history.loadMore')}</Button>
+        )}
+      </div>
+    </details>
   )
 }
 
@@ -691,7 +1010,10 @@ function TransitionForm({
   }
   return (
     <form className={css.transition} aria-label={t('risks.transition.legend')} onSubmit={submit}>
-      <fieldset className={css.nestedFieldset} disabled={state.pendingOperation !== null}>
+      <fieldset
+        className={css.nestedFieldset}
+        disabled={state.pendingOperation !== null || state.canRetryMutation}
+      >
         <legend>{t('risks.transition.legend')}</legend>
         <label className={css.field}>
           <span>{t('risks.transition.status')}</span>
@@ -758,6 +1080,7 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
   const presentation = phasePresentation(state)
   const cardRefs = useRef(new Map<string, HTMLElement>())
   const pending = state.pendingOperation !== null
+  const mutationLocked = pending || state.canRetryMutation
 
   useEffect(() => {
     if (state.focusEpoch === 0 || state.focusRiskId === null) return
@@ -804,15 +1127,18 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
                   : state.issue.kind === 'input' ? 'risks.error.input' : 'risks.error.conflict')}</p>
               <code>{state.issue.code}</code>
               <div className={css.actions}>
-                {state.canRetryMutation && (
-                  <Button variant="outline" size="sm" type="button" onClick={() => {
-                    void controller.retryMutation()
-                  }}>{t('risks.retryExact')}</Button>
-                )}
                 <Button variant="outline" size="sm" type="button" onClick={() => {
                   void controller.refresh()
                 }}>{t('risks.refresh')}</Button>
               </div>
+            </div>
+          )}
+
+          {state.canRetryMutation && (
+            <div className={css.actions}>
+              <Button variant="outline" size="sm" type="button" onClick={() => {
+                void controller.retryMutation()
+              }}>{t('risks.retryExact')}</Button>
             </div>
           )}
 
@@ -920,7 +1246,7 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
                     projection={projection}
                     t={t}
                     mode="create"
-                    pending={pending}
+                    pending={mutationLocked}
                     onChange={draft => { controller.setCreateDraft(draft) }}
                     onSubmit={() => { void controller.create() }}
                   />
@@ -958,9 +1284,15 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
                       ) : (
                         <>
                           <div className={css.actions}>
-                            <Button variant="outline" size="sm" type="button" onClick={() => {
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              type="button"
+                              disabled={mutationLocked}
+                              onClick={() => {
                               controller.beginRevision(risk.riskId)
-                            }}>{t('risks.action.revise')}</Button>
+                              }}
+                            >{t('risks.action.revise')}</Button>
                           </div>
                           {state.revisionDraft?.riskId === risk.riskId && (
                             <AssessmentForm
@@ -969,7 +1301,7 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
                               projection={projection}
                               t={t}
                               mode="revise"
-                              pending={pending}
+                              pending={mutationLocked}
                               onChange={draft => { controller.setRevisionDraft(draft) }}
                               onSubmit={() => { void controller.revise() }}
                               onCancel={() => { controller.cancelRevision() }}
@@ -994,38 +1326,12 @@ export function ProjectRisksPanel({ controller, t }: ProjectRisksPanelProps) {
               )}
 
               {projection.selectedRisk !== null && (
-                <section className={css.history} aria-label={t('risks.history.title')}>
-                  <h3>{t('risks.history.title')}</h3>
-                  <p><code>{projection.selectedRisk.risk.riskId}</code></p>
-                  {projection.selectedRisk.history.length === 0 ? <p>{t('risks.history.empty')}</p> : (
-                    <ol>
-                      {projection.selectedRisk.history.map(entry => (
-                        <li key={`${entry.kind}:${entry.sequence}`}>
-                          <strong>{t(entry.kind === 'assessment'
-                            ? 'risks.history.assessment' : 'risks.history.transition')}</strong>
-                          {entry.kind === 'assessment' ? (
-                            <p><code>{entry.assessment.assessmentId}</code> · {entry.assessment.statement.event}</p>
-                          ) : (
-                            <>
-                              <p>{t(projectRiskStatusKey(entry.transition.fromStatus))} → {t(projectRiskStatusKey(entry.transition.toStatus))}</p>
-                              <p>{entry.transition.rationale}</p>
-                            </>
-                          )}
-                          <dl className={css.compactMeta}>
-                            <div><dt>{t('risks.history.source')}</dt><dd><code>{entry.source.auditEventId}</code></dd></div>
-                            <div><dt>{t('risks.history.actor')}</dt><dd>{entry.actor.kind}: {entry.actor.id}</dd></div>
-                            <div><dt>{t('risks.history.causation')}</dt><dd><code>{entry.causationId}</code></dd></div>
-                          </dl>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                  {projection.selectedRisk.nextBeforeHistorySequence !== null && (
-                    <Button variant="outline" size="sm" type="button" onClick={() => {
-                      void controller.loadMoreHistory()
-                    }}>{t(state.loadingMore === 'history' ? 'risks.history.loadingMore' : 'risks.history.loadMore')}</Button>
-                  )}
-                </section>
+                <RiskHistory
+                  selected={projection.selectedRisk}
+                  loading={state.loadingMore === 'history'}
+                  controller={controller}
+                  t={t}
+                />
               )}
 
               <section className={css.activity} aria-labelledby="workbench-project-risk-activity-title">

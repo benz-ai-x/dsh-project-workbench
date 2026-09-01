@@ -2453,6 +2453,143 @@ async function assertFocusedRiskCard(card, label) {
   )
 }
 
+async function assertNextKeyboardFocus(origin, target, label) {
+  await origin.focus()
+  await target.page().keyboard.press('Tab')
+  const focus = await target.evaluate(element => {
+    const style = getComputedStyle(element)
+    return {
+      active: document.activeElement === element,
+      focusVisible: element.matches(':focus-visible'),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+    }
+  })
+  assert.equal(focus.active, true, `${label} is not next in the native tab order`)
+  assert.equal(focus.focusVisible, true, `${label} has no keyboard focus-visible state`)
+  assert.ok(
+    focus.outlineStyle !== 'none' && focus.outlineWidth !== '0px',
+    `${label} has no visible native focus indicator`,
+  )
+}
+
+async function openNativeRiskHistoryDetails(details, label, keyboardOrigin = null) {
+  assert.equal(await details.evaluate(element => element.tagName), 'DETAILS', `${label} is not details`)
+  const summary = details.locator(':scope > summary')
+  assert.equal(await summary.evaluate(element => element.tagName), 'SUMMARY', `${label} has no summary`)
+  if (await details.getAttribute('open') === null) {
+    if (keyboardOrigin !== null) {
+      await assertNextKeyboardFocus(keyboardOrigin, summary, `${label} summary`)
+      await summary.press('Enter')
+    } else {
+      await summary.click()
+    }
+  }
+  await waitForCondition(
+    async () => await details.getAttribute('open') !== null,
+    PAGE_TIMEOUT_MS,
+    `${label} disclosure open`,
+  )
+}
+
+async function assertRiskHistoryFact(entry, name, expected, label) {
+  const fact = entry.locator(`[data-history-fact="${name}"]`)
+  await fact.waitFor({ state: 'visible' })
+  const text = (await fact.textContent()) ?? ''
+  assert.ok(text.includes(expected), `${label} omitted ${name}: expected ${expected}, got ${text}`)
+}
+
+async function assertCompleteRiskHistoryUi(history, selectedRisk, expected, label, keyboardOrigin) {
+  await openNativeRiskHistoryDetails(history, label, keyboardOrigin)
+  assert.equal(
+    await history.locator('ol > li').count(),
+    selectedRisk.history.length,
+    `${label} omitted history entries`,
+  )
+
+  const assessmentEntry = selectedRisk.history.find(entry => entry.kind === 'assessment')
+  assert.notEqual(assessmentEntry, undefined, `${label} has no real assessment snapshot`)
+  const assessmentDetails = history.locator('details[data-history-kind="assessment"]')
+    .filter({ hasText: assessmentEntry.assessment.assessmentId })
+  await openNativeRiskHistoryDetails(assessmentDetails, `${label} assessment`)
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'trigger-statement',
+    assessmentEntry.assessment.trigger.statement,
+    label,
+  )
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'trigger-state',
+    assessmentEntry.assessment.trigger.state === 'met' ? 'Met'
+      : assessmentEntry.assessment.trigger.state === 'not-met' ? 'Not met' : 'Unknown',
+    label,
+  )
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'accountable',
+    assessmentEntry.assessment.responsibility.accountable.displayName,
+    label,
+  )
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'accountable',
+    assessmentEntry.assessment.responsibility.accountable.memberId,
+    label,
+  )
+  const evidence = assessmentEntry.assessment.evidence
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'evidence',
+    evidence.length === 0 ? '无' : evidence[0].kind === 'workbench-audit-event'
+      ? evidence[0].auditEventId : evidence[0].scheduleChangeId,
+    label,
+  )
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'dependencies',
+    assessmentEntry.assessment.dependencies[0]?.riskId ?? '无',
+    label,
+  )
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'mitigation-tasks',
+    assessmentEntry.assessment.mitigationTaskGuids[0] ?? '无',
+    label,
+  )
+  await assertRiskHistoryFact(assessmentDetails, 'digest', assessmentEntry.assessment.digest, label)
+  await assertRiskHistoryFact(
+    assessmentDetails,
+    'assessed-at',
+    assessmentEntry.assessment.assessedAt,
+    label,
+  )
+  await assertRiskHistoryFact(assessmentDetails, 'source', assessmentEntry.source.auditEventId, label)
+  await assertRiskHistoryFact(assessmentDetails, 'actor', assessmentEntry.actor.id, label)
+  await assertRiskHistoryFact(assessmentDetails, 'causation', assessmentEntry.causationId, label)
+  assert.ok(
+    (await assessmentDetails.textContent())?.includes(expected.riskOwnerName),
+    `${label} omitted the real accountable Owner snapshot`,
+  )
+
+  const closureEntry = selectedRisk.history.find(entry =>
+    entry.kind === 'transition' && entry.transition.closureReason !== null)
+  assert.notEqual(closureEntry, undefined, `${label} has no real closing transition`)
+  const transitionDetails = history.locator('details[data-history-kind="transition"]')
+    .filter({ hasText: closureEntry.transition.transitionId })
+  await openNativeRiskHistoryDetails(transitionDetails, `${label} closing transition`)
+  await assertRiskHistoryFact(transitionDetails, 'closure-reason', '已低于阈值', label)
+  await assertRiskHistoryFact(
+    transitionDetails,
+    'occurred-at',
+    closureEntry.transition.occurredAt,
+    label,
+  )
+  await assertRiskHistoryFact(transitionDetails, 'source', closureEntry.source.auditEventId, label)
+  await assertRiskHistoryFact(transitionDetails, 'actor', closureEntry.actor.id, label)
+  await assertRiskHistoryFact(transitionDetails, 'causation', closureEntry.causationId, label)
+}
+
 async function exerciseRealRiskBrowserJourney(page, expected) {
   const panel = projectRisksPanel(page)
   await panel.getByRole('heading', { name: 'Project Risks', exact: true })
@@ -2637,13 +2774,6 @@ async function exerciseRealRiskBrowserJourney(page, expected) {
     'closed Risk still exposes a transition form',
   )
 
-  await revisedCard.getByRole('button', { name: '查看完整历史', exact: true }).click()
-  const history = panel.getByRole('region', { name: 'Risk 完整历史', exact: true })
-  await history.waitFor({ state: 'visible' })
-  assert.equal(await history.locator('ol > li').count(), 4, 'UI omitted complete Risk history')
-  const activity = panel.locator('section[aria-labelledby="workbench-project-risk-activity-title"]')
-  assert.equal(await activity.locator('ol > li').count(), 4, 'UI omitted Risk activity')
-
   const finalProjection = await callAuthenticatedWorkbench(
     page,
     WORKBENCH_PROJECT_RISKS_PATH,
@@ -2657,6 +2787,21 @@ async function exerciseRealRiskBrowserJourney(page, expected) {
       },
     },
   )
+  assert.notEqual(finalProjection.selectedRisk, null, 'real Risk history projection is absent')
+
+  const historyButton = revisedCard.getByRole('button', { name: '查看完整历史', exact: true })
+  await historyButton.click()
+  const history = panel.locator(`details[data-project-risk-history="${riskId}"]`)
+  await history.waitFor({ state: 'visible' })
+  await assertCompleteRiskHistoryUi(
+    history,
+    finalProjection.selectedRisk,
+    expected,
+    'real Risk UI history',
+    historyButton,
+  )
+  const activity = panel.locator('section[aria-labelledby="workbench-project-risk-activity-title"]')
+  assert.equal(await activity.locator('ol > li').count(), 4, 'UI omitted Risk activity')
   assert.equal(finalProjection.selectedRisk?.risk.status, 'closed')
   assert.deepEqual(
     finalProjection.selectedRisk?.history.map(entry => entry.kind).sort(),
@@ -2732,8 +2877,9 @@ async function runRealRiskRestartJourney(options) {
     await assertVisibleKeyboardFocus(filterSubmit, 'mobile Project Risk filter submit')
     await assertVisibleKeyboardFocus(historyButton, 'mobile Project Risk history action')
     await historyButton.click()
-    const history = panel.getByRole('region', { name: 'Risk 完整历史', exact: true })
+    const history = panel.locator(`details[data-project-risk-history="${expected.riskId}"]`)
     await history.waitFor({ state: 'visible' })
+    await openNativeRiskHistoryDetails(history, 'mobile Risk history', historyButton)
     assert.equal(await history.locator('ol > li').count(), 4, 'mobile UI omitted Risk history')
     await assertNoInternalHorizontalOverflow(panel, 'mobile Project Risks panel')
     await assertNoInternalHorizontalOverflow(card, 'mobile closed Risk card')
@@ -2767,17 +2913,6 @@ async function runRealRiskRestartJourney(options) {
   await restartedCard.waitFor({ state: 'visible' })
   await restartedCard.getByText('Closed', { exact: true }).waitFor({ state: 'visible' })
   await restartedCard.getByText('已低于阈值', { exact: true }).waitFor({ state: 'visible' })
-  await restartedCard.getByRole('button', { name: '查看完整历史', exact: true }).click()
-  const restartedHistory = restartedPanel.getByRole('region', {
-    name: 'Risk 完整历史',
-    exact: true,
-  })
-  await restartedHistory.waitFor({ state: 'visible' })
-  assert.equal(
-    await restartedHistory.locator('ol > li').count(),
-    4,
-    'same-database restart UI omitted Risk history',
-  )
   const afterRestart = await callAuthenticatedWorkbench(
     restartedJourney.page,
     WORKBENCH_PROJECT_RISKS_PATH,
@@ -2790,6 +2925,22 @@ async function runRealRiskRestartJourney(options) {
         historyLimit: 50,
       },
     },
+  )
+  assert.notEqual(afterRestart.selectedRisk, null, 'restart Risk history projection is absent')
+  const restartedHistoryButton = restartedCard.getByRole('button', {
+    name: '查看完整历史', exact: true,
+  })
+  await restartedHistoryButton.click()
+  const restartedHistory = restartedPanel.locator(
+    `details[data-project-risk-history="${expected.riskId}"]`,
+  )
+  await restartedHistory.waitFor({ state: 'visible' })
+  await assertCompleteRiskHistoryUi(
+    restartedHistory,
+    afterRestart.selectedRisk,
+    expected,
+    'same-database restart Risk UI history',
+    restartedHistoryButton,
   )
   const tasksAfterRestart = await callAuthenticatedWorkbench(
     restartedJourney.page,

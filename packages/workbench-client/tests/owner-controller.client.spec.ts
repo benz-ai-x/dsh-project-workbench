@@ -941,7 +941,10 @@ describe('OwnerController', () => {
       phase: 'stale', createDraft: { name: 'Sensitive Deliverable draft' },
     })
     expect(risks?.getSnapshot()).toMatchObject({
-      phase: 'stale', createDraft: { event: 'Sensitive Risk draft' },
+      phase: 'stale', createDraft: { event: '', consequence: '' },
+      revisionDraft: null,
+      transitionDrafts: {},
+      pendingOperation: null,
     })
     logout.resolve(authOk({ state: 'signed-out' }))
     await leaving

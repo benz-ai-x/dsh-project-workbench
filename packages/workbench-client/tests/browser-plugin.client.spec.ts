@@ -774,7 +774,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     if (projectRisks !== null) {
       projectRisks.setCreateDraft({
         ...projectRisks.getSnapshot().createDraft,
-        event: 'Reconnect-safe Risk', consequence: 'Reconnect-safe consequence',
+        event: 'Disconnect-cleared Risk', consequence: 'Disconnect-cleared consequence',
       })
     }
 
@@ -803,7 +803,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
     })
     expect(projectRisks?.getSnapshot()).toMatchObject({
       phase: 'stale', projection: { projectId: 'project-1', risks: [] },
-      createDraft: { event: 'Reconnect-safe Risk' },
+      createDraft: { event: '' }, revisionDraft: null, transitionDrafts: {},
     })
     b.requestOrder.length = 0
     b.reconnect()
@@ -837,7 +837,7 @@ describe('Project Workbench browser plugin lifecycle', () => {
       expect(projectRisks?.getSnapshot()).toMatchObject({
         phase: 'ready', selection: { projectId: 'project-1' },
         projection: { projectId: 'project-1', risks: [] },
-        createDraft: { event: 'Reconnect-safe Risk' },
+        createDraft: { event: '' }, revisionDraft: null, transitionDrafts: {},
       })
     })
     expect(b.requestOrder).toEqual([

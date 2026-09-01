@@ -346,6 +346,173 @@ describe('WorkbenchProjectRisksController', () => {
     await controller.dispose()
   })
 
+  it('retains only the target assessment evidence that fell outside the bounded picker', async () => {
+    const retainedEvidence = {
+      kind: 'workbench-audit-event' as const, auditEventId: 'audit-retained-outside-page',
+    }
+    const target = risk({
+      currentAssessment: assessment({ evidence: [retainedEvidence] }),
+    })
+    const revise = vi.fn(() => Promise.resolve(ok(reviseSuccess())))
+    const controller = new WorkbenchProjectRisksController(makeRemote({
+      projectRisks: vi.fn(() => Promise.resolve(ok(projection('project-1', {
+        risks: [target], evidenceOptions: [],
+      })))),
+      reviseProjectRisk: revise,
+    }), { nextCommandKey: keys() })
+    await controller.selectProject('project-1', 'Evidence Project')
+    controller.beginRevision(target.riskId)
+
+    expect(controller.canRevise()).toBe(true)
+    await controller.revise()
+    expect(revise).toHaveBeenCalledWith(expect.objectContaining({
+      riskId: target.riskId,
+      assessment: expect.objectContaining({ evidence: [retainedEvidence] }),
+    }), expect.any(AbortSignal))
+
+    const secondController = new WorkbenchProjectRisksController(makeRemote({
+      projectRisks: vi.fn(() => Promise.resolve(ok(projection('project-1', {
+        risks: [target], evidenceOptions: [],
+      })))),
+    }))
+    await secondController.selectProject('project-1', 'Evidence Project')
+    secondController.beginRevision(target.riskId)
+    const revision = secondController.getSnapshot().revisionDraft
+    expect(revision).not.toBeNull()
+    secondController.setRevisionDraft({
+      ...revision!.draft,
+      evidence: [retainedEvidence, {
+        kind: 'workbench-audit-event', auditEventId: 'audit-new-outside-page',
+      }],
+    })
+    expect(secondController.canRevise()).toBe(false)
+    await secondController.dispose()
+    await controller.dispose()
+  })
+
+  it('uses the revision target for retained closed dependencies and self-link checks', async () => {
+    const retainedDependencyId = 'risk-closed-retained'
+    const target = risk({
+      riskId: 'risk-1',
+      currentAssessment: assessment({
+        dependencies: [{ kind: 'depends-on', riskId: retainedDependencyId }],
+      }),
+    })
+    const selected = risk({
+      riskId: 'risk-2',
+      currentAssessment: assessment({
+        assessmentId: 'assessment-selected',
+        dependencies: [{ kind: 'depends-on', riskId: target.riskId }],
+      }),
+    })
+    const dependencyOption = (
+      riskId: string,
+      status: ProjectRiskProjection['status'],
+      selectable: boolean,
+    ) => ({
+      riskId, status, selectable,
+      statement: { condition: null, event: `Dependency ${riskId}`, consequence: 'Review starts late' },
+      exposure: {
+        policyVersion: 'project-risk-exposure-v1' as const, likelihoodBand: 'P2' as const,
+        impactBand: 'I2' as const, level: 'low' as const,
+      },
+    })
+    const value = projection('project-1', {
+      risks: [target, selected],
+      selectedRisk: { risk: selected, history: [], nextBeforeHistorySequence: null },
+      dependencyOptions: [
+        dependencyOption(retainedDependencyId, 'closed', false),
+        dependencyOption(target.riskId, 'watch', true),
+        dependencyOption('risk-new-unselectable', 'closed', false),
+      ],
+    })
+    const revise = vi.fn(() => Promise.resolve(ok(reviseSuccess(value))))
+    const controller = new WorkbenchProjectRisksController(makeRemote({
+      projectRisks: vi.fn(() => Promise.resolve(ok(value))), reviseProjectRisk: revise,
+    }), { nextCommandKey: keys() })
+    await controller.selectProject('project-1', 'Evidence Project')
+    await controller.selectRisk(selected.riskId)
+    controller.beginRevision(target.riskId)
+
+    expect(controller.getSnapshot().selectedRiskId).toBe(selected.riskId)
+    expect(controller.canRevise()).toBe(true)
+    await controller.revise()
+    expect(revise).toHaveBeenCalledWith(expect.objectContaining({
+      riskId: target.riskId,
+      assessment: expect.objectContaining({
+        dependencies: [{ kind: 'depends-on', riskId: retainedDependencyId }],
+      }),
+    }), expect.any(AbortSignal))
+
+    const rejectingController = new WorkbenchProjectRisksController(makeRemote({
+      projectRisks: vi.fn(() => Promise.resolve(ok(value))),
+    }))
+    await rejectingController.selectProject('project-1', 'Evidence Project')
+    await rejectingController.selectRisk(selected.riskId)
+    rejectingController.beginRevision(target.riskId)
+    const revision = rejectingController.getSnapshot().revisionDraft
+    expect(revision).not.toBeNull()
+    rejectingController.setRevisionDraft({
+      ...revision!.draft,
+      dependencyRiskIds: [retainedDependencyId, 'risk-new-unselectable'],
+    })
+    expect(rejectingController.canRevise()).toBe(false)
+    rejectingController.setRevisionDraft({
+      ...revision!.draft,
+      dependencyRiskIds: [retainedDependencyId, target.riskId],
+    })
+    expect(rejectingController.canRevise()).toBe(false)
+    await rejectingController.dispose()
+    await controller.dispose()
+  })
+
+  it('requires unavailable treatment tasks to be removed or replaced by current task options', async () => {
+    const unavailableTaskGuid = 'task-unavailable-from-current-assessment'
+    const target = risk({
+      status: 'mitigate',
+      currentAssessment: assessment({
+        mitigationTaskGuids: [unavailableTaskGuid],
+        contingencyTaskGuids: [],
+      }),
+      treatmentTasks: [{
+        role: 'mitigation', taskGuid: unavailableTaskGuid,
+        availability: 'unavailable', task: null,
+      }],
+    })
+    const revise = vi.fn(() => Promise.resolve(ok(reviseSuccess())))
+    const controller = new WorkbenchProjectRisksController(makeRemote({
+      projectRisks: vi.fn(() => Promise.resolve(ok(projection('project-1', {
+        risks: [target], taskOptions: [task('task-current-mitigation', 'Current mitigation')],
+      })))),
+      reviseProjectRisk: revise,
+    }), { nextCommandKey: keys() })
+    await controller.selectProject('project-1', 'Evidence Project')
+    controller.beginRevision(target.riskId)
+
+    expect(controller.getSnapshot().revisionDraft?.draft.mitigationTaskGuids)
+      .toEqual([unavailableTaskGuid])
+    expect(controller.canRevise()).toBe(false)
+
+    const revision = controller.getSnapshot().revisionDraft
+    expect(revision).not.toBeNull()
+    controller.setRevisionDraft({ ...revision!.draft, mitigationTaskGuids: [] })
+    expect(controller.canRevise()).toBe(false)
+
+    controller.setRevisionDraft({
+      ...revision!.draft,
+      mitigationTaskGuids: ['task-current-mitigation'],
+    })
+    expect(controller.canRevise()).toBe(true)
+    await controller.revise()
+    expect(revise).toHaveBeenCalledWith(expect.objectContaining({
+      riskId: target.riskId,
+      assessment: expect.objectContaining({
+        mitigationTaskGuids: ['task-current-mitigation'],
+      }),
+    }), expect.any(AbortSignal))
+    await controller.dispose()
+  })
+
   it('requires explicit transition rationale/closure reason and preserves an overdue conflict draft', async () => {
     const transition = vi.fn()
       .mockResolvedValueOnce(ok({
@@ -383,7 +550,36 @@ describe('WorkbenchProjectRisksController', () => {
     await controller.dispose()
   })
 
-  it('retains only the exact ambiguous envelope, survives reconnect, and erases on disposal', async () => {
+  it('clears protected drafts synchronously when the connection resets', async () => {
+    let releaseRead!: (value: RemoteResult<ProjectRisksProjection | null>) => void
+    const read = vi.fn()
+      .mockResolvedValueOnce(ok(projection()))
+      .mockImplementationOnce(() => new Promise<RemoteResult<ProjectRisksProjection | null>>(resolve => {
+        releaseRead = resolve
+      }))
+    const controller = new WorkbenchProjectRisksController(makeRemote({ projectRisks: read }))
+    await controller.selectProject('project-1', 'Evidence Project')
+    controller.setCreateDraft(editorDraft())
+    controller.beginRevision('risk-1')
+    controller.setTransitionDraft('risk-1', {
+      status: 'accept', rationale: 'Retain the exposure deliberately.', closureReason: '',
+    })
+
+    const resetting = controller.connectionReset()
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'loading', selection: { projectId: 'project-1' }, projection: { revision: 7 },
+      createDraft: { event: '' }, revisionDraft: null, transitionDrafts: {},
+      pendingOperation: null, pendingRiskId: null,
+    })
+    releaseRead(ok(projection()))
+    await resetting
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'ready', createDraft: { event: '' }, revisionDraft: null, transitionDrafts: {},
+    })
+    await controller.dispose()
+  })
+
+  it('erases protected drafts on disconnect while retaining only the exact ambiguous envelope', async () => {
     const create = vi.fn()
       .mockResolvedValueOnce({ ok: false, error: { code: 'unavailable' } })
       .mockResolvedValueOnce(ok(createSuccess(projection('project-1', { revision: 8 }))))
@@ -392,6 +588,10 @@ describe('WorkbenchProjectRisksController', () => {
     })
     await controller.selectProject('project-1', 'Evidence Project')
     controller.setCreateDraft(editorDraft())
+    controller.beginRevision('risk-1')
+    controller.setTransitionDraft('risk-1', {
+      status: 'accept', rationale: 'Retain the exposure deliberately.', closureReason: '',
+    })
     await controller.create()
     const exactRequest = create.mock.calls[0]?.[0]
     expect(controller.getSnapshot()).toMatchObject({
@@ -401,6 +601,13 @@ describe('WorkbenchProjectRisksController', () => {
     controller.markDisconnected()
     expect(controller.getSnapshot()).toMatchObject({
       phase: 'stale', projection: { revision: 7 }, canRetryMutation: true,
+      selection: { projectId: 'project-1' }, createDraft: { event: '' },
+      revisionDraft: null, transitionDrafts: {}, pendingOperation: null, pendingRiskId: null,
+    })
+    await controller.connectionReset()
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'ready', projection: { revision: 7 }, canRetryMutation: true,
+      createDraft: { event: '' }, revisionDraft: null, transitionDrafts: {},
     })
     await controller.retryMutation()
     expect(create.mock.calls[1]?.[0]).toBe(exactRequest)
@@ -409,5 +616,49 @@ describe('WorkbenchProjectRisksController', () => {
     const disposal = controller.dispose()
     expect(controller.getSnapshot()).toEqual(INITIAL_WORKBENCH_PROJECT_RISKS_STATE)
     await disposal
+  })
+
+  it('allows only explicit exact retry while an ambiguous envelope is unresolved', async () => {
+    const create = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: { code: 'unavailable' } })
+      .mockResolvedValueOnce(ok(createSuccess(projection('project-1', { revision: 8 }))))
+    const revise = vi.fn(() => Promise.resolve({
+      ok: false as const, error: { code: 'unavailable' as const },
+    }))
+    const transition = vi.fn(() => Promise.resolve({
+      ok: false as const, error: { code: 'unavailable' as const },
+    }))
+    const controller = new WorkbenchProjectRisksController(makeRemote({
+      createProjectRisk: create, reviseProjectRisk: revise, transitionProjectRisk: transition,
+    }), { nextCommandKey: keys() })
+    await controller.selectProject('project-1', 'Evidence Project')
+    controller.setCreateDraft(editorDraft())
+    await controller.create()
+    const exactRequest = create.mock.calls[0]?.[0]
+
+    controller.beginRevision('risk-1')
+    controller.setTransitionDraft('risk-1', {
+      status: 'accept', rationale: 'Retain the exposure deliberately.', closureReason: '',
+    })
+    controller.setCreateDraft({ ...editorDraft(), event: 'A different uncertain event' })
+    await controller.revise()
+    await controller.transition('risk-1')
+    await controller.create()
+
+    expect(create).toHaveBeenCalledOnce()
+    expect(revise).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'error', canRetryMutation: true,
+      createDraft: { event: 'Review may start late' }, revisionDraft: null, transitionDrafts: {},
+    })
+
+    await controller.retryMutation()
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(create.mock.calls[1]?.[0]).toBe(exactRequest)
+    expect(create.mock.calls[1]?.[0]).toMatchObject({
+      idempotencyKey: 'idem-1', causationId: 'cause-1',
+    })
+    await controller.dispose()
   })
 })
