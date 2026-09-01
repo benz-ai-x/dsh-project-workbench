@@ -13,6 +13,7 @@ import type {
   DecideSuggestedChangeResult,
   ProjectDetailProjection,
   ProjectMilestonesProjection,
+  ProjectRiskAssessmentDraft,
   ProjectRisksProjection,
   ProjectStartProjection,
   ProjectTeamProjection,
@@ -136,6 +137,39 @@ function callRiskRemote(
   const remote = Reflect.get(service, method)
   if (typeof remote !== 'function') throw new TypeError(`${method} is not a Remote method`)
   return Reflect.apply(remote, service, [value, new AbortController().signal]) as Promise<unknown>
+}
+
+function loaderRiskAssessment(
+  accountableMemberId: string,
+  suffix: string,
+  options: Pick<ProjectRiskAssessmentDraft, 'evidence' | 'dependencies'> = {
+    evidence: [],
+    dependencies: [],
+  },
+): ProjectRiskAssessmentDraft {
+  return {
+    statement: {
+      condition: `Loader evidence condition ${suffix}`,
+      event: `Loader Risk event ${suffix}`,
+      consequence: `Loader consequence ${suffix}`,
+    },
+    category: 'dependency',
+    trigger: { statement: `Loader trigger ${suffix}`, state: 'not-met' },
+    probability: { lowerBasisPoints: 1_000, upperBasisPoints: 2_000 },
+    impact: { lowerBand: 2, upperBand: 3 },
+    confidence: 'medium',
+    confidenceRationale: `Loader evidence rationale ${suffix}`,
+    assessmentHorizonEnd: '2099-12-31',
+    nextReviewOn: '2099-06-30',
+    assumptions: [],
+    accountableMemberId,
+    contributorMemberIds: [],
+    humanSponsorMemberId: null,
+    evidence: options.evidence,
+    dependencies: options.dependencies,
+    mitigationTaskGuids: [],
+    contingencyTaskGuids: [],
+  }
 }
 
 afterEach(async () => {
@@ -1227,6 +1261,348 @@ describe('built Workbench Host through the real DSH Loader', () => {
     if (!milestone.ok) throw new Error('expected Loader Milestone creation to succeed')
     const durableProjection: ProjectMilestonesProjection = milestone.value
 
+    const projectMember = await first.workbenchAuth.run(() => first.workbench.addProjectMember({
+      projectId,
+      member: {
+        kind: 'human',
+        displayName: 'Loader Risk Evidence Owner',
+        identity: {
+          type: 'feishu',
+          appId: CALENDAR_LOADER_APP_ID,
+          openId: 'ou_loader_risk_evidence_owner',
+        },
+      },
+      expectedTeamRevision: 0,
+      expectedRevision: null,
+      idempotencyKey: 'loader-risk-evidence-member-key-0001',
+      causationId: 'loader-risk-evidence-member-cause-0001',
+      reason: 'owner-project-member-add',
+    }, new AbortController().signal))
+    expect(projectMember).toMatchObject({ ok: true, value: { teamRevision: 1 } })
+    if (!projectMember.ok) throw new Error('expected Loader Risk evidence member to succeed')
+
+    const catalog = await first.workbenchAuth.run(() => first.workbench.projectStart(
+      { limit: 10 },
+      new AbortController().signal,
+    ))
+    const crossProject = await first.workbenchAuth.run(() => first.workbench.createProject({
+      template: catalog.template.selection,
+      projectName: 'Loader Cross-Project Risk Evidence',
+      primaryGoal: {
+        name: 'Fence Risk evidence by Project',
+        outcomes: [{
+          name: 'Reject cross-Project references',
+          metric: {
+            metricName: 'Cross-Project references admitted',
+            initialValue: 1,
+            targetValue: 0,
+            unit: 'references',
+            direction: 'decrease',
+          },
+        }],
+      },
+      supportingGoals: [],
+      expectedCatalogRevision: catalog.catalogRevision,
+      expectedRevision: null,
+      idempotencyKey: 'loader-risk-cross-project-key-0001',
+      causationId: 'loader-risk-cross-project-cause-0001',
+      reason: 'owner-project-create',
+    }, new AbortController().signal))
+    expect(crossProject.ok).toBe(true)
+    if (!crossProject.ok) throw new Error('expected cross-Project Risk fixture to succeed')
+    const crossProjectId = crossProject.value.project.projectId
+    const crossProjectMember = await first.workbenchAuth.run(() =>
+      first.workbench.addProjectMember({
+        projectId: crossProjectId,
+        member: {
+          kind: 'human',
+          displayName: 'Loader Cross-Project Risk Owner',
+          identity: {
+            type: 'feishu',
+            appId: CALENDAR_LOADER_APP_ID,
+            openId: 'ou_loader_cross_project_risk_owner',
+          },
+        },
+        expectedTeamRevision: 0,
+        expectedRevision: null,
+        idempotencyKey: 'loader-risk-cross-member-key-0001',
+        causationId: 'loader-risk-cross-member-cause-0001',
+        reason: 'owner-project-member-add',
+      }, new AbortController().signal))
+    expect(crossProjectMember).toMatchObject({ ok: true, value: { teamRevision: 1 } })
+    if (!crossProjectMember.ok) throw new Error('expected cross-Project Risk member to succeed')
+
+    const scheduleChangeId = milestone.value.recentChanges[0]?.changeId
+    if (scheduleChangeId === undefined) throw new Error('Loader Milestone omitted schedule evidence')
+    const createRisk = async (
+      targetProjectId: string,
+      accountableMemberId: string,
+      suffix: string,
+      expectedRisksRevision: number,
+      assessment: ProjectRiskAssessmentDraft,
+    ) => await first.workbenchAuth.run(() => first.workbench.createProjectRisk({
+      projectId: targetProjectId,
+      assessment,
+      expectedRisksRevision,
+      expectedRiskRevision: null,
+      expectedTeamRevision: 1,
+      expectedTaskRevision: 0,
+      idempotencyKey: `loader-risk-${suffix}-key-0001`,
+      causationId: `loader-risk-${suffix}-cause-0001`,
+      reason: 'owner-project-risk-create',
+    }, new AbortController().signal))
+
+    const firstRisk = await createRisk(
+      projectId,
+      projectMember.value.memberId,
+      'same-evidence',
+      0,
+      loaderRiskAssessment(projectMember.value.memberId, 'same evidence', {
+        evidence: [
+          { kind: 'workbench-audit-event', auditEventId: created.receipt.auditEventId },
+          { kind: 'project-schedule-change', scheduleChangeId },
+        ],
+        dependencies: [],
+      }),
+    )
+    expect(firstRisk).toMatchObject({ ok: true, value: { revision: 1 } })
+    if (!firstRisk.ok) throw new Error('expected same-Project Risk evidence to succeed')
+
+    const crossRisk = await createRisk(
+      crossProjectId,
+      crossProjectMember.value.memberId,
+      'cross-baseline',
+      0,
+      loaderRiskAssessment(crossProjectMember.value.memberId, 'cross baseline', {
+        evidence: [{
+          kind: 'workbench-audit-event',
+          auditEventId: crossProject.receipt.auditEventId,
+        }],
+        dependencies: [],
+      }),
+    )
+    expect(crossRisk).toMatchObject({ ok: true, value: { revision: 1 } })
+    if (!crossRisk.ok) throw new Error('expected cross-Project baseline Risk to succeed')
+
+    await expect(createRisk(
+      projectId,
+      projectMember.value.memberId,
+      'cross-audit',
+      1,
+      loaderRiskAssessment(projectMember.value.memberId, 'cross audit', {
+        evidence: [{
+          kind: 'workbench-audit-event',
+          auditEventId: crossProject.receipt.auditEventId,
+        }],
+        dependencies: [],
+      }),
+    )).resolves.toMatchObject({ ok: false, error: { code: 'evidence-project-mismatch' } })
+    await expect(createRisk(
+      crossProjectId,
+      crossProjectMember.value.memberId,
+      'cross-schedule',
+      1,
+      loaderRiskAssessment(crossProjectMember.value.memberId, 'cross schedule', {
+        evidence: [{ kind: 'project-schedule-change', scheduleChangeId }],
+        dependencies: [],
+      }),
+    )).resolves.toMatchObject({ ok: false, error: { code: 'evidence-project-mismatch' } })
+    for (const [suffix, evidence] of [
+      ['missing-audit', [{ kind: 'workbench-audit-event', auditEventId: 'audit-missing-risk-evidence' }]],
+      ['missing-schedule', [{ kind: 'project-schedule-change', scheduleChangeId: 'schedule-missing-risk-evidence' }]],
+    ] as const) {
+      await expect(createRisk(
+        projectId,
+        projectMember.value.memberId,
+        suffix,
+        1,
+        loaderRiskAssessment(projectMember.value.memberId, suffix, {
+          evidence,
+          dependencies: [],
+        }),
+      )).resolves.toMatchObject({ ok: false, error: { code: 'evidence-not-found' } })
+    }
+
+    const secondRisk = await createRisk(
+      projectId,
+      projectMember.value.memberId,
+      'dependency-child',
+      1,
+      loaderRiskAssessment(projectMember.value.memberId, 'dependency child', {
+        evidence: [{ kind: 'project-schedule-change', scheduleChangeId }],
+        dependencies: [{ kind: 'depends-on', riskId: firstRisk.risk.riskId }],
+      }),
+    )
+    expect(secondRisk).toMatchObject({ ok: true, value: { revision: 2 } })
+    if (!secondRisk.ok) throw new Error('expected same-Project Risk dependency to succeed')
+
+    for (const [suffix, riskId, code] of [
+      ['missing-dependency', 'risk-missing-loader-dependency', 'dependency-not-found'],
+      ['cross-dependency', crossRisk.risk.riskId, 'dependency-project-mismatch'],
+    ] as const) {
+      await expect(createRisk(
+        projectId,
+        projectMember.value.memberId,
+        suffix,
+        2,
+        loaderRiskAssessment(projectMember.value.memberId, suffix, {
+          evidence: [],
+          dependencies: [{ kind: 'depends-on', riskId }],
+        }),
+      )).resolves.toMatchObject({ ok: false, error: { code } })
+    }
+
+    const thirdRisk = await createRisk(
+      projectId,
+      projectMember.value.memberId,
+      'dependency-dag',
+      2,
+      loaderRiskAssessment(projectMember.value.memberId, 'dependency dag', {
+        evidence: [{ kind: 'workbench-audit-event', auditEventId: created.receipt.auditEventId }],
+        dependencies: [
+          { kind: 'depends-on', riskId: firstRisk.risk.riskId },
+          { kind: 'depends-on', riskId: secondRisk.risk.riskId },
+        ],
+      }),
+    )
+    expect(thirdRisk).toMatchObject({ ok: true, value: { revision: 3 } })
+    if (!thirdRisk.ok) throw new Error('expected acyclic Risk dependency graph to succeed')
+
+    const reviseFirstRisk = async (dependencies: ProjectRiskAssessmentDraft['dependencies'], suffix: string) =>
+      await first.workbenchAuth.run(() => first.workbench.reviseProjectRisk({
+        projectId,
+        riskId: firstRisk.risk.riskId,
+        assessment: loaderRiskAssessment(projectMember.value.memberId, suffix, {
+          evidence: [],
+          dependencies,
+        }),
+        expectedRisksRevision: 3,
+        expectedRiskRevision: firstRisk.risk.revision,
+        expectedTeamRevision: 1,
+        expectedTaskRevision: 0,
+        idempotencyKey: `loader-risk-${suffix}-key-0001`,
+        causationId: `loader-risk-${suffix}-cause-0001`,
+        reason: 'owner-project-risk-revise',
+      }, new AbortController().signal))
+    await expect(reviseFirstRisk(
+      [{ kind: 'depends-on', riskId: firstRisk.risk.riskId }],
+      'self-dependency',
+    )).resolves.toMatchObject({ ok: false, error: { code: 'dependency-self-reference' } })
+    await expect(reviseFirstRisk(
+      [{ kind: 'depends-on', riskId: secondRisk.risk.riskId }],
+      'dependency-cycle',
+    )).resolves.toMatchObject({ ok: false, error: { code: 'dependency-cycle' } })
+
+    const closedFirstRisk = await first.workbenchAuth.run(() =>
+      first.workbench.transitionProjectRisk({
+        projectId,
+        riskId: firstRisk.risk.riskId,
+        status: 'closed',
+        closureReason: 'superseded',
+        rationale: 'The dependent Loader Risks retain this stable Risk identity.',
+        expectedRisksRevision: 3,
+        expectedRiskRevision: firstRisk.risk.revision,
+        expectedTaskRevision: 0,
+        idempotencyKey: 'loader-risk-close-dependency-key-0001',
+        causationId: 'loader-risk-close-dependency-cause-0001',
+        reason: 'owner-project-risk-transition',
+      }, new AbortController().signal))
+    expect(closedFirstRisk).toMatchObject({ ok: true, value: { revision: 4 } })
+
+    const firstRiskPage = await first.workbenchAuth.run(() => first.workbench.projectRisks({
+      projectId,
+      selectedRiskId: secondRisk.risk.riskId,
+      riskLimit: 1,
+      activityLimit: 1,
+      historyLimit: 1,
+    }, new AbortController().signal))
+    expect(firstRiskPage).toMatchObject({
+      risks: [{ riskId: thirdRisk.risk.riskId, sequence: 3 }],
+      nextBeforeRiskSequence: 3,
+      selectedRisk: {
+        risk: {
+          riskId: secondRisk.risk.riskId,
+          currentAssessment: {
+            dependencies: [{ kind: 'depends-on', riskId: firstRisk.risk.riskId }],
+          },
+        },
+        history: [{ kind: 'assessment', sequence: 1 }],
+        nextBeforeHistorySequence: null,
+      },
+      activity: [{ sequence: 4, action: 'risk-transitioned' }],
+      nextBeforeActivitySequence: 4,
+    })
+    expect(firstRiskPage.dependencyOptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        riskId: firstRisk.risk.riskId,
+        status: 'closed',
+        selectable: false,
+      }),
+      expect.objectContaining({
+        riskId: secondRisk.risk.riskId,
+        status: 'research',
+        selectable: false,
+      }),
+    ]))
+    expect(firstRiskPage.dependencyOptions.map(option => option.riskId))
+      .not.toContain(crossRisk.risk.riskId)
+    expect(firstRiskPage.evidenceOptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'workbench-audit-event',
+        auditEventId: created.receipt.auditEventId,
+      }),
+      expect.objectContaining({ kind: 'project-schedule-change', scheduleChangeId }),
+    ]))
+    expect(firstRiskPage.evidenceOptions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'workbench-audit-event',
+        auditEventId: crossProject.receipt.auditEventId,
+      }),
+    ]))
+
+    const secondRiskPage = await first.workbenchAuth.run(() => first.workbench.projectRisks({
+      projectId,
+      beforeRiskSequence: firstRiskPage.nextBeforeRiskSequence ?? undefined,
+      riskLimit: 1,
+      activityLimit: 1,
+    }, new AbortController().signal))
+    expect(secondRiskPage).toMatchObject({
+      risks: [{ riskId: secondRisk.risk.riskId, sequence: 2 }],
+      nextBeforeRiskSequence: 2,
+    })
+    const thirdRiskPage = await first.workbenchAuth.run(() => first.workbench.projectRisks({
+      projectId,
+      beforeRiskSequence: secondRiskPage.nextBeforeRiskSequence ?? undefined,
+      riskLimit: 1,
+      beforeActivitySequence: firstRiskPage.nextBeforeActivitySequence ?? undefined,
+      activityLimit: 1,
+    }, new AbortController().signal))
+    expect(thirdRiskPage).toMatchObject({
+      risks: [{ riskId: firstRisk.risk.riskId, sequence: 1, status: 'closed' }],
+      nextBeforeRiskSequence: null,
+      activity: [{ sequence: 3, riskId: thirdRisk.risk.riskId }],
+    })
+
+    const durableRisks = await first.workbenchAuth.run(() => first.workbench.projectRisks({
+      projectId,
+      selectedRiskId: secondRisk.risk.riskId,
+      riskLimit: 10,
+      activityLimit: 10,
+      historyLimit: 10,
+    }, new AbortController().signal))
+    const durableCrossRisks = await first.workbenchAuth.run(() => first.workbench.projectRisks({
+      projectId: crossProjectId,
+      selectedRiskId: crossRisk.risk.riskId,
+      riskLimit: 10,
+      activityLimit: 10,
+      historyLimit: 10,
+    }, new AbortController().signal))
+    expect(durableRisks.risks).toHaveLength(3)
+    expect(durableCrossRisks.risks).toHaveLength(1)
+    expect(durableCrossRisks.evidenceOptions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'project-schedule-change', scheduleChangeId }),
+    ]))
+
     const firstService = first.workbench
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
@@ -1246,6 +1622,20 @@ describe('built Workbench Host through the real DSH Loader', () => {
       milestones: [{ eventId: CALENDAR_LOADER_EVENT_ID }],
     })
     expect(recovered?.milestones).toHaveLength(1)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.projectRisks({
+      projectId,
+      selectedRiskId: secondRisk.risk.riskId,
+      riskLimit: 10,
+      activityLimit: 10,
+      historyLimit: 10,
+    }, new AbortController().signal))).resolves.toEqual(durableRisks)
+    await expect(restarted.workbenchAuth.run(() => restarted.workbench.projectRisks({
+      projectId: crossProjectId,
+      selectedRiskId: crossRisk.risk.riskId,
+      riskLimit: 10,
+      activityLimit: 10,
+      historyLimit: 10,
+    }, new AbortController().signal))).resolves.toEqual(durableCrossRisks)
     const restartedService = restarted.workbench
     await restarted.fiber.dispose()
     contexts.splice(contexts.indexOf(restarted), 1)
