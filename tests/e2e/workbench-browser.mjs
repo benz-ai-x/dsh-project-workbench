@@ -4893,7 +4893,7 @@ async function main() {
   })
 
   process.stdout.write(
-    'PASS T11 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
+    'PASS T12 cumulative real Workbench setup -> Project Team -> low/high SuggestedChange review '
       + '-> defer/stale/reject/edit-and-accept -> five status and two risk filters '
       + '-> explicit Feishu Bot configure/verify without actor fallback '
       + '-> Project Tasks selection boundary and verified-route gate '
